@@ -6,12 +6,18 @@
  * interface, which can be built from the true state (the server, when it
  * walks a path) or from one player's view (the client, to highlight
  * reachable tiles). The highlight therefore matches what the server accepts,
- * except where the truth holds something the player cannot see.
+ * except where the truth holds something the player cannot see. With today's
+ * units that never happens within one move: every unit sees at least as far
+ * as it can walk in a turn (a table test guards this), so the server stops a
+ * move early only if the world changed after the player's view was made.
  */
 
 import type { RuleErrorCode } from '../actions';
+import { tileMoveCost } from '../data/terrain';
 import type { Ground } from '../data/terrain';
+import { UNITS } from '../data/units';
 import type { UnitClass, UnitTypeId } from '../data/units';
+import { neighbors } from '../hex';
 import type { GameState, PlayerId, TileIndex } from '../types';
 import type { PlayerView } from '../viewTypes';
 
@@ -45,7 +51,29 @@ export interface ReachStep {
 
 /** The truth, for the server. Reads `state` live: it sees later edits to the same object. */
 export function boardFromState(state: GameState): Board {
-  throw new Error('not implemented: boardFromState');
+  // Nothing is indexed up front, on purpose: the engine moves a unit on its
+  // working copy and asks again, and must get the fresh answer.
+  return {
+    width: state.map.width,
+    height: state.map.height,
+    ground(tile) {
+      const found = state.map.tiles[tile];
+      return found === undefined ? null : { terrain: found.terrain, feature: found.feature };
+    },
+    unitsAt(tile) {
+      const found: { owner: PlayerId; unitClass: UnitClass }[] = [];
+      for (const unit of Object.values(state.units)) {
+        if (unit.tile === tile) found.push({ owner: unit.owner, unitClass: UNITS[unit.type].unitClass });
+      }
+      return found;
+    },
+    cityOwnerAt(tile) {
+      for (const city of Object.values(state.cities)) {
+        if (city.tile === tile) return city.owner;
+      }
+      return null;
+    },
+  };
 }
 
 /**
@@ -53,9 +81,44 @@ export function boardFromState(state: GameState): Board {
  *  - `ground` is null for never-seen tiles.
  *  - `unitsAt` and `cityOwnerAt` report what the view contains: units on
  *    tiles in sight, cities in sight or remembered.
+ *
+ * Unlike boardFromState this is a SNAPSHOT: the units and cities of the view
+ * are sorted by tile once, here. That is right for views, which are never
+ * edited in place (a changed game means a new view object, and a new board).
  */
 export function boardFromView(view: PlayerView): Board {
-  throw new Error('not implemented: boardFromView');
+  // A view is never edited in place (a new one replaces it), so it is safe
+  // to sort its units and cities by tile once. The reachable-tile search asks
+  // about the same tiles many times.
+  const unitsByTile = new Map<TileIndex, { owner: PlayerId; unitClass: UnitClass }[]>();
+  for (const unit of view.units) {
+    const here = unitsByTile.get(unit.tile) ?? [];
+    here.push({ owner: unit.owner, unitClass: UNITS[unit.type].unitClass });
+    unitsByTile.set(unit.tile, here);
+  }
+  const cityOwnerByTile = new Map<TileIndex, PlayerId>();
+  for (const city of view.cities) cityOwnerByTile.set(city.tile, city.owner);
+
+  return {
+    width: view.width,
+    height: view.height,
+    ground(tile) {
+      const found = view.tiles[tile];
+      return found === undefined || found === null ? null : { terrain: found.terrain, feature: found.feature };
+    },
+    unitsAt(tile) {
+      return (unitsByTile.get(tile) ?? []).slice();
+    },
+    cityOwnerAt(tile) {
+      return cityOwnerByTile.get(tile) ?? null;
+    },
+  };
+}
+
+/** Movement points needed to enter a tile of this board; null if it is unknown to the board or cannot be entered. */
+function moveCostAt(board: Board, tile: TileIndex): number | null {
+  const ground = board.ground(tile);
+  return ground === null ? null : tileMoveCost(ground);
 }
 
 /**
@@ -74,7 +137,17 @@ export function canEnterTile(
   mover: { owner: PlayerId; type: UnitTypeId },
   tile: TileIndex,
 ): RuleErrorCode | null {
-  throw new Error('not implemented: canEnterTile');
+  if (moveCostAt(board, tile) === null) return 'impassable';
+
+  const cityOwner = board.cityOwnerAt(tile);
+  if (cityOwner !== null && cityOwner !== mover.owner) return 'blocked';
+
+  const moverClass = UNITS[mover.type].unitClass;
+  for (const other of board.unitsAt(tile)) {
+    if (other.owner !== mover.owner) return 'blocked';
+    if (other.unitClass === moverClass) return 'blocked';
+  }
+  return null;
 }
 
 /**
@@ -91,7 +164,53 @@ export function canEnterTile(
  * route that gives it the most moves left.
  */
 export function reachableTiles(board: Board, unit: MovingUnit): Map<TileIndex, ReachStep> {
-  throw new Error('not implemented: reachableTiles');
+  const reach = new Map<TileIndex, ReachStep>();
+  if (unit.movesLeft <= 0) return reach;
+
+  // Tiles whose neighbors have not been looked at yet. Entering a tile always
+  // costs at least 1, so a tile reached later never has more moves left than
+  // the one being expanded now: once a tile is expanded its entry is final.
+  const waiting: { tile: TileIndex; movesLeft: number }[] = [{ tile: unit.tile, movesLeft: unit.movesLeft }];
+  const expanded = new Set<TileIndex>();
+
+  while (waiting.length > 0) {
+    const current = takeBest(waiting);
+    if (expanded.has(current.tile)) continue; // an older, worse entry of a tile already done
+    expanded.add(current.tile);
+    if (current.movesLeft <= 0) continue; // arrived exhausted: cannot go on from here
+
+    for (const next of neighbors(current.tile, board)) {
+      if (next === unit.tile) continue; // the unit's own tile is never part of the answer
+      if (expanded.has(next)) continue;
+      if (canEnterTile(board, unit, next) !== null) continue;
+      const cost = moveCostAt(board, next);
+      if (cost === null) continue; // canEnterTile has ruled this out already; it keeps the types honest
+
+      const movesLeft = Math.max(0, current.movesLeft - cost);
+      const known = reach.get(next);
+      // Strictly better only: a tile keeps the FIRST route that gives it the most moves.
+      if (known !== undefined && known.movesLeft >= movesLeft) continue;
+      reach.set(next, { movesLeft, previous: current.tile });
+      waiting.push({ tile: next, movesLeft });
+    }
+  }
+  return reach;
+}
+
+/** Removes and returns the waiting entry with the most moves left; ties go to the lower tile index. */
+function takeBest(waiting: { tile: TileIndex; movesLeft: number }[]): { tile: TileIndex; movesLeft: number } {
+  let best = 0;
+  for (let i = 1; i < waiting.length; i++) {
+    const candidate = waiting[i];
+    const leader = waiting[best];
+    if (
+      candidate.movesLeft > leader.movesLeft ||
+      (candidate.movesLeft === leader.movesLeft && candidate.tile < leader.tile)
+    ) {
+      best = i;
+    }
+  }
+  return waiting.splice(best, 1)[0];
 }
 
 /**
@@ -103,9 +222,8 @@ export function reachableTiles(board: Board, unit: MovingUnit): Map<TileIndex, R
  * tile that is not in `reach`: that is the unit's own tile, which
  * reachableTiles never includes.
  *
- * (Implemented in the scaffold, unlike the rest of this file: the client's
- * controller (WP4) needs it to test "tap a reachable tile" with a hand-made
- * reach map before WP2's reachableTiles exists.)
+ * It only reads the reach map, so the client's tests can hand it a map made
+ * by hand.
  */
 export function pathTo(reach: Map<TileIndex, ReachStep>, target: TileIndex): TileIndex[] | null {
   if (!reach.has(target)) return null;

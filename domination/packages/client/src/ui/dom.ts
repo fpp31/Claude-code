@@ -40,13 +40,53 @@ export interface ElementOptions {
  */
 export function h<K extends keyof HTMLElementTagNameMap>(
   tag: K,
-  options?: ElementOptions,
+  options: ElementOptions = {},
   ...children: (Node | string)[]
 ): HTMLElementTagNameMap[K] {
-  throw new Error('not implemented: h');
+  const created = document.createElement(tag);
+  // Everything below is the same for every kind of element.
+  const element: HTMLElement = created;
+  if (options.className !== undefined) element.className = options.className;
+  if (options.text !== undefined) element.textContent = options.text;
+  if (options.testId !== undefined) element.setAttribute('data-testid', options.testId);
+  for (const [name, value] of Object.entries(options.attributes ?? {})) element.setAttribute(name, value);
+  if (options.onClick !== undefined) element.addEventListener('click', options.onClick);
+  // A <button> inside a <form> submits it unless told otherwise; ours never should.
+  if (tag === 'button' && !element.hasAttribute('type')) element.setAttribute('type', 'button');
+  element.append(...children);
+  return created;
 }
 
 /** Sets textContent only if it differs (avoids needless layout work and keeps text selections). */
 export function setText(element: HTMLElement, text: string): void {
-  throw new Error('not implemented: setText');
+  if (element.textContent !== text) element.textContent = text;
+}
+
+/** Shows or hides an element through its `hidden` attribute. */
+export function setHidden(element: HTMLElement, hidden: boolean): void {
+  if (element.hidden !== hidden) element.hidden = hidden;
+}
+
+/** Sets an attribute only if it differs, for example data-ended="true". */
+export function setAttribute(element: HTMLElement, name: string, value: string): void {
+  if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+}
+
+/** Adds or removes one CSS class. */
+export function setClass(element: HTMLElement, className: string, on: boolean): void {
+  if (element.classList.contains(className) !== on) element.classList.toggle(className, on);
+}
+
+/**
+ * Enables or disables a button (or another form control).
+ *
+ * A button that is disabled while it has the keyboard focus would swallow
+ * every key press: browsers send no key events to a disabled control, so the
+ * map shortcuts would stop working after a click on End Turn. The focus is
+ * therefore given back to the page first.
+ */
+export function setDisabled(control: HTMLButtonElement | HTMLInputElement | HTMLSelectElement, disabled: boolean): void {
+  if (control.disabled === disabled) return;
+  if (disabled && document.activeElement === control) control.blur();
+  control.disabled = disabled;
 }

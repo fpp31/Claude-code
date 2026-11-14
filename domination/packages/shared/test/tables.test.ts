@@ -132,6 +132,19 @@ describe('units', () => {
       if (UNITS[id].canFoundCity) expect(RULES.minCityDistance - 1).toBeLessThanOrEqual(UNITS[id].sight);
     }
   });
+
+  it('every unit sees at least as far as it can walk in one turn', () => {
+    // Entering a tile costs at least 1, so a unit with `moves` movement
+    // points never walks further than `moves` tiles, and with sight >= moves
+    // it could see every tile of its route when the player chose it. The
+    // tiles the client highlights are then exactly the tiles the server
+    // lets the unit reach: nothing out of sight can stop it half-way. If a
+    // faster unit is ever wanted, give it the sight to match, or accept that
+    // its moves may end early ("something is in the way").
+    for (const id of UNIT_TYPE_IDS) {
+      expect(UNITS[id].moves, `${id}: moves must not be larger than sight`).toBeLessThanOrEqual(UNITS[id].sight);
+    }
+  });
 });
 
 describe('civilizations', () => {
@@ -199,6 +212,15 @@ describe('map sizes and balance constants', () => {
     expect(RULES.maxPathLength).toBeGreaterThanOrEqual(Math.max(...UNIT_TYPE_IDS.map((id) => UNITS[id].moves)));
     // A brand-new city (centre only, one citizen with nothing to work) must not starve.
     expect(RULES.cityCenterMinYields.food).toBeGreaterThanOrEqual(RULES.foodPerCitizen);
+  });
+
+  it('the map generator scores a start by the land its first city would claim', () => {
+    // Rule S3 of generateMap ("fair starts") adds up the tiles within 2 steps
+    // of every start, which is the land a city claims today. That 2 is built
+    // into the generator (withinTwo in mapgen/grid.ts). When cityClaimRadius
+    // is changed, change the generator and its doc comment with it, then
+    // this number.
+    expect(RULES.cityClaimRadius, 'see the comment above this line').toBe(2);
   });
 
   it('growth needs more food each time', () => {

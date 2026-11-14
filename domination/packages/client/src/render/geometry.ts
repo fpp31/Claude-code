@@ -109,3 +109,50 @@ export function pixelToTile(px: number, py: number): Coord {
   }
   return { x, y };
 }
+
+/**
+ * How far inside the hexagon the pixel (x, y) of a tile box lies, counted
+ * from ONE of the six edges: 0 for the line of pixels right at that edge, 1
+ * for the next line, and so on; negative = beyond that edge. `direction` is
+ * the neighbor the edge faces, numbered as in the shared hex maths
+ * (0 = E, 1 = SE, 2 = SW, 3 = W, 4 = NW, 5 = NE).
+ *
+ * The two upright edges are counted in pixels across. The four slanted
+ * edges are staircases that move 2 pixels sideways per row, so there one
+ * step of depth is one row of the staircase (2 pixels across). Border strips
+ * and marker rings are built from this, which makes a strip look equally
+ * thick along all six edges and line up with the neighboring tile's strip.
+ *
+ * A pixel is inside the hexagon exactly when all six depths are 0 or more.
+ */
+export function hexEdgeDepth(x: number, y: number, direction: number): number {
+  // First and last column of the hexagon's rows, continued as straight lines
+  // beyond the rows where they apply (see hexRowSpan): the pointed top
+  // widens by 2 per row, the pointed bottom narrows by 2 per row.
+  const topFirst = 11 - 2 * y;
+  const topLast = 14 + 2 * y;
+  const bottomFirst = 2 + 2 * (y - ROW_PITCH);
+  const bottomLast = 23 - 2 * (y - ROW_PITCH);
+  switch (direction) {
+    case 0: return TILE_WIDTH - 1 - x;                  // E
+    case 1: return Math.floor((bottomLast - x) / 2);    // SE
+    case 2: return Math.floor((x - bottomFirst) / 2);   // SW
+    case 3: return x;                                   // W
+    case 4: return Math.floor((x - topFirst) / 2);      // NW
+    case 5: return Math.floor((topLast - x) / 2);       // NE
+    default: throw new Error(`hexEdgeDepth: ${direction} is not a direction (0..5)`);
+  }
+}
+
+/**
+ * How far inside the hexagon a pixel lies, counted from the nearest edge:
+ * 0 for the outermost ring of pixels, 1 for the ring inside it, and so on;
+ * negative = outside the hexagon.
+ */
+export function hexDepth(x: number, y: number): number {
+  let depth = hexEdgeDepth(x, y, 0);
+  for (let direction = 1; direction < 6; direction++) {
+    depth = Math.min(depth, hexEdgeDepth(x, y, direction));
+  }
+  return depth;
+}

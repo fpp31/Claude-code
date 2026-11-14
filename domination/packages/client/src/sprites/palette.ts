@@ -38,12 +38,23 @@ export const PALETTE = {
   hill: '#78d048',
   hillShade: '#38a048',
   hillLight: '#d8f890',
+  /** Hills on plains and on desert take their colours from that ground (not in the reference, which only has hills on grass). */
+  plainsHill: '#e8c838',
+  plainsHillShade: '#b89828',
+  plainsHillLight: '#fff8a8',
+  desertHill: '#f0c870',
+  desertHillShade: '#d09848',
+  desertHillLight: '#fff4c8',
 
   rock: '#c8b090',
   rockShade: '#7c6858',
   rockLight: '#f0e0c0',
   snow: '#ffffff',
   snowShade: '#b8d0f0',
+  /** Mountains in the desert are warmer sandstone (not in the reference). */
+  sandstone: '#e0a868',
+  sandstoneShade: '#a06840',
+  sandstoneLight: '#f8dca8',
 
   wall: '#f8f0d8',
   wallShade: '#c8bca0',
@@ -51,6 +62,34 @@ export const PALETTE = {
   door: '#6a4a2a',
 
   skin: '#ffd0a0',
+  /** Skin in shade: skin with 22% black, as on the right cheek of the reference soldier. */
+  skinShade: '#c7a27d',
   steel: '#ffffff',
   gold: '#f8c020',
+  /** Wood of the bow of the reference's second soldier. */
+  bow: '#e89040',
+
+  // Not in the reference: what the Scout and the Settler wear and carry.
+  hair: '#6a4a2a',
+  boot: '#8a5a32',
+  straw: '#f0d060',
+  strawShade: '#c09838',
+  strawLight: '#fff4a8',
+  sack: '#f8f0d8',
+  sackShade: '#c8bca0',
+  plank: '#c08040',
+  plankShade: '#8a5428',
+
+  /** Not in the reference: the pale line around a unit that stands among trees (sprites/rim.ts). */
+  unitRim: '#fff8e0',
+
+  // Not in the reference: selection and highlights (sprites/art/markers.ts).
+  markerWhite: '#ffffff',
+  /** Reachable tiles: a darker line on the tile's edge and inside the white ring, and a light wash over the middle. */
+  reachEdge: '#22223a80',
+  reachInner: '#22223a40',
+  reachWash: '#ffffff38',
+  hoverLine: '#ffffff99',
+  tokenLight: '#fff4a8',
+  tokenShade: '#c08818',
 } as const;

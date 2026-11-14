@@ -40,8 +40,13 @@ export interface OwnUnitDetail {
   movesLeft: number;
   /**
    * Why this unit cannot found a city where it stands right now, or null if
-   * it can (the Found City button is enabled exactly when this is null).
+   * it can (the Found City button is offered when this is null).
    * Units that are not settlers always carry 'cannotFoundCity'.
+   *
+   * It is about the unit and the tile only. Whether the player may give any
+   * order at this moment is a separate question: after End Turn this can
+   * still be null, and a foundCity action is then answered
+   * 'turnAlreadyEnded'.
    */
   foundCityError: RuleErrorCode | null;
 }
@@ -84,7 +89,12 @@ export interface OwnCityDetail {
   /** Cost of the current item; null if nothing is chosen. */
   productionCost: number | null;
   productionPerTurn: number;
-  /** Turns until the current item is done; null if nothing is chosen or the city makes no production. */
+  /**
+   * Turns until the current item is paid for; null if nothing is chosen or
+   * the city makes no production. Never less than 1: an item that is already
+   * paid for appears when the turn resolves. It is the `turns` of the item's
+   * entry in `buildOptions`, and it ignores `productionBlocked`.
+   */
   turnsLeft: number | null;
   /**
    * Set while something other than production keeps the current item from

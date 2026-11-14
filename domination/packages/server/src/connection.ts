@@ -2,8 +2,18 @@
  * One WebSocket connection: from raw text frames to calls on a Room.
  */
 
-import type { WebSocket } from 'ws';
+import { PROTOCOL_VERSION, SERVER_SILENCE_TIMEOUT_MS } from '@domination/shared';
+import type { ClientMessage } from '@domination/shared';
+import type { RawData, WebSocket } from 'ws';
+import { MAX_BAD_MESSAGES, MAX_MESSAGES_PER_SECOND, MAX_SEND_BACKLOG_BYTES } from './config';
+import { describeError, errorMessage } from './errors';
+import { parseClientMessage } from './parseMessage';
+import type { ClientLink, Outcome, Room } from './room';
 import type { RoomManager } from './roomManager';
+import { hashToken, isValidToken, newToken, normalizeGameCode } from './tokens';
+
+/** WebSocket close code "policy violation": the server ends a connection that does not keep to the rules. */
+const CLOSE_POLICY_VIOLATION = 1008;
 
 /**
  * Takes over a freshly opened socket. Everything a socket can do goes
@@ -12,11 +22,12 @@ import type { RoomManager } from './roomManager';
  * open any more the message is dropped.
  *
  *  - Every incoming frame is parsed with parseClientMessage. Not a valid
- *    message -> `error badMessage` (after 5 of those, close the socket).
+ *    message -> `error badMessage` (after MAX_BAD_MESSAGES of those, close
+ *    the socket with code 1008, "policy violation").
  *  - More than MAX_MESSAGES_PER_SECOND messages in a second -> the extra
  *    ones are dropped with `error rateLimited`.
  *  - `hello` must come first; anything else before it -> `error notReady`.
- *    A wrong `protocol` -> `error protocolMismatch`, then close. Otherwise
+ *    A wrong `protocol` -> `error protocolMismatch`, then close (1008). Otherwise
  *    remember the token (make a new one with newToken if the client sent
  *    null or something that is not a valid token) and answer `welcome`.
  *    The token is kept only in memory, as its hash; never log it.
@@ -47,16 +58,271 @@ import type { RoomManager } from './roomManager';
  *    and message.
  *
  *  - LIVENESS: a socket from which NO frame has arrived for
- *    SERVER_SILENCE_TIMEOUT_MS is closed (any frame counts, valid or not).
+ *    SERVER_SILENCE_TIMEOUT_MS is cut off (any frame counts, valid or not).
  *    The limit is generous on purpose; see the note on liveness in
  *    shared/src/protocol.ts before changing it.
+ *  - BACKLOG: a socket that has stopped reading, so that more than
+ *    MAX_SEND_BACKLOG_BYTES wait to be sent to it, is cut off as well.
+ *    Both of these end the connection at once (terminate) instead of with
+ *    a polite close: the other side is not listening any more.
  *  - On close (for any reason): detach from the room and stop the timers.
  *
  * An exception while handling a message must never take the server down:
  * catch it, write it to `log`, and answer `error serverError` with
  * SERVER_ERROR_MESSAGE. Never put the exception's own text into a message
  * for a client (it may name things the player must not know about).
+ *
+ * @param maxMessagesPerSecond  the rate limit; MAX_MESSAGES_PER_SECOND unless
+ *                              a test says otherwise (ServerOptions.maxMessagesPerSecond)
  */
-export function handleConnection(socket: WebSocket, rooms: RoomManager, log: (line: string) => void): void {
-  throw new Error('not implemented: handleConnection');
+export function handleConnection(
+  socket: WebSocket,
+  rooms: RoomManager,
+  log: (line: string) => void,
+  maxMessagesPerSecond: number = MAX_MESSAGES_PER_SECOND,
+): void {
+  /** SHA-256 of this socket's token; null until `hello` has been answered. The token itself is not kept. */
+  let tokenHash: string | null = null;
+  /** The room this socket was last attached to. The room has the final word on whether it still is. */
+  let room: Room | null = null;
+  /** How many frames were not valid messages. */
+  let badMessages = 0;
+  /**
+   * Rate limit: when the current one-second window began, and how many
+   * frames arrived in it. (The first frame always opens a fresh window.)
+   */
+  let windowStart = Number.NEGATIVE_INFINITY;
+  let framesInWindow = 0;
+  /** True once the connection is finished (closed, or being closed by us): later frames are ignored. */
+  let over = false;
+
+  const link: ClientLink = {
+    seq: 0,
+    lastView: null,
+    send(message) {
+      // MUST NEVER THROW (see ClientLink.send): whatever goes wrong, the message is dropped.
+      try {
+        if (socket.readyState !== socket.OPEN) return;
+        if (socket.bufferedAmount > MAX_SEND_BACKLOG_BYTES) {
+          // The other side has stopped reading; see MAX_SEND_BACKLOG_BYTES.
+          // Only cut the line here: a room may be in the middle of sending,
+          // so leaving the room waits for the 'close' event below.
+          over = true;
+          socket.terminate();
+          return;
+        }
+        socket.send(JSON.stringify(message));
+      } catch (error) {
+        log(`A message could not be sent and was dropped. ${describeError(error)}`);
+      }
+    },
+  };
+
+  // LIVENESS: re-armed by every frame; if it ever fires, the socket has been silent for too long.
+  const silenceTimer = setTimeout(() => {
+    try {
+      finish();
+      socket.terminate();
+    } catch (error) {
+      log(`Closing a silent connection failed. ${describeError(error)}`);
+    }
+  }, SERVER_SILENCE_TIMEOUT_MS);
+
+  /** The end of this connection, for whatever reason: stop the timer and leave the room. Safe to call twice. */
+  function finish(): void {
+    over = true;
+    clearTimeout(silenceTimer);
+    const attachedTo = room;
+    room = null;
+    attachedTo?.detach(link);
+  }
+
+  /** Ends a connection that does not keep to the rules. */
+  function closeSocket(reason: string): void {
+    finish();
+    socket.close(CLOSE_POLICY_VIOLATION, reason);
+  }
+
+  function sendFailure(outcome: Outcome): void {
+    if (!outcome.ok) link.send(errorMessage(outcome.code));
+  }
+
+  /** Answers a frame that was not a valid message; the fifth one ends the connection. */
+  function refuseBadMessage(): void {
+    badMessages += 1;
+    link.send(errorMessage('badMessage'));
+    if (badMessages >= MAX_BAD_MESSAGES) closeSocket('too many bad messages');
+  }
+
+  /** Counts a frame and says whether it is one too many for this second. */
+  function isOverRateLimit(): boolean {
+    // performance.now() never jumps, unlike the wall clock.
+    const now = performance.now();
+    if (now - windowStart >= 1000) {
+      windowStart = now;
+      framesInWindow = 0;
+    }
+    framesInWindow += 1;
+    return framesInWindow > maxMessagesPerSecond;
+  }
+
+  /**
+   * The socket is now attached to `target` (a join or a create succeeded).
+   * Only now is it detached from the room it was in before; its seat there
+   * is kept.
+   */
+  function moveTo(target: Room): void {
+    if (room !== null && room !== target) room.detach(link);
+    room = target;
+  }
+
+  function onFrame(data: RawData, isBinary: boolean): void {
+    if (isOverRateLimit()) {
+      link.send(errorMessage('rateLimited'));
+      return;
+    }
+
+    // The protocol is JSON text; a binary frame is never a message.
+    const message = isBinary ? null : parseClientMessage(textOf(data));
+    if (message === null) {
+      refuseBadMessage();
+      return;
+    }
+
+    if (tokenHash === null) {
+      if (message.type === 'hello') onHello(message.protocol, message.token);
+      else link.send(errorMessage('notReady'));
+      return;
+    }
+    onMessage(message, tokenHash);
+  }
+
+  function onHello(protocol: number, token: string | null): void {
+    if (protocol !== PROTOCOL_VERSION) {
+      link.send(errorMessage('protocolMismatch'));
+      closeSocket('protocol mismatch');
+      return;
+    }
+    // Anything that is not a token of ours (null on a first visit) gets a fresh one.
+    const accepted = isValidToken(token) ? token : newToken();
+    tokenHash = hashToken(accepted);
+    link.send({ type: 'welcome', protocol: PROTOCOL_VERSION, token: accepted });
+  }
+
+  /** A valid message from a socket that has said hello. `hash` is its token hash. */
+  function onMessage(message: ClientMessage, hash: string): void {
+    switch (message.type) {
+      case 'hello':
+        // Already greeted: a second hello is not part of the conversation.
+        refuseBadMessage();
+        return;
+
+      case 'ping':
+        link.send({ type: 'pong' });
+        return;
+
+      case 'createGame': {
+        const created = rooms.createRoom(link, hash, message.name);
+        if (created.ok) moveTo(created.room);
+        else sendFailure(created);
+        return;
+      }
+
+      case 'joinGame': {
+        const code = normalizeGameCode(message.code);
+        const target = code === null ? null : rooms.findRoom(code);
+        if (target === null) {
+          link.send(errorMessage('noSuchGame'));
+          return;
+        }
+        // Join FIRST. If it fails, the socket stays in the room it was in, untouched.
+        const joined = target.join(link, hash, message.name);
+        if (joined.ok) moveTo(target);
+        else sendFailure(joined);
+        return;
+      }
+
+      case 'leaveGame': {
+        if (room === null) {
+          link.send(errorMessage('notInGame'));
+          return;
+        }
+        const leftRoom = room;
+        const left = leftRoom.leave(link); // the room sends `left` itself
+        if (!left.ok) {
+          // 'notInGame' means the room had already let go of this socket.
+          if (left.code === 'notInGame') room = null;
+          sendFailure(left);
+          return;
+        }
+        room = null;
+        if (left.roomEmpty) rooms.removeRoom(leftRoom.code);
+        return;
+      }
+
+      case 'chooseCiv':
+        if (room === null) link.send(errorMessage('notInGame'));
+        else sendFailure(room.chooseCiv(link, message.civ));
+        return;
+
+      case 'setMapSize':
+        if (room === null) link.send(errorMessage('notInGame'));
+        else sendFailure(room.setMapSize(link, message.mapSize));
+        return;
+
+      case 'startGame':
+        if (room === null) link.send(errorMessage('notInGame'));
+        else sendFailure(room.start(link));
+        return;
+
+      case 'resync':
+        if (room === null) link.send(errorMessage('notInGame'));
+        else sendFailure(room.resync(link));
+        return;
+
+      case 'action':
+        // The room answers actions itself (actionOk / actionRejected carry the requestId).
+        if (room === null) link.send(errorMessage('notInGame'));
+        else room.action(link, message.requestId, message.turn, message.action);
+        return;
+
+      default: {
+        // If a message type is ever added to the protocol, this line stops compiling until it is handled here.
+        const unhandled: never = message;
+        throw new Error(`unhandled message type: ${JSON.stringify(unhandled)}`);
+      }
+    }
+  }
+
+  socket.on('message', (data, isBinary) => {
+    if (over) return;
+    silenceTimer.refresh(); // any frame counts as a sign of life, valid or not
+    try {
+      onFrame(data, isBinary);
+    } catch (error) {
+      // Never the exception's own text to the client: it may name things the player must not know.
+      log(`A message could not be handled. ${describeError(error)}`);
+      link.send(errorMessage('serverError'));
+    }
+  });
+
+  socket.on('close', () => {
+    try {
+      finish();
+    } catch (error) {
+      log(`Cleaning up a closed connection failed. ${describeError(error)}`);
+    }
+  });
+
+  // Without a listener, an 'error' event (an oversized or broken frame, a
+  // connection reset) would stop the whole server. The socket closes itself
+  // afterwards and 'close' above does the cleaning up.
+  socket.on('error', () => {});
+}
+
+/** The text of a frame. `ws` hands it over as bytes, in one piece or several. */
+function textOf(data: RawData): string {
+  if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8');
+  return data.toString('utf8');
 }

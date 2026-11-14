@@ -13,6 +13,10 @@ export const TEST_IDS = {
   homeCreateButton: 'home-create-button',
   homeCodeInput: 'home-code-input',
   homeJoinButton: 'home-join-button',
+  /** The first paragraph: the welcome, or "You are invited to game K7QXM...". */
+  homeIntro: 'home-intro',
+  /** The line under the code field; it says why a game cannot be joined. */
+  homeCodeHint: 'home-code-hint',
 
   // Lobby screen
   lobbyCode: 'lobby-code',
@@ -38,6 +42,9 @@ export const TEST_IDS = {
   topConnection: 'top-connection',
   /** Has the attribute data-ended="true|false" for the viewer's own state. */
   endTurnButton: 'end-turn-button',
+
+  /** The "First steps" note at the start of a game (shown while nothing is selected and the player has no city). */
+  startHint: 'start-hint',
 
   unitPanel: 'unit-panel',
   unitName: 'unit-name',

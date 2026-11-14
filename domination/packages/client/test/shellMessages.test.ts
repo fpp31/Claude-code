@@ -1,0 +1,470 @@
+import { describe, expect, it } from 'vitest';
+import { cloneJson, RULE_ERROR_MESSAGES, SERVER_ERROR_MESSAGE } from '@domination/shared';
+import type { ClientMessage, GameEvent, ServerMessage } from '@domination/shared';
+import { sampleLobby, sampleView } from '@domination/shared/testing';
+import { describeEvent, handleServerMessage } from '../src/state/serverMessages';
+import { createStore, initialState } from '../src/state/store';
+import type { AppState, Store } from '../src/state/store';
+import { MAX_TOASTS, showToast } from '../src/ui/toasts';
+import { SAMPLE, storeInGame, viewOf } from './shellKit';
+
+/**
+ * What each message from the server does to the store. No socket is
+ * involved: the messages are handed straight to handleServerMessage, and
+ * `replies` collects what it sends back.
+ */
+
+/** Applies messages to a store, one after the other, and returns what was sent in reply. */
+function deliver(store: Store, ...messages: ServerMessage[]): ClientMessage[] {
+  const replies: ClientMessage[] = [];
+  for (const message of messages) handleServerMessage(store, message, (reply) => replies.push(reply));
+  return replies;
+}
+
+function gameSync(seq: number, changes: Partial<Extract<ServerMessage, { type: 'gameSync' }>> = {}): ServerMessage {
+  return { type: 'gameSync', code: SAMPLE.code, seq, view: sampleView(), connected: [SAMPLE.me], events: [], ...changes };
+}
+
+describe('handleServerMessage (WP4)', () => {
+  it('welcome changes nothing in the store', () => {
+    const store = storeInGame({ busy: true });
+    const before = store.get();
+    let notified = 0;
+    store.subscribe(() => {
+      notified += 1;
+    });
+
+    const replies = deliver(store, { type: 'welcome', protocol: 1, token: 'secret' }, { type: 'pong' });
+
+    expect(store.get()).toBe(before);
+    expect(notified).toBe(0);
+    expect(replies).toEqual([]);
+  });
+
+  it('lobby: sets the lobby and clears the game and joining', () => {
+    const store = storeInGame({ joining: SAMPLE.code });
+    const lobby = sampleLobby();
+
+    deliver(store, { type: 'lobby', lobby });
+
+    expect(store.get().lobby).toEqual(lobby);
+    expect(store.get().game).toBeNull();
+    expect(store.get().joining).toBeNull();
+  });
+
+  it('gameSync: sets the game session with its seq, awaitingSync false, and clears the lobby, joining and busy', () => {
+    const store = createStore(initialState('Ada', SAMPLE.code));
+    store.set({ lobby: sampleLobby(), busy: true });
+    const view = sampleView();
+
+    deliver(store, { type: 'gameSync', code: SAMPLE.code, seq: 41, view, connected: ['p1', 'p2'], events: [] });
+
+    expect(store.get().game).toEqual({ code: SAMPLE.code, view, connected: ['p1', 'p2'], seq: 41, awaitingSync: false });
+    expect(store.get().lobby).toBeNull();
+    expect(store.get().joining).toBeNull();
+    expect(store.get().busy).toBe(false);
+  });
+
+  it('gameSync takes whatever seq it carries, also a lower one, and ends a wait for a resync', () => {
+    const store = storeInGame();
+    deliver(store, { type: 'gameUpdate', seq: 99, patch: { turn: 8 }, events: [] }); // a gap: now waiting
+    expect(store.get().game?.awaitingSync).toBe(true);
+
+    deliver(store, gameSync(2));
+
+    expect(store.get().game?.seq).toBe(2);
+    expect(store.get().game?.awaitingSync).toBe(false);
+  });
+
+  it('gameUpdate with seq + 1: applies the patch and keeps unchanged parts of the view', () => {
+    const store = storeInGame();
+    const before = viewOf(store);
+    const players = cloneJson(before.players);
+    players[0].endedTurn = true;
+
+    const replies = deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 8, players }, events: [] });
+
+    const after = viewOf(store);
+    expect(after).not.toBe(before); // a new view object, the old one is not edited
+    expect(before.turn).toBe(7);
+    expect(after.turn).toBe(8);
+    expect(after.players).toEqual(players);
+    // The parts the patch did not name are the very same objects as before.
+    expect(after.units).toBe(before.units);
+    expect(after.cities).toBe(before.cities);
+    expect(after.tiles).toBe(before.tiles);
+    expect(store.get().game?.seq).toBe(6);
+    expect(replies).toEqual([]);
+  });
+
+  it('gameUpdate with a gap in seq: changes nothing but awaitingSync, sends resync once, and ignores every update until the next gameSync', () => {
+    const store = storeInGame();
+    const before = store.get();
+    const view = viewOf(store);
+
+    // seq 5 was the last one applied, so 7 means that 6 went missing.
+    const replies = deliver(
+      store,
+      { type: 'gameUpdate', seq: 7, patch: { turn: 8 }, events: [{ type: 'turnStarted', turn: 8 }] },
+      { type: 'gameUpdate', seq: 8, patch: { turn: 9 }, events: [] },
+      { type: 'gameUpdate', seq: 6, patch: { turn: 10 }, events: [] }, // even the "right" number is ignored now
+    );
+
+    expect(replies).toEqual([{ type: 'resync' }]);
+    expect(store.get()).toEqual({ ...before, game: { ...before.game, awaitingSync: true } });
+    expect(viewOf(store)).toBe(view);
+
+    // The full view puts everything right, and updates count on from its seq.
+    const synced = sampleView();
+    synced.turn = 9;
+    deliver(store, gameSync(20, { view: synced }), { type: 'gameUpdate', seq: 21, patch: { turn: 10 }, events: [] });
+    expect(viewOf(store).turn).toBe(10);
+    expect(store.get().game?.seq).toBe(21);
+    expect(store.get().game?.awaitingSync).toBe(false);
+  });
+
+  it('gameUpdate with a seq that is not one higher (a repeat or an old one) also asks for a resync', () => {
+    const store = storeInGame();
+    const replies = deliver(store, { type: 'gameUpdate', seq: 5, patch: { turn: 8 }, events: [] });
+    expect(replies).toEqual([{ type: 'resync' }]);
+    expect(viewOf(store).turn).toBe(7);
+  });
+
+  it('gameUpdate and presence without a game are ignored', () => {
+    const store = createStore(initialState('Ada'));
+    const before = store.get();
+    const replies = deliver(
+      store,
+      { type: 'gameUpdate', seq: 1, patch: { turn: 2 }, events: [] },
+      { type: 'presence', connected: ['p1'] },
+    );
+    expect(store.get()).toBe(before);
+    expect(replies).toEqual([]);
+  });
+
+  it('presence: updates the connected list only', () => {
+    const store = storeInGame({ busy: true, selection: { kind: 'unit', unitId: SAMPLE.warriorId } });
+    const before = store.get();
+
+    deliver(store, { type: 'presence', connected: ['p2'] });
+
+    expect(store.get()).toEqual({ ...before, game: { ...before.game, connected: ['p2'] } });
+    expect(viewOf(store)).toBe(before.game?.view);
+  });
+
+  it('actionOk and actionRejected clear busy; a rejection adds an error toast with the message', () => {
+    const store = storeInGame({ busy: true });
+    deliver(store, { type: 'actionOk', requestId: 1 });
+    expect(store.get().busy).toBe(false);
+    expect(store.get().toasts).toEqual([]);
+
+    store.set({ busy: true });
+    const message = RULE_ERROR_MESSAGES.blocked;
+    deliver(store, { type: 'actionRejected', requestId: 2, error: { code: 'blocked', message } });
+    expect(store.get().busy).toBe(false);
+    expect(store.get().toasts.map((toast) => [toast.kind, toast.text])).toEqual([['error', message]]);
+  });
+
+  it('error clears busy and joining and adds a toast; nameRequired adds no toast', () => {
+    const store = storeInGame({ busy: true, joining: SAMPLE.code });
+    deliver(store, { type: 'error', code: 'serverError', message: SERVER_ERROR_MESSAGE });
+    expect(store.get().busy).toBe(false);
+    expect(store.get().joining).toBeNull();
+    expect(store.get().toasts.map((toast) => [toast.kind, toast.text])).toEqual([['error', SERVER_ERROR_MESSAGE]]);
+
+    const home = createStore(initialState('Ada', SAMPLE.code));
+    home.set({ busy: true });
+    deliver(home, { type: 'error', code: 'nameRequired', message: 'whatever the server says' });
+    expect(home.get().busy).toBe(false);
+    expect(home.get().joining).toBeNull();
+    expect(home.get().toasts).toEqual([]);
+  });
+
+  it('error noSuchGame clears joining and shows the toast, so the home screen appears with the reason', () => {
+    const store = createStore(initialState('Ada', SAMPLE.code));
+    deliver(store, { type: 'error', code: 'noSuchGame', message: 'the server text' });
+    expect(store.get().joining).toBeNull();
+    expect(store.get().toasts.map((toast) => toast.kind)).toEqual(['error']);
+  });
+
+  it('a refused join that trying again cannot cure is remembered, so the home screen can go on saying why', () => {
+    for (const code of ['noSuchGame', 'gameAlreadyStarted', 'gameFull'] as const) {
+      const store = createStore(initialState('Cleo', SAMPLE.code));
+      deliver(store, { type: 'error', code, message: 'the server text' });
+      expect(store.get().joinProblem).toBe(code);
+      expect(store.get().joining).toBeNull();
+
+      // The toast goes away after a few seconds; the reason must not go with it.
+      store.set({ toasts: [] });
+      expect(store.get().joinProblem).toBe(code);
+    }
+  });
+
+  it('the join problem is forgotten when the game turns out to be open, and when a game is entered or left', () => {
+    const refused = (): Store => {
+      const store = createStore(initialState('Cleo', SAMPLE.code));
+      deliver(store, { type: 'error', code: 'gameFull', message: 'the server text' });
+      expect(store.get().joinProblem).toBe('gameFull');
+      return store;
+    };
+
+    // Somebody left the lobby meanwhile: the server now asks for a name, so there is a seat.
+    const open = refused();
+    deliver(open, { type: 'error', code: 'nameRequired', message: 'the server text' });
+    expect(open.get().joinProblem).toBeNull();
+
+    const inLobby = refused();
+    deliver(inLobby, { type: 'lobby', lobby: sampleLobby() });
+    expect(inLobby.get().joinProblem).toBeNull();
+
+    const inGame = refused();
+    deliver(inGame, gameSync(1));
+    expect(inGame.get().joinProblem).toBeNull();
+
+    const left = refused();
+    deliver(left, { type: 'left' });
+    expect(left.get().joinProblem).toBeNull();
+  });
+
+  it('an error that says nothing about the game leaves the join problem as it was', () => {
+    const store = createStore(initialState('Cleo', SAMPLE.code));
+    deliver(store, { type: 'error', code: 'gameAlreadyStarted', message: 'the server text' });
+    deliver(store, { type: 'error', code: 'rateLimited', message: 'the server text' });
+    expect(store.get().joinProblem).toBe('gameAlreadyStarted');
+
+    // And such an error alone sets none.
+    const fresh = createStore(initialState('Cleo'));
+    deliver(fresh, { type: 'error', code: 'serverError', message: SERVER_ERROR_MESSAGE });
+    expect(fresh.get().joinProblem).toBeNull();
+  });
+
+  it('error protocolMismatch: where the page cannot reload itself (again), a fatal message is set instead of a toast', () => {
+    // In plain Node reloadPageOnce() answers false, exactly as it does in a
+    // browser tab that has already been reloaded once.
+    const store = createStore(initialState('Ada', SAMPLE.code));
+    store.set({ busy: true });
+    deliver(store, { type: 'error', code: 'protocolMismatch', message: 'the server text' });
+    expect(store.get().fatalMessage).not.toBeNull();
+    expect(store.get().toasts).toEqual([]);
+    expect(store.get().busy).toBe(false);
+    expect(store.get().joining).toBeNull();
+  });
+
+  it('left: clears lobby, game, selection and joining', () => {
+    const store = storeInGame({
+      lobby: sampleLobby(),
+      selection: { kind: 'city', cityId: SAMPLE.romeId },
+      joining: SAMPLE.code,
+      busy: true,
+      hoverTile: 3,
+    });
+
+    deliver(store, { type: 'left' });
+
+    const state = store.get();
+    expect(state.lobby).toBeNull();
+    expect(state.game).toBeNull();
+    expect(state.selection).toBeNull();
+    expect(state.joining).toBeNull();
+    expect(state.busy).toBe(false);
+    expect(state.hoverTile).toBeNull();
+  });
+
+  it('drops the selection when the selected unit or city is no longer in the view', () => {
+    // A unit that is gone after an update (the Settler founded a city).
+    const store = storeInGame({ selection: { kind: 'unit', unitId: SAMPLE.settlerId } });
+    const units = viewOf(store).units.filter((unit) => unit.id !== SAMPLE.settlerId);
+    deliver(store, { type: 'gameUpdate', seq: 6, patch: { units }, events: [] });
+    expect(store.get().selection).toBeNull();
+
+    // A selection that is still there is kept.
+    store.set({ selection: { kind: 'unit', unitId: SAMPLE.warriorId } });
+    deliver(store, { type: 'gameUpdate', seq: 7, patch: { turn: 8 }, events: [] });
+    expect(store.get().selection).toEqual({ kind: 'unit', unitId: SAMPLE.warriorId });
+
+    // A city that is gone from a full view.
+    store.set({ selection: { kind: 'city', cityId: SAMPLE.romeId } });
+    const withoutRome = sampleView();
+    withoutRome.cities = withoutRome.cities.filter((city) => city.id !== SAMPLE.romeId);
+    deliver(store, gameSync(8, { view: withoutRome }));
+    expect(store.get().selection).toBeNull();
+
+    // A unit that now belongs to somebody else is no longer ours to select.
+    const store2 = storeInGame({ selection: { kind: 'unit', unitId: SAMPLE.warriorId } });
+    const captured = cloneJson(viewOf(store2).units);
+    const warrior = captured.find((unit) => unit.id === SAMPLE.warriorId);
+    if (warrior === undefined) throw new Error('the sample view has no warrior');
+    warrior.owner = SAMPLE.other;
+    warrior.own = null;
+    deliver(store2, { type: 'gameUpdate', seq: 6, patch: { units: captured }, events: [] });
+    expect(store2.get().selection).toBeNull();
+  });
+
+  it('gameSync for another game drops the selection and the hovered tile, even if the ids happen to match', () => {
+    const store = storeInGame({ selection: { kind: 'unit', unitId: SAMPLE.warriorId }, hoverTile: 9 });
+    deliver(store, gameSync(1, { code: 'ZZZZZ' }));
+    expect(store.get().game?.code).toBe('ZZZZZ');
+    expect(store.get().selection).toBeNull();
+    expect(store.get().hoverTile).toBeNull();
+  });
+
+  it('events become info toasts, in order; events that need no words add none', () => {
+    const store = storeInGame();
+    const events: GameEvent[] = [
+      { type: 'unitMoved', playerId: 'p1', unitId: SAMPLE.warriorId, from: 1, path: [2], stoppedEarly: false },
+      { type: 'cityGrew', playerId: 'p1', cityId: SAMPLE.romeId, name: 'Rome', population: 3 },
+      { type: 'turnStarted', turn: 8 },
+    ];
+    deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 8 }, events });
+
+    const view = viewOf(store);
+    expect(store.get().toasts.map((toast) => [toast.kind, toast.text])).toEqual([
+      ['info', describeEvent(events[1], view)],
+      ['info', describeEvent(events[2], view)],
+    ]);
+  });
+
+  it('ends up with the same state whether events are present or stripped from the messages', () => {
+    const afterMove = sampleView();
+    afterMove.units[0].tile = SAMPLE.warriorTile + 1;
+    const afterCity = cloneJson(afterMove);
+    afterCity.units = afterCity.units.filter((unit) => unit.id !== SAMPLE.settlerId);
+    afterCity.cities.push({
+      id: 'c1_new', owner: 'p1', name: 'Ostia', tile: SAMPLE.settlerTile, population: 1, visible: true, own: null,
+    });
+
+    const script: ServerMessage[] = [
+      { type: 'gameSync', code: SAMPLE.code, seq: 1, view: sampleView(), connected: ['p1', 'p2'], events: [{ type: 'turnStarted', turn: 7 }] },
+      {
+        type: 'gameUpdate', seq: 2, patch: { units: afterMove.units },
+        events: [{ type: 'unitMoved', playerId: 'p1', unitId: SAMPLE.warriorId, from: SAMPLE.warriorTile, path: [SAMPLE.warriorTile + 1], stoppedEarly: true }],
+      },
+      { type: 'actionOk', requestId: 1 },
+      {
+        type: 'gameUpdate', seq: 3, patch: { units: afterCity.units, cities: afterCity.cities },
+        events: [{ type: 'cityFounded', playerId: 'p1', cityId: 'c1_new', name: 'Ostia', tile: SAMPLE.settlerTile }],
+      },
+      { type: 'presence', connected: ['p1'] },
+      {
+        type: 'gameUpdate', seq: 4, patch: { turn: 8 },
+        events: [
+          { type: 'cityGrew', playerId: 'p1', cityId: SAMPLE.romeId, name: 'Rome', population: 3 },
+          { type: 'unitBuilt', playerId: 'p1', cityId: SAMPLE.romeId, cityName: 'Rome', unitId: 'u1_new', unitType: 'warrior' },
+          { type: 'turnStarted', turn: 8 },
+        ],
+      },
+    ];
+    const withoutEvents = script.map((message) => (message.type === 'gameSync' || message.type === 'gameUpdate' ? { ...message, events: [] } : message));
+
+    const play = (messages: ServerMessage[]): AppState => {
+      const [first, ...rest] = cloneJson(messages);
+      const store = createStore(initialState('Ada', SAMPLE.code));
+      store.set({ connection: 'online' });
+      deliver(store, first);
+      // The player selects the Settler, which the later city-founding update removes.
+      store.set({ selection: { kind: 'unit', unitId: SAMPLE.settlerId } });
+      deliver(store, ...rest);
+      return store.get();
+    };
+
+    const loud = play(script);
+    const quiet = play(withoutEvents);
+
+    // Toasts are the one thing events are for; everything else must match.
+    expect(loud.toasts.length).toBeGreaterThan(0);
+    expect(quiet.toasts).toEqual([]);
+    expect({ ...loud, toasts: [] }).toEqual({ ...quiet, toasts: [] });
+    expect(loud.selection).toBeNull();
+    expect(loud.game?.view).toEqual({ ...afterCity, turn: 8 });
+  });
+});
+
+describe('describeEvent (WP4)', () => {
+  const view = sampleView();
+
+  it('gives one short sentence for news the player should hear', () => {
+    // The exact wording is free to change (edit the expectations with it);
+    // what matters is that each sentence names the right thing.
+    expect(describeEvent({ type: 'cityGrew', playerId: 'p1', cityId: SAMPLE.romeId, name: 'Rome', population: 2 }, view)).toBe('Rome grew to 2.');
+    expect(
+      describeEvent({ type: 'unitBuilt', playerId: 'p1', cityId: SAMPLE.romeId, cityName: 'Rome', unitId: 'u1_new', unitType: 'warrior' }, view),
+    ).toBe('Warrior completed in Rome.');
+    expect(describeEvent({ type: 'turnStarted', turn: 8 }, view)).toBe('Turn 8 has begun.');
+    expect(describeEvent({ type: 'cityFounded', playerId: 'p1', cityId: 'c1_new', name: 'Ostia', tile: 5 }, view)).toBe('You founded Ostia.');
+  });
+
+  it('names the other player when somebody else founds a city', () => {
+    const text = describeEvent({ type: 'cityFounded', playerId: 'p2', cityId: 'c2_new', name: 'Memphis', tile: 5 }, view);
+    expect(text).toContain('Ben');
+    expect(text).toContain('Memphis');
+  });
+
+  it('says nothing about an ordinary move, but explains an own unit that stopped early', () => {
+    const move: GameEvent = { type: 'unitMoved', playerId: 'p1', unitId: SAMPLE.warriorId, from: 1, path: [2, 3], stoppedEarly: false };
+    expect(describeEvent(move, view)).toBeNull();
+    expect(describeEvent({ ...move, stoppedEarly: true }, view)).toContain('Warrior');
+    // Somebody else's unit stopping early is none of this player's business.
+    expect(describeEvent({ ...move, playerId: 'p2', unitId: SAMPLE.foreignWarriorId, stoppedEarly: true }, view)).toBeNull();
+  });
+});
+
+describe('toasts in the store (WP4)', () => {
+  it('showToast adds toasts newest last, with ids that only go up', () => {
+    const store = createStore(initialState(''));
+    showToast(store, 'first', 'info');
+    showToast(store, 'second', 'error');
+    const toasts = store.get().toasts;
+    expect(toasts.map((toast) => [toast.text, toast.kind])).toEqual([
+      ['first', 'info'],
+      ['second', 'error'],
+    ]);
+    expect(toasts[1].id).toBeGreaterThan(toasts[0].id);
+  });
+
+  it('an id is never used twice, also after earlier toasts have gone', () => {
+    const store = createStore(initialState(''));
+    showToast(store, 'first', 'info');
+    const firstId = store.get().toasts[0].id;
+    store.set({ toasts: [] }); // it timed out
+    showToast(store, 'second', 'info');
+    expect(store.get().toasts[0].id).toBeGreaterThan(firstId);
+  });
+
+  it('a message is never on screen twice: saying it again moves it to the end with a new id', () => {
+    const store = createStore(initialState(''));
+    showToast(store, 'This game is full.', 'error');
+    showToast(store, 'Turn 2 has begun.', 'info');
+    const firstId = store.get().toasts[0].id;
+
+    showToast(store, 'This game is full.', 'error');
+
+    const toasts = store.get().toasts;
+    expect(toasts.map((toast) => toast.text)).toEqual(['Turn 2 has begun.', 'This game is full.']);
+    expect(toasts[1].id).toBeGreaterThan(firstId); // a new toast, so its four seconds start again
+
+    // The same words as another kind of message are another message.
+    showToast(store, 'This game is full.', 'info');
+    expect(store.get().toasts.map((toast) => [toast.text, toast.kind])).toEqual([
+      ['Turn 2 has begun.', 'info'],
+      ['This game is full.', 'error'],
+      ['This game is full.', 'info'],
+    ]);
+  });
+
+  it('the same refusal twice in a row (the page asks, then the player presses Join) leaves one toast', () => {
+    const store = createStore(initialState('Cleo', SAMPLE.code));
+    const refusal: ServerMessage = { type: 'error', code: 'gameFull', message: 'This game is full.' };
+    handleServerMessage(store, refusal, () => {});
+    handleServerMessage(store, refusal, () => {});
+    expect(store.get().toasts.map((toast) => toast.text)).toEqual(['This game is full.']);
+  });
+
+  it('keeps only the newest few: a flood of news pushes the oldest out', () => {
+    const store = createStore(initialState(''));
+    for (let index = 1; index <= MAX_TOASTS + 3; index++) showToast(store, `news ${index}`, 'info');
+    const texts = store.get().toasts.map((toast) => toast.text);
+    expect(texts).toHaveLength(MAX_TOASTS);
+    expect(texts[texts.length - 1]).toBe(`news ${MAX_TOASTS + 3}`);
+    expect(texts[0]).toBe('news 4');
+  });
+});

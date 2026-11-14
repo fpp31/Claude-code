@@ -2,6 +2,9 @@
  * Server settings, read from environment variables once at start-up.
  */
 
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 export interface ServerConfig {
   /** TCP port for both the web page and the WebSocket. 0 = let the system pick a free one (tests). */
   port: number;
@@ -36,6 +39,18 @@ export const MAX_MESSAGE_BYTES = 16 * 1024;
 /** A socket that sends more messages than this within one second gets `rateLimited` errors. */
 export const MAX_MESSAGES_PER_SECOND = 30;
 
+/** A socket is closed after this many frames that were not valid messages (`badMessage`). */
+export const MAX_BAD_MESSAGES = 5;
+
+/**
+ * A socket that has this many bytes waiting to be sent is cut off. Messages
+ * pile up like that only when the other side has stopped reading (a dead
+ * connection, or somebody flooding the server without listening to the
+ * answers), and they would otherwise fill the server's memory. A healthy
+ * client that is cut off simply reconnects and gets a full view.
+ */
+export const MAX_SEND_BACKLOG_BYTES = 8 * 1024 * 1024;
+
 /**
  * Absolute path of the project folder (the one that contains package.json
  * and packages/), worked out from the location of this source file.
@@ -43,7 +58,8 @@ export const MAX_MESSAGES_PER_SECOND = 30;
  * folder can be moved or renamed freely.
  */
 export function projectRoot(): string {
-  throw new Error('not implemented: projectRoot');
+  // This file is <project root>/packages/server/src/config.ts: three folders up.
+  return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 }
 
 /**
@@ -62,5 +78,31 @@ export function projectRoot(): string {
  * from 0 to 65535.
  */
 export function loadConfig(env: Record<string, string | undefined>): ServerConfig {
-  throw new Error('not implemented: loadConfig');
+  const root = projectRoot();
+  return {
+    port: readPort(env.PORT),
+    host: nonEmpty(env.HOST),
+    // path.resolve leaves an absolute path alone and resolves a relative one
+    // against the current working directory.
+    dataDir: resolve(nonEmpty(env.DOMINATION_DATA_DIR) ?? resolve(root, 'data')),
+    clientDir: resolve(nonEmpty(env.DOMINATION_CLIENT_DIR) ?? resolve(root, 'packages', 'client', 'dist')),
+    fixedSeed: nonEmpty(env.DOMINATION_SEED),
+    sendPatches: env.DOMINATION_FULL_SYNC !== '1',
+  };
+}
+
+/** An environment variable that is missing or empty counts as "not set". */
+function nonEmpty(value: string | undefined): string | null {
+  return value === undefined || value === '' ? null : value;
+}
+
+/** PORT as a number; 8787 if it is not set. Throws for anything that is not a whole number from 0 to 65535. */
+function readPort(value: string | undefined): number {
+  const text = nonEmpty(value);
+  if (text === null) return 8787;
+  // Digits only: Number('') is 0 and Number('1e3') is 1000, neither of which anybody means.
+  if (!/^[0-9]{1,5}$/.test(text) || Number(text) > 65535) {
+    throw new Error(`PORT must be a whole number from 0 to 65535, but it is "${text}".`);
+  }
+  return Number(text);
 }

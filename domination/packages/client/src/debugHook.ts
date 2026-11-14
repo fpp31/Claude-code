@@ -7,6 +7,7 @@
  */
 
 import type { PlayerView, TileIndex, UnitId } from '@domination/shared';
+import { reachableFor } from './game/selectors';
 import type { MapRenderer, ScreenPoint } from './render/api';
 import type { Store } from './state/store';
 
@@ -34,5 +35,32 @@ declare global {
 
 /** Puts the hook on `window.__domination`. Returns a function that removes it again. */
 export function installDebugHook(store: Store, renderer: MapRenderer): () => void {
-  throw new Error('not implemented: installDebugHook');
+  const hook: DebugHook = {
+    view() {
+      return store.get().game?.view ?? null;
+    },
+
+    tileToScreen(tile) {
+      return renderer.tileToScreen(tile);
+    },
+
+    reachable(unitId) {
+      const view = store.get().game?.view ?? null;
+      const unit = view?.units.find((candidate) => candidate.id === unitId);
+      if (view === null || unit === undefined) return [];
+      // What the rules say the unit can reach. It does not flicker to "none"
+      // for the instant an action is in flight, so a test can rely on it.
+      return [...reachableFor(view, unit).keys()].sort((a, b) => a - b);
+    },
+
+    centerOn(tile) {
+      renderer.centerOn(tile);
+    },
+  };
+
+  window.__domination = hook;
+  return () => {
+    // Only take down our own hook: a newer game screen may have put up its own already.
+    if (window.__domination === hook) delete window.__domination;
+  };
 }

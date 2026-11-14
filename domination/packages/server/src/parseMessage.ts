@@ -3,7 +3,17 @@
  * `parseClientMessage` before any other code looks at it.
  */
 
-import type { ClientMessage } from '@domination/shared';
+import { CIV_IDS, MAP_SIZE_IDS, RULES, UNIT_TYPE_IDS } from '@domination/shared';
+import type { Action, BuildItem, ClientMessage } from '@domination/shared';
+
+/** Longest strings accepted in a message (see parseClientMessage). */
+const MAX_NAME_INPUT_LENGTH = 200;
+const MAX_CODE_INPUT_LENGTH = 16;
+const MAX_TOKEN_INPUT_LENGTH = 64;
+const MAX_ID_LENGTH = 32;
+
+/** Any JSON object, before its fields have been checked. */
+type Fields = Record<string, unknown>;
 
 /**
  * Turns the text of one WebSocket frame into a ClientMessage, or returns
@@ -30,15 +40,144 @@ import type { ClientMessage } from '@domination/shared';
  * player's unit...) is NOT checked here; the room and the rules do that.
  */
 export function parseClientMessage(raw: string): ClientMessage | null {
-  throw new Error('not implemented: parseClientMessage');
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isObject(value)) return null;
+
+  switch (value.type) {
+    case 'hello': {
+      const { protocol, token } = value;
+      if (!isWholeNumber(protocol)) return null;
+      if (token !== null && !isShortString(token, MAX_TOKEN_INPUT_LENGTH)) return null;
+      return { type: 'hello', protocol, token };
+    }
+    case 'createGame': {
+      const { name } = value;
+      if (!isShortString(name, MAX_NAME_INPUT_LENGTH)) return null;
+      return { type: 'createGame', name };
+    }
+    case 'joinGame': {
+      const { code, name } = value;
+      if (!isShortString(code, MAX_CODE_INPUT_LENGTH)) return null;
+      if (name !== null && !isShortString(name, MAX_NAME_INPUT_LENGTH)) return null;
+      return { type: 'joinGame', code, name };
+    }
+    case 'chooseCiv': {
+      const civ = CIV_IDS.find((id) => id === value.civ);
+      return civ === undefined ? null : { type: 'chooseCiv', civ };
+    }
+    case 'setMapSize': {
+      const mapSize = MAP_SIZE_IDS.find((id) => id === value.mapSize);
+      return mapSize === undefined ? null : { type: 'setMapSize', mapSize };
+    }
+    case 'action': {
+      const { requestId, turn } = value;
+      if (!isWholeNumber(requestId) || !isWholeNumber(turn)) return null;
+      const action = parseAction(value.action);
+      return action === null ? null : { type: 'action', requestId, turn, action };
+    }
+    case 'leaveGame':
+      return { type: 'leaveGame' };
+    case 'startGame':
+      return { type: 'startGame' };
+    case 'resync':
+      return { type: 'resync' };
+    case 'ping':
+      return { type: 'ping' };
+    default:
+      return null;
+  }
+}
+
+/** The `action` field of an `action` message, checked and rebuilt; null if it is not one of the five actions. */
+function parseAction(value: unknown): Action | null {
+  if (!isObject(value)) return null;
+
+  switch (value.type) {
+    case 'moveUnit': {
+      const { unitId, path } = value;
+      if (!isShortString(unitId, MAX_ID_LENGTH)) return null;
+      if (!Array.isArray(path) || path.length > RULES.maxPathLength) return null;
+      const steps: number[] = [];
+      for (const step of path) {
+        if (!isWholeNumber(step)) return null;
+        steps.push(step);
+      }
+      return { type: 'moveUnit', unitId, path: steps };
+    }
+    case 'foundCity': {
+      const { unitId } = value;
+      if (!isShortString(unitId, MAX_ID_LENGTH)) return null;
+      return { type: 'foundCity', unitId };
+    }
+    case 'setProduction': {
+      const { cityId } = value;
+      if (!isShortString(cityId, MAX_ID_LENGTH)) return null;
+      const item = parseBuildItem(value.item);
+      return item === null ? null : { type: 'setProduction', cityId, item };
+    }
+    case 'endTurn':
+      return { type: 'endTurn' };
+    case 'cancelEndTurn':
+      return { type: 'cancelEndTurn' };
+    default:
+      return null;
+  }
+}
+
+/** Something a city can build: in phase 1 only `{ kind: 'unit', unitType }`. */
+function parseBuildItem(value: unknown): BuildItem | null {
+  if (!isObject(value) || value.kind !== 'unit') return null;
+  const unitType = UNIT_TYPE_IDS.find((id) => id === value.unitType);
+  return unitType === undefined ? null : { kind: 'unit', unitType };
+}
+
+/** A JSON object (not null, not an array). */
+function isObject(value: unknown): value is Fields {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
- * Cleans a player name: removes control characters, collapses runs of white
- * space into one space, trims, and cuts to RULES.maxNameLength characters.
+ * A whole number that is not negative. Number.isSafeInteger also says no to
+ * NaN, to infinity (JSON such as 1e999 parses to it) and to numbers so large
+ * that they are no longer exact.
+ */
+function isWholeNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** A string of at most `maxLength` characters. */
+function isShortString(value: unknown, maxLength: number): value is string {
+  return typeof value === 'string' && value.length <= maxLength;
+}
+
+/**
+ * Characters that must not appear in a name: control characters, invisible
+ * "format" characters (zero-width characters and the marks that reverse the
+ * writing direction, which could make a name look like somebody else's or
+ * garble the text next to it) and broken halves of a character pair.
+ */
+const UNWANTED_IN_NAMES = /[\p{Cc}\p{Cf}\p{Cs}]/gu;
+
+/**
+ * Cleans a player name, in this order: every run of white space (tabs and
+ * line breaks included) becomes one space; control characters, invisible
+ * format characters and broken character halves are removed; the name is
+ * trimmed and cut to RULES.maxNameLength whole characters. So 'Ada\tLovelace'
+ * becomes 'Ada Lovelace', not 'AdaLovelace'.
  * Returns null if nothing is left. (Names are only ever shown through
  * textContent on the client, never as HTML.)
  */
 export function cleanPlayerName(raw: string): string | null {
-  throw new Error('not implemented: cleanPlayerName');
+  // White space first, so that a tab or a line break between two words
+  // becomes a space instead of gluing the words together.
+  const spaced = raw.replace(/\s+/g, ' ');
+  const visible = spaced.replace(UNWANTED_IN_NAMES, '').replace(/ +/g, ' ').trim();
+  // Array.from counts whole characters, so an emoji is never cut in half.
+  const cut = Array.from(visible).slice(0, RULES.maxNameLength).join('').trim();
+  return cut === '' ? null : cut;
 }

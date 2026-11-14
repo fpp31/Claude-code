@@ -3,6 +3,11 @@
  * remember.
  */
 
+import { RULES } from '../data/rules';
+import { UNITS } from '../data/units';
+import { tileCount, tilesInRange } from '../hex';
+import { getPlayer } from '../ids';
+import { citiesByTile, cityPublic, tileOwner } from '../rules/stateQueries';
 import type { GameState, PlayerId } from '../types';
 
 /**
@@ -19,7 +24,22 @@ import type { GameState, PlayerId } from '../types';
  * Pure. Throws if `playerId` is not a player of the game.
  */
 export function computeVisible(state: GameState, playerId: PlayerId): boolean[] {
-  throw new Error('not implemented: computeVisible');
+  getPlayer(state, playerId); // throws for somebody who is not in this game
+
+  const map = state.map;
+  const visible: boolean[] = new Array<boolean>(tileCount(map)).fill(false);
+
+  for (const unit of Object.values(state.units)) {
+    if (unit.owner !== playerId) continue;
+    for (const tile of tilesInRange(unit.tile, UNITS[unit.type].sight, map)) visible[tile] = true;
+  }
+
+  for (let tile = 0; tile < map.tiles.length; tile++) {
+    if (tileOwner(state, tile) !== playerId) continue;
+    for (const near of tilesInRange(tile, RULES.territorySightMargin, map)) visible[near] = true;
+  }
+
+  return visible;
 }
 
 /**
@@ -38,5 +58,23 @@ export function computeVisible(state: GameState, playerId: PlayerId): boolean[] 
  * Units are never remembered.
  */
 export function updateKnowledge(state: GameState): void {
-  throw new Error('not implemented: updateKnowledge');
+  // Which city stands on which tile, looked up once for all players.
+  const cityOnTile = citiesByTile(state);
+
+  for (const player of state.players) {
+    const visible = computeVisible(state, player.id);
+    const knowledge = player.knowledge;
+    for (let tile = 0; tile < visible.length; tile++) {
+      if (!visible[tile]) continue;
+      knowledge.explored[tile] = 1;
+
+      const owner = tileOwner(state, tile);
+      const city = cityOnTile.get(tile);
+      if (owner !== null || city !== undefined) {
+        knowledge.remembered[tile] = { owner, city: city === undefined ? null : cityPublic(city) };
+      } else {
+        delete knowledge.remembered[tile];
+      }
+    }
+  }
 }

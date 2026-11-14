@@ -4,9 +4,15 @@
  */
 
 import type { RuleErrorCode } from '../actions';
+import { RULES } from '../data/rules';
+import { tileAllowsCity, tileIsWorkable, tileYields } from '../data/terrain';
+import { UNITS, UNIT_TYPE_IDS } from '../data/units';
 import type { UnitTypeId } from '../data/units';
+import { distance } from '../hex';
 import type { BuildItem, City, GameState, TileIndex, Unit } from '../types';
 import type { BuildOption, ProductionBlock } from '../viewTypes';
+import { boardFromState, canEnterTile } from './movement';
+import { tileOwner, tilesOfCity } from './stateQueries';
 
 /** What a city produces in one turn. Derived from the state every time; never stored. */
 export interface CityEconomy {
@@ -38,7 +44,17 @@ export interface CityEconomy {
  * why it may be shown in the view (OwnUnitDetail.foundCityError).
  */
 export function foundCityError(state: GameState, unit: Unit): RuleErrorCode | null {
-  throw new Error('not implemented: foundCityError');
+  if (!UNITS[unit.type].canFoundCity) return 'cannotFoundCity';
+  if (unit.movesLeft <= 0) return 'noMovesLeft';
+  if (!tileAllowsCity(state.map.tiles[unit.tile])) return 'badCityTile';
+
+  const owner = tileOwner(state, unit.tile);
+  if (owner !== null && owner !== unit.owner) return 'tileOwned';
+
+  for (const city of Object.values(state.cities)) {
+    if (distance(city.tile, unit.tile, state.map) < RULES.minCityDistance) return 'tooCloseToCity';
+  }
+  return null;
 }
 
 /**
@@ -58,12 +74,54 @@ export function foundCityError(state: GameState, unit: Unit): RuleErrorCode | nu
  * Pure and deterministic.
  */
 export function cityEconomy(state: GameState, city: City): CityEconomy {
-  throw new Error('not implemented: cityEconomy');
+  const tiles = state.map.tiles;
+
+  // The centre: free, and never worse than the guaranteed minimum.
+  const centre = tileYields(tiles[city.tile]);
+  let food = Math.max(centre.food, RULES.cityCenterMinYields.food);
+  let production = Math.max(centre.production, RULES.cityCenterMinYields.production);
+
+  // Every other tile of the city a citizen could work, best first.
+  const candidates = tilesOfCity(state, city.id)
+    .filter((tile) => tile !== city.tile && tileIsWorkable(tiles[tile]))
+    .map((tile) => ({ tile, yields: tileYields(tiles[tile]) }));
+  candidates.sort((a, b) => {
+    const totalA = a.yields.food + a.yields.production;
+    const totalB = b.yields.food + b.yields.production;
+    if (totalA !== totalB) return totalB - totalA;
+    if (a.yields.food !== b.yields.food) return b.yields.food - a.yields.food;
+    return a.tile - b.tile;
+  });
+
+  // One tile per citizen; citizens left over when the tiles run out work nothing.
+  const chosen = candidates.slice(0, Math.max(0, city.population));
+  for (const candidate of chosen) {
+    food += candidate.yields.food;
+    production += candidate.yields.production;
+  }
+
+  return {
+    worked: chosen.map((candidate) => candidate.tile).sort((a, b) => a - b),
+    food,
+    production,
+    foodSurplus: food - RULES.foodPerCitizen * city.population,
+  };
 }
 
 /** Production needed for an item. Phase 1: UNITS[item.unitType].cost. */
 export function buildCost(item: BuildItem): number {
-  throw new Error('not implemented: buildCost');
+  return UNITS[item.unitType].cost;
+}
+
+/**
+ * How many turn resolutions until `stored` production reaches `cost` when
+ * the city adds `perTurn` each turn: at least 1 (even an item that is paid
+ * for only appears when a turn resolves), or null if the city makes no
+ * production at all.
+ */
+function turnsToBuild(cost: number, stored: number, perTurn: number): number | null {
+  if (perTurn <= 0) return null;
+  return Math.max(1, Math.ceil((cost - stored) / perTurn));
 }
 
 /**
@@ -76,7 +134,12 @@ export function buildCost(item: BuildItem): number {
  * (OwnCityDetail.productionBlocked reports that separately).
  */
 export function buildOptions(state: GameState, city: City): BuildOption[] {
-  throw new Error('not implemented: buildOptions');
+  const perTurn = cityEconomy(state, city).production;
+  return UNIT_TYPE_IDS.map((unitType) => {
+    const item: BuildItem = { kind: 'unit', unitType };
+    const cost = buildCost(item);
+    return { item, cost, turns: turnsToBuild(cost, city.productionStored, perTurn) };
+  });
 }
 
 /**
@@ -88,7 +151,19 @@ export function buildOptions(state: GameState, city: City): BuildOption[] {
  * this city (`cityId`), nearest to the centre first, ties by lower tile index.
  */
 export function findSpawnTile(state: GameState, city: City, unitType: UnitTypeId): TileIndex | null {
-  throw new Error('not implemented: findSpawnTile');
+  const board = boardFromState(state);
+  const newcomer = { owner: city.owner, type: unitType };
+
+  // The city tile first; then the rest of the city's land, nearest first,
+  // equal distances in tile order.
+  const others = tilesOfCity(state, city.id)
+    .filter((tile) => tile !== city.tile)
+    .sort((a, b) => distance(city.tile, a, state.map) - distance(city.tile, b, state.map) || a - b);
+
+  for (const tile of [city.tile, ...others]) {
+    if (canEnterTile(board, newcomer, tile) === null) return tile;
+  }
+  return null;
 }
 
 /**
@@ -110,5 +185,9 @@ export function findSpawnTile(state: GameState, city: City, unitType: UnitTypeId
  * city's own tiles, all of which the owner sees, so showing it leaks nothing.
  */
 export function productionBlocked(state: GameState, city: City): ProductionBlock | null {
-  throw new Error('not implemented: productionBlocked');
+  if (city.production === null) return null;
+  const unitType = city.production.unitType;
+  if (city.population - UNITS[unitType].populationCost < 1) return 'needsPopulation';
+  if (findSpawnTile(state, city, unitType) === null) return 'noRoom';
+  return null;
 }

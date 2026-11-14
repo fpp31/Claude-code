@@ -1,11 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { FEATURES, cloneJson, maxPlayers, neighbors, tileCount, tileIsWater } from '../src/index';
+import {
+  FEATURES,
+  FEATURE_IDS,
+  TERRAIN_IDS,
+  cloneJson,
+  generateMap,
+  maxPlayers,
+  neighbors,
+  tileCount,
+  tileIsWater,
+} from '../src/index';
 import {
   ASCII_LEGEND,
   isImplemented,
   isNotImplementedError,
   mapFromAscii,
+  mapToAscii,
   markCoast,
+  notImplementedError,
   sampleLobby,
   sampleMap,
   sampleView,
@@ -37,6 +49,49 @@ describe('mapFromAscii', () => {
     expect(() => mapFromAscii(['gg', 'g'])).toThrow();
     expect(() => mapFromAscii(['g?'])).toThrow();
     expect(() => mapFromAscii([''])).toThrow();
+  });
+});
+
+describe('the legend of the map drawings', () => {
+  it('has exactly one character for every kind of tile: each ground, and each feature on each ground it may stand on', () => {
+    const kinds: string[] = [];
+    for (const terrain of TERRAIN_IDS) {
+      kinds.push(`${terrain}`);
+      for (const feature of FEATURE_IDS) {
+        if (FEATURES[feature].allowedOn.includes(terrain)) kinds.push(`${terrain}+${feature}`);
+      }
+    }
+    const drawn = Object.values(ASCII_LEGEND).map((entry) =>
+      entry.feature === null ? `${entry.terrain}` : `${entry.terrain}+${entry.feature}`,
+    );
+    expect([...drawn].sort()).toEqual([...kinds].sort());
+  });
+});
+
+describe('mapToAscii: drawing a map as text', () => {
+  const ROWS = [
+    '~ ~ ~ ~ ~ ~',
+    ' , g f h m ~',
+    '~ p F H M ~',
+    ' ~ d D A , ~',
+  ];
+
+  it('draws every tile with its character of the legend, odd rows indented', () => {
+    expect(mapToAscii(mapFromAscii(ROWS))).toEqual(ROWS);
+  });
+
+  it('draws a generated map so that mapFromAscii reads the very same map back', () => {
+    for (const mapSize of ['small', 'medium', 'large'] as const) {
+      const { map } = generateMap('drawn as text', mapSize, 2);
+      const rows = mapToAscii(map);
+      expect(rows.join('')).not.toContain('?');
+      expect(mapFromAscii(rows)).toEqual(map);
+    }
+  });
+
+  it('draws starts as seat numbers', () => {
+    const map = mapFromAscii(['~ A g', ' g g ~']);
+    expect(mapToAscii(map, [4, 2])).toEqual(['~ A 2', ' g 1 ~']);
   });
 });
 
@@ -133,9 +188,9 @@ describe('the sample lobby', () => {
 });
 
 describe('isImplemented', () => {
-  it('is false for a scaffold stub and for code that calls one', () => {
+  it('is false for a function that is still to be written and for code that calls one', () => {
     const stub = (): never => {
-      throw new Error('not implemented: something');
+      throw notImplementedError('something');
     };
     expect(isImplemented(stub)).toBe(false);
     expect(isImplemented(() => [1, 2].map(() => stub()))).toBe(false);
@@ -151,8 +206,13 @@ describe('isImplemented', () => {
   });
 
   it('recognises the error itself', () => {
-    expect(isNotImplementedError(new Error('not implemented: generateMap'))).toBe(true);
+    expect(isNotImplementedError(notImplementedError('generateMap'))).toBe(true);
     expect(isNotImplementedError(new Error('something else'))).toBe(false);
-    expect(isNotImplementedError('not implemented: a string, not an Error')).toBe(false);
+    // Only a real Error counts, not a text that happens to read the same.
+    expect(isNotImplementedError(notImplementedError('a string, not an Error').message)).toBe(false);
+  });
+
+  it('names the missing function in the message', () => {
+    expect(notImplementedError('resolveCombat').message).toContain('resolveCombat');
   });
 });

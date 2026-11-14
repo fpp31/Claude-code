@@ -52,6 +52,8 @@ export interface SpriteSource {
   /**
    * Other sprites stamped first, each at (x, y) inside this sprite, in list
    * order (like the forest made of five trees in the reference picture).
+   * A part must fit inside this sprite; its own offsetX / offsetY are not
+   * used (they only matter for a sprite drawn on a tile by itself).
    */
   parts?: { sprite: SpriteSource; x: number; y: number }[];
   /** The pixels, drawn over the parts. May be omitted for a sprite made only of parts. */

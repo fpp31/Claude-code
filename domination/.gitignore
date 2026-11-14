@@ -9,6 +9,7 @@ dist/
 
 # Test and tooling leftovers
 coverage/
+.vitest/
 test-results/
 playwright-report/
 e2e/.tmp/

@@ -20,17 +20,22 @@
  *  1. SIZE. The canvas must already be in the document, with its final CSS
  *     size, when createMapRenderer(canvas) is called (WP4 appends it first).
  *     The renderer measures it right then, synchronously
- *     (getBoundingClientRect), and again whenever its ResizeObserver
- *     reports a change. So every method below works from the first moment;
- *     in particular setView followed at once by centerOn puts the tile in
- *     the middle of the real canvas, not of an unmeasured 300 x 150 one.
+ *     (getBoundingClientRect), and again at the start of every camera and
+ *     hit-test call below (panBy, zoomBy, centerOn, tileAt, tileToScreen).
+ *     So every method works from the first moment, and none is ever behind
+ *     a resize: setView followed at once by centerOn puts the tile in the
+ *     middle of the real canvas, not of an unmeasured 300 x 150 one, and
+ *     centerOn straight after the window changed its size puts it in the
+ *     middle of the canvas as it is now. (The renderer's ResizeObserver
+ *     hears of a new size only while the browser makes the next frame;
+ *     nobody has to wait for it.)
  *
  *  2. NO VIEW. Before the first setView, and after setView(null), the
  *     renderer does not know the map's size. Then panBy, zoomBy and
  *     centerOn do nothing, tileAt returns null and tileToScreen throws.
  *
- * This file is frozen once the work packages start. Ask the integrator
- * before changing it.
+ * Both sides are written against this file, and the renderer's tests pin
+ * it down (test/renderRenderer.test.ts). Change it only together with both.
  */
 
 import type { PlayerView, TileIndex, UnitId } from '@domination/shared';
@@ -52,7 +57,12 @@ export interface MapOverlay {
   selectedUnitId: UnitId | null;
   /** Tiles the selected unit can reach this turn: get the "you can go here" highlight. */
   reachable: TileIndex[];
-  /** Path preview from the selected unit to the hovered tile (start excluded, target last). Empty = none. */
+  /**
+   * Path preview from the selected unit to the hovered tile (start excluded,
+   * target last). Empty = none. The renderer draws it as a line that starts
+   * at `selectedTile`, so a path is only ever set together with the tile of
+   * the selected unit (game/selectors.ts `overlayFor` does that).
+   */
   path: TileIndex[];
   /**
    * Tiles worked by the citizens of the selected city (OwnCityDetail.worked):
@@ -83,7 +93,8 @@ export interface MapRenderer {
    *
    * Views are never edited in place: a changed game means a NEW view object,
    * so the renderer may compare with `===` to skip work. Calling this never
-   * moves the camera (it is only re-clamped if the map size changed).
+   * moves the camera (it is only brought back onto the map if the map size
+   * changed).
    */
   setView(view: PlayerView | null): void;
 
@@ -93,13 +104,17 @@ export interface MapRenderer {
   /**
    * Scrolls the map by a distance in CSS pixels: the content follows the
    * finger, so dragging the pointer 10 px to the right is panBy(10, 0).
-   * The camera is kept within the map. Does nothing without a view.
+   * The map cannot be lost: it stops when its edge reaches the middle of
+   * the canvas (camera.ts `clampCamera`). Does nothing without a view.
    */
   panBy(dx: number, dy: number): void;
 
   /**
    * Zooms in (positive) or out (negative) by whole steps; zoom is always a
    * whole number of screen pixels per art pixel, so the art stays crisp.
+   * One step is about one CSS pixel per art pixel, which gives about six
+   * zoom levels on every display (camera.ts `zoomStep`): one step per click
+   * of the + and - buttons or notch of the mouse wheel.
    * The map point under `anchor` stays under it (default: the middle of the
    * canvas). Steps beyond the smallest or largest zoom are ignored.
    * Does nothing without a view.
@@ -107,9 +122,9 @@ export interface MapRenderer {
   zoomBy(steps: number, anchor?: ScreenPoint): void;
 
   /**
-   * Moves the camera so this tile is in the middle of the canvas (as far as
-   * the map edge allows). Does nothing without a view or for a tile that is
-   * not on the map.
+   * Moves the camera so this tile is in the middle of the canvas. That
+   * works for every tile, also one in a corner of the map. Does nothing
+   * without a view or for a tile that is not on the map.
    */
   centerOn(tile: TileIndex): void;
 

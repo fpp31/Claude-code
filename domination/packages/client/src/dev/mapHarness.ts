@@ -1,22 +1,18 @@
 /**
- * A bare test page for the map renderer (part of the scaffold):
+ * A bare test page for the map renderer:
  *
  *   npm run dev, then open http://localhost:5173/dev-map.html
  *
  * It shows the sample view (sampleView() from the shared package) through
- * exactly the calls the real game screen will make (render/api.ts), with the
+ * exactly the calls the real game screen makes (render/api.ts), with the
  * simplest possible input: drag to pan, wheel to zoom, click to select,
  * move the mouse to hover. No store, no server, no panels.
  *
- * Who it is for:
- *  - WP5 looks at the real renderer here before the app shell (WP4) exists.
- *    While createMapRenderer is still a stub, the scaffold's flat-colour
- *    stand-in is shown instead; add ?placeholder to the address to see the
- *    stand-in on purpose (handy for comparing hit testing).
- *  - WP4 can read this file as a worked example of the seam: the canvas is
- *    added to the page BEFORE the renderer is created, setView comes before
- *    centerOn, dragging 10 px to the right is panBy(10, 0), wheel up is
- *    zoomBy(+1, pointer).
+ * It is the place to look at a change to the map drawing on its own, and a
+ * worked example of the seam between the game screen and the renderer: the
+ * canvas is added to the page BEFORE the renderer is created, setView comes
+ * before centerOn, dragging 10 px to the right is panBy(10, 0), wheel up is
+ * zoomBy(+1, pointer).
  *
  * The page is only served by the development server; `npm run build` does
  * not include it.
@@ -28,7 +24,7 @@ import { sampleView } from '@domination/shared/testing';
 import '../styles.css';
 import { EMPTY_OVERLAY } from '../render/api';
 import type { MapOverlay, MapRenderer } from '../render/api';
-import { createPlaceholderRenderer, createRendererOrPlaceholder } from '../render/placeholderRenderer';
+import { createMapRenderer } from '../render/renderer';
 
 declare global {
   interface Window {
@@ -46,8 +42,7 @@ const status = document.createElement('div');
 status.style.cssText = 'position:fixed;left:8px;bottom:8px;padding:4px 8px;background:#22223a;color:#f8f0d8;font:14px monospace';
 document.body.append(status);
 
-const wantsPlaceholder = new URLSearchParams(location.search).has('placeholder');
-const renderer = wantsPlaceholder ? createPlaceholderRenderer(canvas) : createRendererOrPlaceholder(canvas);
+const renderer = createMapRenderer(canvas);
 
 const view = sampleView();
 renderer.setView(view);
@@ -67,7 +62,7 @@ function select(tile: TileIndex): void {
   const unit = view.units.find((candidate) => candidate.tile === tile && candidate.owner === view.you);
   const city = view.cities.find((candidate) => candidate.tile === tile && candidate.owner === view.you);
   if (unit !== undefined) {
-    // Not the real movement rules (those are WP2's): simply the explored tiles next to the unit.
+    // Not the real movement rules: simply the explored tiles next to the unit.
     const reachable = neighbors(tile, view).filter((neighbor) => view.tiles[neighbor] !== null);
     setOverlay({ selectedTile: tile, selectedUnitId: unit.id, reachable, path: [], workedTiles: [] });
   } else if (city !== undefined) {
@@ -86,7 +81,7 @@ function describe(tile: TileIndex | null): string {
   return `tile ${tile} (${x}, ${y}): ${seen.feature ?? seen.terrain}${seen.visible ? '' : ', fogged'}`;
 }
 
-// ---- Input: the smallest version of what input/mapInput.ts will do ----
+// ---- Input: the smallest version of what input/mapInput.ts does ----
 
 const DRAG_THRESHOLD = 4;
 let pressed: { x: number; y: number; dragging: boolean } | null = null;

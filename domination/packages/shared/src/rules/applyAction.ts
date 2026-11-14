@@ -8,6 +8,11 @@
 
 import type { Action, ActionResult } from '../actions';
 import type { GameState, PlayerId } from '../types';
+import { cancelEndTurn, endTurn } from './endTurn';
+import { foundCity } from './foundCity';
+import { moveUnit } from './moveUnit';
+import { noChange, rejected } from './results';
+import { setProduction } from './setProduction';
 
 /**
  * Validates one action of one player and, if it is legal, returns the state
@@ -24,8 +29,12 @@ import type { GameState, PlayerId } from '../types';
  * @param action    what they want to do (already shape-checked by the server)
  *
  * Checks, in this order (first failure wins):
- *  1. `playerId` is not a player of this game, or the action type is unknown
- *     -> 'badAction'.
+ *  1. `playerId` is not a player of this game, the action type is unknown,
+ *     or a field of the action is of the wrong basic kind (`unitId` or
+ *     `cityId` is not a string, `path` is not a list, `item` is not an
+ *     object) -> 'badAction'. Fields of the right kind with a wrong VALUE
+ *     get the code of their own check further down ('badPath',
+ *     'noSuchUnit', 'cannotBuild', ...).
  *  2. `turn !== state.turn` -> 'staleTurn'. (A late End Turn must never end
  *     the following turn.)
  *  3. The player has already ended their turn:
@@ -60,7 +69,10 @@ import type { GameState, PlayerId } from '../types';
  *    end of the action, so a unit that passes through somebody's sight and
  *    ends outside it is never shown to them. This loop is the one place that
  *    knows who sees the mover at each step: phase 2 collects those players
- *    here and adds them to the event's audience.)
+ *    here and adds them to the event's audience. The same holds the other
+ *    way round: the mover explores every tile it passes, but a foreign unit
+ *    it saw only on the way, out of sight from where the walk ends, is not
+ *    in the mover's view afterwards, because units are never remembered.)
  *  - If not even the first step could be taken, the result is that step's
  *    error ('impassable' or 'blocked') and nothing changes.
  *  - If at least one step was taken the action SUCCEEDS, even when the walk
@@ -107,5 +119,66 @@ import type { GameState, PlayerId } from '../types';
  * ready for buildPlayerView. A returned state always passes checkInvariants.
  */
 export function applyAction(state: GameState, playerId: PlayerId, turn: number, action: Action): ActionResult {
-  throw new Error('not implemented: applyAction');
+  // 1. Somebody who is not in this game, or something that is not an action.
+  const player = state.players.find((candidate) => candidate.id === playerId);
+  if (player === undefined || !isWellFormedAction(action)) return rejected('badAction');
+
+  // 2. An action from a turn that is over (or has not begun).
+  if (turn !== state.turn) return rejected('staleTurn');
+
+  // 3. A player who has ended their turn may only take that back.
+  if (player.endedTurn) {
+    if (action.type === 'endTurn') return noChange(state);
+    if (action.type !== 'cancelEndTurn') return rejected('turnAlreadyEnded');
+  }
+
+  // 4. The action itself.
+  switch (action.type) {
+    case 'moveUnit':
+      return moveUnit(state, playerId, action);
+    case 'foundCity':
+      return foundCity(state, playerId, action);
+    case 'setProduction':
+      return setProduction(state, playerId, action);
+    case 'endTurn':
+      return endTurn(state, playerId);
+    case 'cancelEndTurn':
+      return cancelEndTurn(state, playerId);
+    default: {
+      // If a new action type is added to `Action` and not handled above,
+      // this line stops compiling.
+      const unhandled: never = action;
+      return unhandled;
+    }
+  }
+}
+
+/**
+ * Is this one of the known actions, with fields of the right basic kind (an
+ * id is a string, a path is a list, an item is an object)?
+ *
+ * The server checks the shape of every message before it gets here; this is
+ * the engine's own safety net, so that nothing malformed can reach the
+ * handlers whoever calls them (tests, later AI seats and queued orders).
+ * What the VALUES mean (is there such a unit, is that tile on the map, can a
+ * city build that) is judged later, by the action's own checks and codes.
+ */
+function isWellFormedAction(action: Action): boolean {
+  const candidate: unknown = action;
+  if (typeof candidate !== 'object' || candidate === null) return false;
+  const fields = candidate as Record<string, unknown>;
+
+  switch (fields.type) {
+    case 'moveUnit':
+      return typeof fields.unitId === 'string' && Array.isArray(fields.path);
+    case 'foundCity':
+      return typeof fields.unitId === 'string';
+    case 'setProduction':
+      return typeof fields.cityId === 'string' && typeof fields.item === 'object' && fields.item !== null;
+    case 'endTurn':
+    case 'cancelEndTurn':
+      return true;
+    default:
+      return false;
+  }
 }

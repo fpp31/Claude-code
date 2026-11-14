@@ -17,6 +17,7 @@ import type {
   LobbyView,
   PlayerId,
   PlayerView,
+  ProtocolErrorCode,
   TileIndex,
   UnitId,
 } from '@domination/shared';
@@ -29,6 +30,16 @@ export type ConnectionStatus = 'connecting' | 'online' | 'reconnecting';
  * `Selection`: a file that forgot the import would silently get that one.)
  */
 export type MapSelection = { kind: 'unit'; unitId: UnitId } | { kind: 'city'; cityId: CityId };
+
+/**
+ * The answers to "let me into this game" that pressing Join again will not
+ * change: the game does not exist, it has started without this player, or
+ * every seat is taken.
+ */
+export type JoinProblem = Extract<ProtocolErrorCode, 'noSuchGame' | 'gameAlreadyStarted' | 'gameFull'>;
+
+/** The JoinProblem codes as a list (for telling them apart from the other errors). */
+export const JOIN_PROBLEMS: readonly JoinProblem[] = ['noSuchGame', 'gameAlreadyStarted', 'gameFull'];
 
 /** A short message that pops up and fades away. */
 export interface Toast {
@@ -67,6 +78,16 @@ export interface AppState {
    * disabled, instead of flashing an empty form.
    */
   joining: GameCode | null;
+  /**
+   * Why the game named on the home screen cannot be joined, or null. Set
+   * when the server refuses a `joinGame` for one of the JoinProblem reasons
+   * (also the page's own automatic one, after opening an invite link), and
+   * cleared when a game is entered, when the server says the game can be
+   * joined after all, and by the home screen when the code is edited or
+   * Join is pressed again. A toast fades after four seconds; this stays, so
+   * the home screen can go on saying why the invitation leads nowhere.
+   */
+  joinProblem: JoinProblem | null;
   /** Set while attached to a game that has not started. */
   lobby: LobbyView | null;
   /** Set while attached to a running game. */
@@ -109,7 +130,7 @@ export interface Store {
 
 /**
  * The state of a freshly opened page: connection 'connecting', no lobby, no
- * game, nothing selected, not busy, no toasts.
+ * game, no join problem, nothing selected, not busy, no toasts.
  *
  * @param playerName  the remembered name (loadPlayerName())
  * @param joining     the game code in the address bar (gameCodeFromUrl()),
@@ -117,15 +138,60 @@ export interface Store {
  *                    moment; null if there is none
  */
 export function initialState(playerName: string, joining: GameCode | null = null): AppState {
-  throw new Error('not implemented: initialState');
+  return {
+    connection: 'connecting',
+    playerName,
+    joining,
+    joinProblem: null,
+    lobby: null,
+    game: null,
+    selection: null,
+    hoverTile: null,
+    busy: false,
+    toasts: [],
+    fatalMessage: null,
+  };
 }
 
 /** About thirty lines: an object, a list of listeners, get/set/subscribe. No library. */
 export function createStore(initial: AppState): Store {
-  throw new Error('not implemented: createStore');
+  let state = initial;
+  let listeners: ((state: AppState) => void)[] = [];
+
+  return {
+    get() {
+      return state;
+    },
+
+    set(changes) {
+      state = { ...state, ...changes };
+      // `listeners` is replaced, never edited, when somebody subscribes or
+      // unsubscribes, so walking the list as it was at this moment is safe
+      // even if a listener does either. Two details:
+      //  - a listener that has been unsubscribed meanwhile is skipped: when
+      //    the app swaps screens in answer to this very change, the old
+      //    screen's parts must not be called after they were taken down;
+      //  - each listener is handed the state as it is when its turn comes:
+      //    should a listener call `set` itself, the ones after it see the
+      //    newest state (twice, which is harmless because all they do is
+      //    bring the screen in line with it).
+      for (const listener of listeners) {
+        if (listeners.includes(listener)) listener(state);
+      }
+    },
+
+    subscribe(listener) {
+      listeners = [...listeners, listener];
+      return () => {
+        listeners = listeners.filter((other) => other !== listener);
+      };
+    },
+  };
 }
 
 /** Which screen to show: 'game' if `game` is set, else 'lobby' if `lobby` is set, else 'home'. */
 export function currentScreen(state: AppState): ScreenName {
-  throw new Error('not implemented: currentScreen');
+  if (state.game !== null) return 'game';
+  if (state.lobby !== null) return 'lobby';
+  return 'home';
 }

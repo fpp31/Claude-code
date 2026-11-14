@@ -2,9 +2,14 @@
  * The End Turn button (work package WP4).
  */
 
+import type { TileIndex } from '@domination/shared';
 import type { Controller } from '../game/controller';
-import type { Store } from '../state/store';
+import { myPlayer } from '../game/selectors';
+import type { AppState, Store } from '../state/store';
+import { h, setAttribute, setClass, setDisabled, setHidden, setText } from './dom';
 import type { Unmount } from './dom';
+import { TEST_IDS } from './testIds';
+import { todoHints, waitingForText } from './texts';
 
 /**
  * One button (TEST_IDS.endTurnButton, attribute data-ended="true|false"):
@@ -18,7 +23,76 @@ import type { Unmount } from './dom';
  *    harmless (see Controller.toggleEndTurn). The end-to-end script must
  *    therefore wait that long between two presses of this button.
  *  - disabled while `busy` or while the connection is not 'online'.
+ *
+ * Two additions that make the hint something a player can act on:
+ *  - while there is something still to do, a small "Show me" button above
+ *    End Turn selects the next such unit or city (controller.selectNextTask)
+ *    and scrolls the map to it;
+ *  - once the turn is ended, the hint names who the game is waiting for.
+ *
+ * @param showTile  scrolls the map to a tile (the game screen passes the
+ *                  renderer's centerOn); the default does nothing
  */
-export function mountEndTurnButton(parent: HTMLElement, store: Store, controller: Controller): Unmount {
-  throw new Error('not implemented: mountEndTurnButton');
+export function mountEndTurnButton(
+  parent: HTMLElement,
+  store: Store,
+  controller: Controller,
+  showTile: (tile: TileIndex) => void = () => {},
+): Unmount {
+  const showButton = h('button', {
+    className: 'button show-next',
+    text: 'Show me',
+    attributes: { title: 'Go to the next unit or city that still needs you' },
+    onClick: () => {
+      const tile = controller.selectNextTask();
+      if (tile !== null) showTile(tile);
+    },
+  });
+
+  const label = h('span', { className: 'end-turn-label' });
+  const hint = h('span', { className: 'end-turn-hint' });
+  const button = h(
+    'button',
+    {
+      className: 'button primary end-turn-button',
+      testId: TEST_IDS.endTurnButton,
+      attributes: { title: 'End your turn, or take that back (Enter)' },
+      onClick: () => controller.toggleEndTurn(),
+    },
+    label,
+    hint,
+  );
+
+  const box = h('div', { className: 'end-turn' }, showButton, button);
+  parent.append(box);
+
+  function update(state: AppState): void {
+    if (state.game === null) return; // the app is about to take the game screen down
+    const view = state.game.view;
+    const ended = myPlayer(view).endedTurn;
+    const todo = ended ? [] : todoHints(view);
+
+    setAttribute(button, 'data-ended', ended ? 'true' : 'false');
+    setClass(button, 'ended', ended);
+    setDisabled(button, state.busy || state.connection !== 'online');
+    setText(label, ended ? 'Waiting for others - tap to cancel' : 'End Turn');
+
+    // One sentence per line (the stylesheet keeps the line breaks).
+    const hintText = ended ? waitingForText(view, state.game.connected) : todo.join('\n');
+    setText(hint, hintText);
+    setHidden(hint, hintText === '');
+
+    // "Show me" only selects things on this player's own screen, so it needs
+    // no connection and is never disabled: it is simply there while there is
+    // something to show.
+    setHidden(showButton, todo.length === 0);
+  }
+
+  const unsubscribe = store.subscribe(update);
+  update(store.get());
+
+  return () => {
+    unsubscribe();
+    box.remove();
+  };
 }

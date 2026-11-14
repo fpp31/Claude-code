@@ -2,24 +2,45 @@
  * The one stylesheet of the client (work package WP4 adds the screens and
  * panels below the base rules).
  *
- * Look: chunky pixel-game UI to match the map art: dark ink borders, hard
- * offset shadows, no rounded-soft web look. Colours come from the variables
- * below; civilization colours are set from code as inline CSS variables.
+ * Look: chunky pixel-game UI to match the map art: dark navy chrome, hard
+ * edges, hard offset shadows, no rounded-soft web look. Colours come from
+ * the variables below; civilization colours are set from code as inline CSS
+ * variables (--civ and --civ-accent, see ui/civColors.ts).
+ *
+ * Two rules that keep the end-to-end test honest:
+ *  - nothing with a data-testid gets `text-transform`: what a test reads
+ *    from the page must be the text the code put there;
+ *  - `hidden` always wins (see the [hidden] rule), because panels are shown
+ *    and hidden through that attribute.
  */
 
 :root {
-  --ink: #22223a;        /* outline colour of the art, also the page background */
-  --paper: #f8f0d8;      /* panel background */
-  --paper-shade: #c8bca0;
-  --accent: #f8c020;     /* buttons that matter (End Turn, Start) */
-  --danger: #c81e1e;
-  --text: #22223a;
-  --text-on-ink: #f8f0d8;
-  --font: ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace;
+  --ink: #22223a;           /* outline colour of the art; the page and the unknown parts of the map */
+  --chrome: #2c2c4a;        /* panels, cards, the top bar */
+  --chrome-raised: #44446c; /* ordinary buttons */
+  --chrome-sunk: #181828;   /* wells: progress tracks, the invite box, empty seats */
+  --edge: #6c6c9c;          /* light edge of cards */
+  --edge-dark: #101020;     /* dark edge and hard shadow */
+  --paper: #f8f0d8;         /* text on chrome; background of fields and toasts */
+  --paper-dim: #b8b4cc;     /* secondary text */
+  --accent: #f8c020;        /* buttons that matter (End Turn, Start), things that need attention */
+  --good: #a8e038;          /* food, "connected", "online" */
+  --danger: #e85048;        /* "not connected", errors */
+
+  --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-display: ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  /* Set by the game's top bar to its own height, so that toasts appear below it. */
+  --top-bar-height: 0px;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* Panels are shown and hidden with the `hidden` attribute; it must beat any `display` set by a class. */
+[hidden] {
+  display: none !important;
 }
 
 html,
@@ -30,11 +51,14 @@ body {
 
 body {
   background: var(--ink);
-  color: var(--text-on-ink);
-  font-family: var(--font);
+  color: var(--paper);
+  font-family: var(--font-ui);
   font-size: 16px;
+  line-height: 1.4;
   /* The game handles its own gestures; keep the page from bouncing or zooming. */
   overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
 }
 
 #app {
@@ -53,4 +77,1133 @@ canvas {
   max-width: 40rem;
   margin: 0 auto;
   padding: 3rem 1rem;
+}
+
+/* ---------------------------------------------------------------------------
+ * Building blocks: screens, cards, buttons, fields
+ * ------------------------------------------------------------------------- */
+
+.screen-host,
+.screen {
+  height: 100%;
+}
+
+/* Home, lobby and the "please reload" message: one card in the middle; the page scrolls if the card is taller. */
+.screen.centered {
+  display: flex;
+  overflow-y: auto;
+  padding: 24px 16px;
+  /* A faint checker, so the empty page reads as a game board and not as a blank web page. */
+  background-color: var(--ink);
+  background-image:
+    linear-gradient(45deg, #272742 25%, transparent 25%, transparent 75%, #272742 75%),
+    linear-gradient(45deg, #272742 25%, transparent 25%, transparent 75%, #272742 75%);
+  background-size: 32px 32px;
+  background-position: 0 0, 16px 16px;
+}
+
+.card {
+  width: 100%;
+  max-width: 440px;
+  margin: auto; /* centres the card, and still lets a tall card scroll from its top */
+  padding: 24px;
+  background: var(--chrome);
+  border: 2px solid var(--edge);
+  box-shadow: 0 0 0 2px var(--edge-dark), 8px 8px 0 var(--edge-dark);
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1.1;
+  text-shadow: 3px 3px 0 var(--edge-dark);
+}
+
+.button {
+  appearance: none;
+  min-height: 36px;
+  padding: 6px 14px;
+  border: 2px solid var(--edge-dark);
+  border-radius: 0;
+  background: var(--chrome-raised);
+  color: var(--paper);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+  /* A light top edge, a dark bottom edge and a hard shadow make the button a raised block. */
+  box-shadow:
+    inset 0 2px 0 rgb(255 255 255 / 0.22),
+    inset 0 -3px 0 rgb(0 0 0 / 0.28),
+    3px 3px 0 var(--edge-dark);
+  /* No waiting for a possible double-tap: a tap acts at once. */
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.button:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+/* Pressed: the block moves into its own shadow. */
+.button:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow:
+    inset 0 2px 0 rgb(255 255 255 / 0.22),
+    inset 0 -3px 0 rgb(0 0 0 / 0.28),
+    1px 1px 0 var(--edge-dark);
+}
+
+.button:disabled {
+  background: #36364e;
+  color: #8a88a4;
+  cursor: not-allowed;
+  box-shadow: 3px 3px 0 var(--edge-dark);
+}
+
+.button.primary:not(:disabled) {
+  background: var(--accent);
+  color: var(--ink);
+}
+
+.button.big {
+  min-height: 48px;
+  padding: 10px 18px;
+  font-size: 16px;
+}
+
+.button:focus-visible,
+.civ-button:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-offset: 2px;
+}
+
+.field {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 2px solid var(--edge-dark);
+  border-radius: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  /* 16px or more: smaller text makes phones zoom the page when the field is tapped. */
+  font-size: 16px;
+  box-shadow: inset 2px 2px 0 rgb(0 0 0 / 0.14);
+}
+
+.field:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.field::placeholder {
+  color: #8f8a78;
+}
+
+/* A field that still has to be filled in before anything else can happen. */
+.field.needs-input {
+  border-color: var(--accent);
+  box-shadow: inset 2px 2px 0 rgb(0 0 0 / 0.14), 0 0 0 2px var(--accent);
+}
+
+select.field {
+  cursor: pointer;
+}
+
+select.field:disabled {
+  background: #c9c2ae;
+  color: #4a4a60;
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.field-label,
+.section-title {
+  display: block;
+  margin: 16px 0 6px;
+  color: var(--paper-dim);
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.field-hint {
+  margin: 6px 0 0;
+  color: var(--paper-dim);
+  font-size: 13px;
+}
+
+/* Text that points at what the player has to do next. */
+.attention {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* A small square in a civilization's colours, like the banners on the map. */
+.swatch {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--edge-dark);
+  background:
+    linear-gradient(var(--civ-accent, #ffffff), var(--civ-accent, #ffffff)) center / 6px 6px no-repeat,
+    var(--civ, #888888);
+}
+
+/* ---------------------------------------------------------------------------
+ * Home screen
+ * ------------------------------------------------------------------------- */
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* A little grass hexagon, the shape the whole game is made of. */
+.logo-hex {
+  flex: none;
+  width: 30px;
+  height: 34px;
+  background: linear-gradient(#e0f880 0 18%, #a8e038 18% 72%, #58b030 72%);
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+}
+
+.home-intro {
+  margin: 12px 0 0;
+  color: var(--paper);
+  font-size: 15px;
+}
+
+.home-section {
+  margin-top: 20px;
+}
+
+.home-section > .button {
+  width: 100%;
+}
+
+.home-section > .field-label:first-child {
+  margin-top: 0;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 24px;
+  color: var(--paper-dim);
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.divider::before,
+.divider::after {
+  content: '';
+  flex: 1;
+  height: 2px;
+  background: var(--edge);
+  opacity: 0.5;
+}
+
+.code-row {
+  display: flex;
+  gap: 8px;
+}
+
+.code-row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.code-field {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.3em;
+}
+
+/* The placeholder is an instruction, not a code: it must not look like one. */
+.code-field::placeholder {
+  font-family: var(--font-ui);
+  font-weight: 400;
+  letter-spacing: normal;
+}
+
+.home-status {
+  margin: 20px 0 0;
+  padding: 8px 12px;
+  background: var(--chrome-sunk);
+  border-left: 6px solid var(--accent);
+  font-size: 14px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Lobby screen
+ * ------------------------------------------------------------------------- */
+
+.lobby-card {
+  max-width: 860px;
+}
+
+.lobby-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lobby-code {
+  color: var(--accent);
+  letter-spacing: 0.16em;
+}
+
+.invite {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--chrome-sunk);
+  border: 2px solid var(--edge-dark);
+}
+
+.invite-text {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.link-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.link-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--accent);
+  font-family: var(--font-display);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+  user-select: all; /* one click selects the whole link */
+  -webkit-user-select: all;
+}
+
+/*
+ * Columns are written as minmax(0, 1fr), here and below, not as plain 1fr:
+ * a plain 1fr column grows to fit its longest word, and a 20-letter player
+ * name would then push the whole card off the side of a phone.
+ */
+.lobby-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+  margin-top: 4px;
+}
+
+.lobby-section {
+  min-width: 0;
+}
+
+.seat-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.seat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 4px 10px;
+  border: 2px solid transparent;
+  background: var(--chrome-sunk);
+  font-size: 14px;
+}
+
+.seat.taken {
+  border-color: var(--edge-dark);
+  background: #383860;
+}
+
+.seat.open .seat-name,
+.seat.unavailable .seat-name {
+  color: var(--paper-dim);
+  font-weight: 400;
+}
+
+.seat.unavailable {
+  opacity: 0.5;
+}
+
+/* A long name is cut short with "..." so that the civilization and the connection state stay in sight. */
+.seat-name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seat-tags {
+  flex: 1 0 auto;
+  color: var(--paper-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.seat-status {
+  color: var(--good);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.seat-status.absent {
+  color: var(--danger);
+}
+
+.civ-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.civ-button {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-height: 72px;
+  padding: 8px 10px;
+  border: 2px solid var(--edge-dark);
+  border-radius: 0;
+  background: var(--civ);
+  color: var(--civ-accent);
+  font-family: var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+  box-shadow:
+    inset 0 2px 0 rgb(255 255 255 / 0.22),
+    inset 0 -3px 0 rgb(0 0 0 / 0.28),
+    3px 3px 0 var(--edge-dark);
+  touch-action: manipulation;
+}
+
+.civ-name {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.civ-leader {
+  font-size: 12px;
+}
+
+.civ-note {
+  min-height: 15px;
+  font-size: 11px;
+  font-weight: 700;
+  overflow-wrap: anywhere; /* "Taken by <a very long name>" breaks inside the button */
+}
+
+/* The player's own choice: a white frame around the button. */
+.civ-button.chosen {
+  box-shadow:
+    inset 0 2px 0 rgb(255 255 255 / 0.22),
+    inset 0 -3px 0 rgb(0 0 0 / 0.28),
+    0 0 0 3px #ffffff;
+}
+
+/* Somebody else's (or no connection): washed out and flat. */
+.civ-button:disabled {
+  filter: saturate(0.35) brightness(0.62);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.lobby-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 2px solid rgb(255 255 255 / 0.1);
+}
+
+.next-step {
+  margin: 0;
+  font-size: 15px;
+}
+
+.lobby-foot .button {
+  flex: none;
+}
+
+/* ---------------------------------------------------------------------------
+ * Game screen: the map with the panels floating over it
+ * ------------------------------------------------------------------------- */
+
+.game-screen {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* Dragging the map must not select text or scroll the page. */
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+
+/* Everything between the top bar and the bottom of the screen is map. */
+.map-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.map-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/*
+ * The bottom panels float over the lower edge of the map. The strip itself
+ * is see-through for the pointer: taps and drags between the panels reach
+ * the canvas underneath. Only the panels themselves (pointer-events: auto
+ * below) catch them.
+ */
+.hud-bottom {
+  position: absolute;
+  /*
+   * The strip reaches from just below the top bar to the bottom of the
+   * screen, so it is exactly as tall as the map. A panel can then never be
+   * taller than the map (it scrolls inside itself instead, see .panel):
+   * in a low window, such as a phone held sideways, the city panel used to
+   * stick out of the top of the screen, over the top bar.
+   */
+  top: var(--top-bar-height);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  pointer-events: none;
+}
+
+.hud-left,
+.hud-right {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+  max-height: 100%;
+}
+
+.hud-right {
+  align-items: flex-end;
+}
+
+.panel,
+.zoom-buttons,
+.end-turn {
+  pointer-events: auto;
+}
+
+/* ---- Top bar ---- */
+
+.top-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  min-height: 44px;
+  padding: 6px 12px;
+  padding-top: max(6px, env(safe-area-inset-top));
+  background: var(--chrome);
+  border-bottom: 2px solid var(--edge-dark);
+  box-shadow: inset 0 -2px 0 #3c3c62, 0 4px 0 rgb(16 16 32 / 0.35);
+}
+
+.top-turn {
+  color: var(--accent);
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.top-civ {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.top-players {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* One player: their name on their colours; the little box gets a tick once they have ended the turn. */
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 8px 2px 4px;
+  border: 2px solid var(--edge-dark);
+  background: var(--civ);
+  color: var(--civ-accent);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* A name that is wider than the room its chip has is cut short with "..." (the chip's tooltip has it in full). */
+.chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip-mark {
+  position: relative;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--edge-dark);
+  background: rgb(16 16 32 / 0.45);
+}
+
+.chip[data-ended='true'] .chip-mark {
+  background: #ffffff;
+}
+
+/* The tick: two sides of a small box, turned 45 degrees. */
+.chip[data-ended='true'] .chip-mark::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 4px;
+  height: 8px;
+  border: solid var(--edge-dark);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* Not connected: greyed out. */
+.chip[data-connected='false'] {
+  filter: grayscale(1) brightness(0.75);
+}
+
+/*
+ * "Waiting for you and Ben". It takes the room that is left on the line,
+ * but it needs room for a short sentence (the 220px): where the player
+ * chips leave less than that, it moves to a line of its own. (Without that
+ * minimum, six players with long names squeezed it into a sliver one word
+ * wide, and the bar grew to half the height of the screen.)
+ */
+.top-waiting {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.top-connection {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--paper-dim);
+  font-family: var(--font-display);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.connection-dot {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--edge-dark);
+  background: var(--danger);
+  animation: blink 1s steps(2, jump-none) infinite;
+}
+
+.top-connection[data-status='online'] .connection-dot {
+  background: var(--good);
+  animation: none;
+}
+
+@keyframes blink {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.25;
+  }
+}
+
+/* ---- Unit panel and city panel ---- */
+
+.panel {
+  width: 320px;
+  max-width: 100%;
+  /* Never taller than the map (see .hud-bottom): what does not fit is reached by scrolling inside the panel. */
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  padding: 12px;
+  background: var(--chrome);
+  border: 2px solid var(--edge-dark);
+  /* A lighter line just inside the dark edge, then a hard shadow on the map. */
+  box-shadow: inset 0 0 0 2px #4a4a74, 5px 5px 0 rgb(16 16 32 / 0.55);
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel-title {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.panel-subtitle {
+  color: var(--paper-dim);
+  font-size: 13px;
+}
+
+.panel-close {
+  width: 30px;
+  min-height: 30px;
+  margin-left: auto;
+  padding: 0;
+}
+
+.panel-stat {
+  margin-top: 8px;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel-hint {
+  margin: 8px 0 0;
+  color: var(--paper-dim);
+  font-size: 13px;
+}
+
+.found-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.found-row .button {
+  flex: none;
+}
+
+.panel-reason {
+  margin: 0;
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.bar {
+  height: 12px;
+  margin-top: 4px;
+  border: 2px solid var(--edge-dark);
+  background: var(--chrome-sunk);
+}
+
+.bar-fill {
+  width: 0;
+  height: 100%;
+}
+
+.bar-fill.food {
+  background: var(--good);
+}
+
+.bar-fill.production {
+  background: var(--accent);
+}
+
+/* "Waiting: the city needs 2 population" */
+.blocked {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.build-title {
+  margin: 12px 0 6px;
+  color: var(--paper-dim);
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.build-title.attention {
+  color: var(--accent);
+}
+
+.build-menu {
+  display: grid;
+  gap: 6px;
+}
+
+.build-button {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    'name mark'
+    'detail detail';
+  gap: 0 8px;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.build-name {
+  grid-area: name;
+}
+
+.build-detail {
+  grid-area: detail;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.build-mark {
+  grid-area: mark;
+  align-self: center;
+  padding: 0 6px;
+  background: var(--good);
+  color: var(--ink);
+  font-size: 11px;
+}
+
+/* What the city is building now: a green frame. */
+.build-button.chosen {
+  border-color: var(--good);
+  box-shadow:
+    inset 0 0 0 2px var(--good),
+    3px 3px 0 var(--edge-dark);
+}
+
+/* ---- End Turn, "Show me", zoom ---- */
+
+.zoom-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.zoom-button {
+  width: 40px;
+  min-height: 40px;
+  padding: 0;
+  font-size: 22px;
+}
+
+.end-turn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  width: 300px; /* wide enough for "Waiting for others - tap to cancel" on one line */
+  max-width: 100%;
+}
+
+.end-turn-button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 14px;
+}
+
+.end-turn-label {
+  font-size: 18px;
+}
+
+.end-turn-hint {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: pre-line; /* one hint per line */
+  overflow-wrap: anywhere;
+}
+
+/* Ended: no longer the thing to press, so no longer gold. */
+.end-turn-button.ended:not(:disabled) {
+  background: var(--chrome-raised);
+  color: var(--paper);
+}
+
+.end-turn-button.ended .end-turn-label {
+  font-size: 13px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Toasts and the "connection lost" notice (on top of every screen)
+ * ------------------------------------------------------------------------- */
+
+.notices {
+  position: fixed;
+  top: calc(var(--top-bar-height) + 12px);
+  left: 50%;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: min(92vw, 460px);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.toasts {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.toast,
+.connection-notice {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 8px 14px;
+  border: 2px solid var(--edge-dark);
+  box-shadow: 4px 4px 0 rgb(16 16 32 / 0.55);
+  font-size: 14px;
+  font-weight: 600;
+  pointer-events: auto;
+}
+
+.toast {
+  border-left: 8px solid var(--accent);
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+  animation: toast-in 0.18s steps(3, jump-none);
+}
+
+.toast-error {
+  border-left-color: var(--danger);
+  background: #ffe2da;
+}
+
+.connection-notice {
+  background: var(--danger);
+  color: #ffffff;
+}
+
+@keyframes toast-in {
+  from {
+    transform: translateY(-8px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* Demo mode (/?demo) says what it is: a small label in the top left corner, below the game's top bar. */
+.demo-note {
+  position: fixed;
+  top: var(--top-bar-height);
+  left: 0;
+  z-index: 20;
+  padding: 2px 10px;
+  border: 2px solid var(--edge-dark);
+  border-left: 0;
+  background: var(--chrome);
+  color: var(--paper-dim);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* The message that replaces the app until the page is reloaded. */
+.fatal .button {
+  margin-top: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Touch screens: bigger targets
+ * ------------------------------------------------------------------------- */
+
+@media (pointer: coarse) {
+  .button {
+    min-height: 44px;
+  }
+
+  .zoom-button {
+    width: 48px;
+    min-height: 48px;
+  }
+
+  .panel-close {
+    width: 44px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Narrow screens (a phone, or a small window)
+ * ------------------------------------------------------------------------- */
+
+@media (max-width: 720px) {
+  .card {
+    padding: 16px;
+  }
+
+  .title {
+    font-size: 24px;
+  }
+
+  .lobby-columns {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  /* What to do next, and the Start button, stay in sight while the long lobby scrolls. */
+  .lobby-foot {
+    position: sticky;
+    bottom: -24px; /* the page's own bottom padding, so the bar sits on the very edge of the screen */
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    margin: 16px -16px 0;
+    padding: 12px 16px;
+    background: var(--chrome);
+    border-top: 2px solid var(--edge-dark);
+    box-shadow: 0 -4px 0 rgb(16 16 32 / 0.35);
+  }
+
+  /* The explanation of the map markers is a nicety the small screen has no room for. */
+  .city-panel .panel-hint {
+    display: none;
+  }
+
+  /* The top bar: turn, civilization and connection on the first line, players below, then who is waited for. */
+  .top-bar {
+    gap: 4px 10px;
+    padding: 4px 8px;
+    padding-top: max(4px, env(safe-area-inset-top));
+  }
+
+  .top-players {
+    order: 3;
+    width: 100%;
+  }
+
+  /* At most a third of the line each: six players take two lines, not five. Long names are cut short. */
+  .chip {
+    max-width: calc((100% - 12px) / 3);
+  }
+
+  .top-waiting {
+    order: 4;
+    flex: none;
+    width: 100%;
+    font-size: 13px;
+  }
+
+  .top-turn {
+    font-size: 16px;
+  }
+}
+
+/* A low window (a phone held sideways) has no room for the explanation of the map markers either. */
+@media (max-height: 480px) {
+  .city-panel .panel-hint {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Narrow and upright (a phone held upright): the bottom panels sit below the map
+ * ------------------------------------------------------------------------- */
+
+/*
+ * Only for windows that are taller than wide. A narrow window that is also
+ * low (a small phone held sideways, 667 x 375) keeps the floating panels:
+ * a deck below the map would leave it a strip a few tiles high.
+ */
+@media (max-width: 720px) and (orientation: portrait) {
+  /*
+   * The bottom of the game screen stops floating and becomes a deck of its
+   * own below the map: the panel, and under it one row with zoom and End
+   * Turn. The map area gets the rest, so nothing on the map is ever hidden
+   * behind a panel on a small screen.
+   */
+  .hud-bottom {
+    position: static;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 8px;
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
+    background: var(--ink);
+    border-top: 2px solid var(--edge-dark);
+    pointer-events: auto;
+  }
+
+  .hud-right {
+    flex-direction: row;
+    align-items: flex-end;
+    justify-content: space-between;
+  }
+
+  /* The panel may not swallow the map: it scrolls inside itself instead. */
+  .panel {
+    width: 100%;
+    max-height: 44vh;
+    box-shadow: inset 0 0 0 2px #4a4a74;
+  }
+
+  .end-turn {
+    width: 230px;
+  }
 }
