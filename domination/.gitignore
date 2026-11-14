@@ -1,0 +1,18 @@
+# Installed packages (re-created by `npm install`)
+node_modules/
+
+# Build output (re-created by `npm run build`)
+dist/
+
+# Saved games written by the server (see DOMINATION_DATA_DIR in README.md)
+/data/
+
+# Test and tooling leftovers
+coverage/
+test-results/
+playwright-report/
+e2e/.tmp/
+*.tmp
+*.log
+.vite/
+.DS_Store

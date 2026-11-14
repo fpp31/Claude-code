@@ -1,0 +1,11 @@
+{
+  "name": "@domination/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pure rules engine, data tables and wire types shared by the server and the client. No Node or browser APIs.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
+  }
+}

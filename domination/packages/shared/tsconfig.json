@@ -1,0 +1,6 @@
+{
+  // Type-checks the shared source WITHOUT Node or browser typings, so that
+  // using `process`, `window`, `console` and friends here is a compile error.
+  "extends": "../../tsconfig.base.json",
+  "include": ["src"]
+}

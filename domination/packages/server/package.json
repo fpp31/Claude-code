@@ -1,0 +1,14 @@
+{
+  "name": "@domination/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Authoritative game server: one Node process serving the WebSocket and the built client.",
+  "type": "module",
+  "dependencies": {
+    "@domination/shared": "*",
+    "ws": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2"
+  }
+}

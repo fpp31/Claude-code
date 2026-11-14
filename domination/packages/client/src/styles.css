@@ -1,0 +1,56 @@
+/*
+ * The one stylesheet of the client (work package WP4 adds the screens and
+ * panels below the base rules).
+ *
+ * Look: chunky pixel-game UI to match the map art: dark ink borders, hard
+ * offset shadows, no rounded-soft web look. Colours come from the variables
+ * below; civilization colours are set from code as inline CSS variables.
+ */
+
+:root {
+  --ink: #22223a;        /* outline colour of the art, also the page background */
+  --paper: #f8f0d8;      /* panel background */
+  --paper-shade: #c8bca0;
+  --accent: #f8c020;     /* buttons that matter (End Turn, Start) */
+  --danger: #c81e1e;
+  --text: #22223a;
+  --text-on-ink: #f8f0d8;
+  --font: ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--ink);
+  color: var(--text-on-ink);
+  font-family: var(--font);
+  font-size: 16px;
+  /* The game handles its own gestures; keep the page from bouncing or zooming. */
+  overscroll-behavior: none;
+}
+
+#app {
+  height: 100%;
+}
+
+/* The map. Pixels must stay sharp, and touch gestures must reach the app. */
+canvas {
+  display: block;
+  image-rendering: pixelated;
+  touch-action: none;
+}
+
+/* Shown by main.ts when the app fails to start. */
+.boot-error {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 3rem 1rem;
+}

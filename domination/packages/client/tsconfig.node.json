@@ -1,0 +1,10 @@
+{
+  // Type-checks the one client file that runs in Node, not in the browser:
+  // the Vite configuration. It is kept apart from tsconfig.json so that Node
+  // names such as `process` stay unknown (a compile error) in the browser code.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["vite.config.ts"]
+}
