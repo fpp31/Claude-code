@@ -37,13 +37,13 @@ The ideas everything else follows from:
 - Events (`GameEvent`) are cosmetic news for toasts. The engine hands out every event together with its audience (`AddressedEvent`: `to` is a list of players or `'all'`); `filterEvents` picks one player's events and drops the audience lists, which never leave the server. Phase 1 addresses a player's events to that player only, plus `turnStarted` to all. The client must work if events are ignored.
 - Cities are named from their civilization's list in founding order. That makes "how many cities has this player founded" readable from a city's name, which is accepted and written down as a public fact (`protocol.ts`).
 - A city's view says why a finished item is not appearing (`productionBlocked`: needs population, or no free tile); one function (`productionBlocked` in `rules/city.ts`) serves both turn resolution and the view.
-- Start positions come with hard guarantees (distinct, legal city sites, at least `minCityDistance` apart, room to walk) and stronger ones when the map is not crowded (distance, one landmass, fairness within 70%); the generator checks every result and retries with the next attempt stream until they hold. On a crowded map the stronger ones become aims, in that order.
+- Start positions come with hard guarantees (distinct, legal city sites, at least `minCityDistance` apart, room to walk) and stronger ones when the map is not crowded (distance, one landmass, fairness within 70%); the generator checks every result and retries with the next attempt stream until they hold. On a crowded map the stronger ones become aims, in that order, behind one that comes first: nobody is put alone on an island too small to grow on.
 - All balance numbers live in `shared/src/data/`. Table tests guard the relationships fog and rules rely on (for example: a settler sees far enough that "too close to a city" reveals nothing; every unit sees at least as far as it walks in a turn, so the highlighted tiles are exactly the ones the server lets it reach). The numbers that only shape what generated maps look like live in `shared/src/mapgen/tuning.ts`.
 
 **Server**
 
 - One process, one port: `node:http` serves the built client and upgrades `/ws` to a `ws` WebSocket. Each message is handled synchronously from start to finish: no queues, no locks.
-- The commit rule, for every change to a room (lobby or game): **prepare** (build the next file and every message; pure, so an exception here means nothing happened), **save** (temp file, fsync, rename), **adopt and send** (cannot fail: sending never throws). For an action that is: rules, then every seat's view and each socket's update, then save, then adopt, then send, then `actionOk` to the sender. A player whose view did not change receives nothing. A failure before the save answers the actor `actionRejected serverError` and changes nothing.
+- The commit rule, for every change to a room (lobby or game): **prepare** (build the next file and every message; pure, so an exception here means nothing happened), **save** (temp file written in full and checked for its size, fsync, rename), **adopt and send** (cannot fail: sending never throws). For an action that is: rules, then every seat's view and each socket's update, then save, then adopt, then send, then `actionOk` to the sender. A player whose view did not change receives nothing. A failure before the save answers the actor `actionRejected serverError` and changes nothing.
 - A client is never shown the text of an exception: every `serverError` carries the one constant sentence `SERVER_ERROR_MESSAGE`; details go to the server log.
 - One JSON file per game (`data/rooms/CODE.json`), rewritten atomically after every accepted change. All games are loaded before the server starts listening.
 - Identity: the server issues a random token; the browser keeps it in localStorage; a seat stores only its SHA-256. A game is joined by a five-character code. `joinGame` is also the reconnect message: sent with `name: null` it only brings a player back to a seat they have; taking a seat needs a name, that is, the Join button. A seat whose stored hash is `null` is unclaimed and goes to the next player who joins (the manual rescue for a lost token; later the hook for empty and AI seats).
@@ -78,7 +78,9 @@ Phase 1 was built in five parts at the same time, and many file headers still sa
 
 ```
 package.json, tsconfig.base.json, vitest.config.ts, .gitignore      project set-up
-scripts/dev.mjs                                                      what "npm run dev" runs
+scripts/dev.mjs, devEnv.mjs                                          what "npm run dev" runs, and the environment it gives
+                                                                     its server (its own folder of saved games)
+docs/art/, docs/screenshots/                                         the approved art style; pictures for the README
 e2e/two-players.ts                                                   the end-to-end test (two browsers, real server)
 
 packages/shared/src/                                                 THE RULES (pure, no Node, no browser)
@@ -131,6 +133,7 @@ packages/server/src/                                                 THE SERVER 
 packages/server/test/   one file per subject (see the top of
                         server.test.ts), plus harness.ts (real server,
                         real sockets), fakeRules.ts and realWorld.ts  all WP3
+                        devScript.test.ts: scripts/devEnv.mjs
 
 packages/client/                                                     THE WEB PAGE (browser)
   vite.config.ts, tsconfig.json, tsconfig.node.json                  set-up
@@ -138,8 +141,8 @@ packages/client/                                                     THE WEB PAG
   src/ui/               app (which screen), home, lobby and game
                         screens, top bar, unit and city panels, the
                         "First steps" note (startHint), End Turn
-                        button, toasts, texts (the sentences), dom
-                        and civColors (helpers)                      WP4
+                        button, toasts, texts (the sentences), dom,
+                        civColors and pressGuard (helpers)           WP4
   src/ui/testIds.ts     data-testid names (the e2e contract)         scaffold
   src/net/              connection (reconnect, liveness), identity
                         (token, address bar, storage)                WP4
@@ -198,7 +201,7 @@ packages/client/                                                     THE WEB PAG
 
 (The words after `vitest run` are matched against test file paths, so `packages/shared/test/rulesCity.test.ts` is picked up by the second command.)
 
-When several people (or several copies of the project) run on one machine: give each development setup its own ports (`PORT=8801 DEV_PORT=5201 npm run dev`), and never test against the shared `packages/client/dist`, because every `npm run build` empties it. Server tests always use port 0 (a free port), a temporary data folder and a temporary client folder.
+When several people (or several copies of the project) run on one machine: give each development setup its own ports and, within one copy of the project, its own folder of saved games (`PORT=8801 DEV_PORT=5201 DOMINATION_DATA_DIR=data-dev-2 npm run dev`), and never test against the shared `packages/client/dist`, because every `npm run build` empties it. Two servers must never share a data folder: each would write over the other's saves. `npm run dev` therefore defaults to `data-dev/`, away from the `data/` of `npm start`. Server tests always use port 0 (a free port), a temporary data folder and a temporary client folder.
 
 ## 4. From a click to a redraw
 
@@ -259,7 +262,7 @@ Each of the five parts reported where it had to decide something its contract le
 - `OwnUnitDetail.foundCityError` is about the unit and its tile only. After End Turn it can still be null while the action would be answered `turnAlreadyEnded`; the unit panel explains that in words.
 - A move ends early only if the world changed after the player's view was made (somebody else stepped into the way in the same instant): every unit sees at least as far as it can walk in a turn, and a table test guards that.
 - A foreign unit that a moving unit sees only in passing leaves no trace in the mover's view: units are never remembered. Phase 2 collects who saw whom while the path is walked.
-- On a crowded map the generator keeps the starts apart up to `RULES.minStartDistance`, then prefers one landmass, then similar scores. More distance than that is not bought with worse fairness.
+- On a crowded map the generator first keeps every player off a small island of their own (a landmass under `MAPGEN.roomyLandmassTiles` tiles gets a start only if all starts are on it, or if nothing else fits at any allowed distance), then keeps the starts apart up to `RULES.minStartDistance`, then prefers one landmass, then similar scores. More distance than that is not bought with worse fairness.
 - The generator's own numbers (the 70% of the fairness rule, the 100 attempts, everything about the look of the land) stay in `mapgen/tuning.ts`. The fairness rule scores the tiles within 2 of a start, the land a city claims; a table test fails if `RULES.cityClaimRadius` ever stops being 2, so the two are changed together.
 - `mapgen/grid.ts` keeps one set of read-only lookup tables per map size between calls. It is the only thing the "pure" package remembers, and it cannot change any result.
 - The map generator's "gave up" error names the seed. Exception texts only ever reach the server log, where the seed is no secret (it is in the save file too).
@@ -305,6 +308,37 @@ Somebody who had not built the game checked all of phase 1 against the brief. Tw
 
 - **The renderer is never a frame behind a resize.** A browser tells a `ResizeObserver` about a new size only while it makes the next frame. Until then the renderer worked with the old size, so "where is this tile?" straight after the window had changed was answered for a canvas that was no longer there. That made the end-to-end test fail about once in 35 runs (its step 10 makes the window low and clicks at once). Now `panBy`, `zoomBy`, `centerOn`, `tileAt` and `tileToScreen` measure the canvas first (`measure` in `render/renderer.ts`). The observer stays for the exact size in device pixels and for resizes while nobody calls the renderer; when it reports, the frame is drawn in that moment rather than at the next animation frame, because a resized canvas is empty and the browser paints right afterwards (before, the map was missing from the picture for one frame at every change of size).
 - **A single notch of the mouse wheel always zooms one step.** What a notch is worth differs between computers (100 units on most; less where the display or the page is enlarged). Counted against a fixed 100, a wheel that reports less did nothing when turned one notch at a time. Now the first wheel event after a pause (0.4 s) is a step by itself, and only while the wheel keeps turning are the units added up, 100 to a step, which is what keeps a trackpad from racing through all zoom levels (`createWheelStepper` in `input/gestures.ts`). This was tried with a simulated wheel at several display densities, not yet with a real mouse or trackpad.
+
+**After the review**
+
+A second group went through the finished phase 1 looking for faults, and a sceptic repeated each one before it counted. What was changed, and what was left:
+
+*Saving*
+
+- **A save is written in full or not at all.** A disk that is nearly full can take the first part of a file and report no error. `storage.save` now writes until every byte is in the file (the next write then fails with "no space left"), compares the file's size with the save, and only then renames it over the old one. A failed save answers the actor `serverError` and keeps the old state, as before.
+- **The seats of a started game must be its players.** `checkRoomFile` compares the two (and refuses two seats with one token hash): a seat line that was deleted or renamed by hand used to load without a word and freeze the game. Such a file is moved aside as `.corrupt` with a sentence naming the seat, like every other slip in the envelope. A byte-order mark in front of the file (some editors add one) is ignored.
+- **`npm run dev` has its own data folder**, `data-dev/` (`scripts/devEnv.mjs`). There is still no lock file (section 6): two servers started by hand on one folder overwrite each other's saves, and only the README says so.
+
+*Rules and map*
+
+- **Crowded maps: nobody alone on a small island.** The fallback placement used to try "every site there is" at the full distance before trying one landmass a tile closer, which put up to three of six players on islands of fewer than 30 tiles on about one small map in 200 (often with no site for a second city, and never a way off). Small islands are now the last resort (see "Rules and map" above); six players on the small map are 7 instead of 8 apart on about one map in 180.
+- **A unit a city completes appears in the city or on land of the city that is joined to it** (`findSpawnTile`): a tile the city owns across a channel is no room, where a unit used to appear that could never walk back. "Joined" means by the city's own land and by the ground alone. It looks no further on purpose: the answer is shown to the owner (`productionBlocked`), and the city's own tiles are all the owner is sure to see.
+- `generateForSize` takes the placement step as an optional argument, so tests reach the generator's own checks of the start rules, which nothing could reach before.
+
+*Client*
+
+- **A page the server no longer knows goes back to the first screen.** `noSuchGame`, `nameRequired`, `gameAlreadyStarted` and `gameFull` are answers to `joinGame`; arriving while a lobby or game is on screen they can only answer the automatic rejoin, and they take that screen down (it used to stay up, looking alive, with every button refused).
+- **`left` during a game means "you are still in it".** It is the answer to a Leave pressed in the lobby in the instant the host pressed Start; the server keeps the seat. The page asks to be let back in instead of dropping to the first screen. Leaving a lobby also forgets it as the "last game", so the first screen does not offer it again.
+- **Small things on the page:** Start and Leave ignore a second press for a second (`ui/pressGuard.ts`); a button of the game screen that was clicked by mouse or finger gives the keyboard focus back, so Enter still ends the turn; a `?g=` that cannot be a game code is neither sent nor printed (`cleanGameCode`); the lobby says when its link only works on this computer; at most one "Turn N has begun." toast is on screen (`Toast.slot`); the toast's slide and the blinking dot respect "reduce motion".
+- **Words on a civilization's colour have a colour of their own** (`CivDef.text`, `--civ-text`): the accent where it reaches a contrast of 4.5 to 1, otherwise a lighter or darker one (Rome, China, Maya). A table test holds it there. The map, banners and swatches keep primary and accent.
+- The end-to-end test gained steps 12 to 16 for the things above that only a real page shows; each was seen to fail with its fix taken out.
+
+*Left as it is*
+
+- **Two tabs opened in the same instant on a browser's first visit** can each be given a token; the one that is not stored loses its seat on reload. It needs two tabs within a few milliseconds on a near-zero-latency link (the reviewer got it with a script on localhost, never with tabs opened by hand). Curing it means swapping a page's identity after the fact, in the code that guards every seat; the README names the gap instead.
+- **A freed seat goes to whoever joins first, and several freed seats in join order.** That is the documented rescue (section 6); the README now says who "whoever" can be and to free one seat at a time. A claim word belongs with seat management in a later phase.
+- **The start placement is still greedy.** An exact search would keep the full distance on some of the crowded maps that now give up a tile; not worth its cost.
+- **Focus after End Turn** goes back to the page, by the rule in `dom.ts`; the next Tab starts from where the browser left off.
 
 ## 8. Deferred to later phases (do not build now)
 

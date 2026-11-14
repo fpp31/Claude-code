@@ -8,7 +8,7 @@ import {
   createWheelStepper,
 } from '../src/input/gestures';
 import type { PointerKind, PointerTracker } from '../src/input/gestures';
-import { focusKind, keyCommand, panDirectionOfKey } from '../src/input/keys';
+import { clickWasByPointer, focusKind, keyCommand, panDirectionOfKey } from '../src/input/keys';
 import type { KeyPress } from '../src/input/keys';
 
 /**
@@ -330,6 +330,15 @@ describe('keyboard shortcuts (WP4)', () => {
     expect(keyCommand(press('n', { focus: 'button' }))).toEqual({ kind: 'nextUnit' });
     expect(keyCommand(press('ArrowUp', { code: 'ArrowUp', focus: 'button' }))).toEqual({ kind: 'pan', direction: 'up' });
     expect(keyCommand(press('+', { focus: 'button' }))).toEqual({ kind: 'zoom', steps: 1 });
+  });
+
+  it('clickWasByPointer tells a click of the mouse or a finger from a click made with the keyboard', () => {
+    // MouseEvent.detail: 1 for a click, 2 for the second click of a double-click...
+    expect(clickWasByPointer(1)).toBe(true);
+    expect(clickWasByPointer(2)).toBe(true);
+    // ...and 0 when Enter or Space pressed the focused button (or code called click()):
+    // that button was reached with Tab and must keep the focus.
+    expect(clickWasByPointer(0)).toBe(false);
   });
 
   it('ignores the repeats of a held key', () => {

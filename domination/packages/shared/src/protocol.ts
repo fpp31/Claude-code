@@ -233,7 +233,9 @@ export type ServerMessage =
   /**
    * This socket is no longer attached to any game: the answer to
    * `leaveGame`, also sent to the other sockets of a seat that was given up
-   * in the lobby.
+   * in the lobby. (In a running game the seat is kept. A page that is sent
+   * `left` while it shows a running game pressed Leave in the lobby just as
+   * the game started; it sends `joinGame` again to stay in its game.)
    */
   | { type: 'left' }
   /**

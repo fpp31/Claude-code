@@ -40,13 +40,25 @@ export function attemptStreams(seed: string, attempt: number): MapStreams {
   return (part) => seedRng(seed, part === '' ? prefix : `${prefix}:${part}`);
 }
 
+/** The shape of placeStarts (starts.ts): the step that chooses the start tiles, or says that there is no room. */
+export type StartPlacer = typeof placeStarts;
+
 /**
  * Generates a map of the given size with one start per player: the result
  * of the first attempt that keeps every promise about start positions.
  * Throws if MAPGEN.maxAttempts attempts all fail. The input is not checked
  * here; generateMap does that.
+ *
+ * @param place  for tests only: stands in for placeStarts, so a test can
+ *               hand in starts that break a promise and see that the map
+ *               is thrown away
  */
-export function generateForSize(seed: string, size: MapDimensions, playerCount: number): GeneratedMap {
+export function generateForSize(
+  seed: string,
+  size: MapDimensions,
+  playerCount: number,
+  place: StartPlacer = placeStarts,
+): GeneratedMap {
   const grid = gridFor(size);
   const crowded = playerCount > size.recommendedPlayers;
 
@@ -54,7 +66,7 @@ export function generateForSize(seed: string, size: MapDimensions, playerCount: 
     const streams = attemptStreams(seed, attempt);
     const map = buildMap(grid, streams);
     const startRng = streams('starts');
-    const starts = placeStarts(grid, map, playerCount, crowded, startRng);
+    const starts = place(grid, map, playerCount, crowded, startRng);
     if (starts === null) continue;
     // placeStarts is built to keep the rules; they are checked all the same
     // (see startRules.ts), and a map that fails is thrown away.

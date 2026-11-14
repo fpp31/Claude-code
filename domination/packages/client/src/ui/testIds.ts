@@ -22,6 +22,8 @@ export const TEST_IDS = {
   lobbyCode: 'lobby-code',
   /** The shareable link, as text. */
   lobbyLink: 'lobby-link',
+  /** The warning under the link when it only works on this computer (the page was opened through localhost). */
+  lobbyLocalNote: 'lobby-local-note',
   /** One per taken seat: `lobby-seat-<playerId>`. */
   lobbySeat: 'lobby-seat-',
   /** One per civilization: `lobby-civ-<civId>`. */

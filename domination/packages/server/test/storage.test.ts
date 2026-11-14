@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_SCHEMA } from '@domination/shared';
 import type { GameState } from '@domination/shared';
@@ -7,6 +7,7 @@ import { ROOM_FILE_FORMAT } from '../src/roomFile';
 import type { RoomFile } from '../src/roomFile';
 import { serializeRoomFile } from '../src/roomFileText';
 import { createStorage } from '../src/storage';
+import type { WriteCall } from '../src/storage';
 import { hashToken } from '../src/tokens';
 import { createFakeRules } from './fakeRules';
 import { cleanUp, startTestServer, temporaryFolder } from './harness';
@@ -17,11 +18,16 @@ import { cleanUp, startTestServer, temporaryFolder } from './harness';
 
 afterEach(cleanUp);
 
-/** A storage on a fresh temporary folder, with its log lines collected. */
-function newStorage(dataDir = temporaryFolder()) {
+/** A storage on a fresh temporary folder, with its log lines collected. `write` plays the disk (see createStorage). */
+function newStorage(dataDir = temporaryFolder(), write?: WriteCall) {
   const logs: string[] = [];
-  const storage = createStorage(dataDir, (line) => logs.push(line));
+  const storage = createStorage(dataDir, (line) => logs.push(line), write);
   return { storage, logs, dataDir, roomsDir: join(dataDir, 'rooms') };
+}
+
+/** What a full disk answers: the error Node raises for "no space left on device". */
+function noSpaceLeft(): Error {
+  return Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
 }
 
 function lobbyFile(code: string, hostName = 'Ada'): RoomFile {
@@ -116,6 +122,59 @@ describe('storage (WP3)', () => {
     expect(readFileSync(join(roomsDir, 'AAAAA.json'), 'utf8')).toBe(before);
   });
 
+  it('a disk that takes only the first part of the file: the save throws, the previous save is untouched, nothing is left behind', () => {
+    // What a nearly full disk does: the first write call takes what still
+    // fits and reports no error; only the next one says "no space left".
+    const room = 100;
+    let calls = 0;
+    const nearlyFull: WriteCall = (handle, bytes, offset, length) => {
+      calls++;
+      if (calls > 1) throw noSpaceLeft();
+      return writeSync(handle, bytes, offset, Math.min(length, room));
+    };
+    const dataDir = temporaryFolder();
+    const { roomsDir } = newStorage(dataDir);
+    newStorage(dataDir).storage.save(startedFile('AAAAA'));
+    const before = readFileSync(join(roomsDir, 'AAAAA.json'), 'utf8');
+    expect(before.length).toBeGreaterThan(room);
+
+    const { storage } = newStorage(dataDir, nearlyFull);
+    const next = { ...startedFile('AAAAA'), mapSize: 'large' as const };
+    expect(() => storage.save(next)).toThrow(/ENOSPC/);
+
+    expect(calls).toBe(2);
+    expect(readFileSync(join(roomsDir, 'AAAAA.json'), 'utf8')).toBe(before);
+    expect(readdirSync(roomsDir)).toEqual(['AAAAA.json']);
+    // What a restart finds is the complete previous save.
+    expect(newStorage(dataDir).storage.loadAll()).toEqual([startedFile('AAAAA')]);
+  });
+
+  it('a file the disk takes in small pieces is written completely', () => {
+    const pieces: WriteCall = (handle, bytes, offset, length) => writeSync(handle, bytes, offset, Math.min(length, 7));
+    const { storage, dataDir } = newStorage(temporaryFolder(), pieces);
+    const file = startedFile('AAAAA');
+    storage.save(file);
+
+    expect(newStorage(dataDir).storage.loadAll()).toEqual([file]);
+  });
+
+  it('a file that is shorter than the save never replaces the previous save, whatever the disk reported', () => {
+    // A disk that claims to have taken everything and kept only half of it.
+    const lying: WriteCall = (handle, bytes, offset, length) => {
+      writeSync(handle, bytes, offset, Math.floor(length / 2));
+      return length;
+    };
+    const dataDir = temporaryFolder();
+    const { roomsDir } = newStorage(dataDir);
+    newStorage(dataDir).storage.save(lobbyFile('AAAAA', 'First'));
+    const before = readFileSync(join(roomsDir, 'AAAAA.json'), 'utf8');
+
+    expect(() => newStorage(dataDir, lying).storage.save(lobbyFile('AAAAA', 'Second'))).toThrow(/bytes long/);
+
+    expect(readFileSync(join(roomsDir, 'AAAAA.json'), 'utf8')).toBe(before);
+    expect(readdirSync(roomsDir)).toEqual(['AAAAA.json']);
+  });
+
   it('save refuses a code that is not a game code (it becomes part of a file name)', () => {
     const { storage, dataDir } = newStorage();
     expect(() => storage.save({ ...lobbyFile('AAAAA'), code: '../../x' })).toThrow();
@@ -171,6 +230,66 @@ describe('storage (WP3)', () => {
       expect(readFileSync(join(roomsDir, `${name}.corrupt`), 'utf8')).toBe(text);
       expect(logs.some((line) => line.includes(name))).toBe(true);
     }
+  });
+
+  it('a save that an editor wrote back with a byte-order mark in front still loads, and the next save drops the mark', () => {
+    const { storage, logs, roomsDir } = newStorage();
+    const file = startedFile('AAAAA');
+    const path = join(roomsDir, 'AAAAA.json');
+    storage.loadAll(); // makes the folder
+    writeFileSync(path, `\uFEFF${serializeRoomFile(file)}`);
+    expect([...readFileSync(path).subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+
+    expect(storage.loadAll()).toEqual([file]);
+    expect(logs).toEqual([]);
+    expect(readdirSync(roomsDir)).toEqual(['AAAAA.json']);
+
+    storage.save(file);
+    expect(readFileSync(path)[0]).toBe('{'.charCodeAt(0));
+  });
+
+  it('a started game whose seats were edited so that they are no longer its players is moved aside with a sentence naming the seat', () => {
+    const { storage, logs, roomsDir } = newStorage();
+    const good = startedFile('AAAAA');
+    storage.save(good);
+    const hash = hashToken('a'.repeat(32));
+    const text = (code: string) => serializeRoomFile(startedFile(code));
+    const edited: Record<string, { text: string; says: string }> = {
+      // A seat renamed: nobody can ever be that player, and the rules do not know p4.
+      'BBBBB.json': { text: text('BBBBB').replace('"playerId": "p3"', '"playerId": "p4"'), says: 'seat p4' },
+      // A seat's line deleted (an owner trying to remove an absent player): every turn would wait for p3.
+      'CCCCC.json': { text: text('CCCCC').replace(/,\n {4}\{ "playerId": "p3".*\}/, ''), says: 'player p3' },
+      // One player's hash pasted into another seat: the second seat can never be reached.
+      'DDDDD.json': { text: text('DDDDD').replace('"tokenHash": null', `"tokenHash": "${hash}"`), says: 'seats p1 and p3' },
+    };
+    for (const [name, { text: content }] of Object.entries(edited)) {
+      // Each edit really happened, and left a file that is still good JSON.
+      expect(content).not.toBe(text(name.slice(0, 5)));
+      expect(() => JSON.parse(content)).not.toThrow();
+      writeFileSync(join(roomsDir, name), content);
+    }
+
+    expect(storage.loadAll()).toEqual([good]);
+
+    for (const [name, { text: content, says }] of Object.entries(edited)) {
+      expect(readFileSync(join(roomsDir, `${name}.corrupt`), 'utf8')).toBe(content);
+      expect(logs.find((line) => line.includes(name))).toContain(says);
+    }
+    expect(readdirSync(roomsDir).sort()).toEqual(['AAAAA.json', ...Object.keys(edited).map((name) => `${name}.corrupt`)].sort());
+  });
+
+  it('the one edit the README describes, a tokenHash set to null, loads', () => {
+    const { storage, logs, roomsDir } = newStorage();
+    const file = startedFile('AAAAA');
+    storage.loadAll();
+    const hash = hashToken('a'.repeat(32));
+    writeFileSync(join(roomsDir, 'AAAAA.json'), serializeRoomFile(file).replace(`"tokenHash": "${hash}"`, '"tokenHash": null'));
+
+    const loaded = storage.loadAll();
+    expect(loaded).toHaveLength(1);
+    // Two seats without an owner are fine: null is not a secret two seats share.
+    expect(loaded[0].seats.map((seat) => seat.tokenHash)).toEqual([null, null]);
+    expect(logs).toEqual([]);
   });
 
   it('a second corrupt file with the same name does not overwrite the first', () => {

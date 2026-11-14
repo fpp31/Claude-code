@@ -9,8 +9,9 @@
  *     score, as far apart as that landmass allows. This is the only way a
  *     map that is not crowded gets its starts, and it keeps S1-S3.
  *  3. If the map is crowded and step 2 found no room, give way in the order
- *     the doc comment of generateMap asks for: first keep the starts as far
- *     apart as possible, then prefer one landmass, then similar scores.
+ *     the doc comment of generateMap asks for: first keep every player off
+ *     a small island of their own, then keep the starts as far apart as
+ *     possible, then prefer one landmass, then similar scores.
  *
  * "As far apart as possible" is done by trial: ask for a large spacing
  * first and lower it step by step until the wanted number of starts fits.
@@ -111,10 +112,10 @@ function placeTogether(
 
 /**
  * The fallback for a crowded map on which `placeTogether` found no room.
- * It gives way in the order the doc comment of generateMap asks for:
- * distance first, then one landmass, then similar scores. The distance is
- * never lowered below RULES.minCityDistance (rule H3); null if even that
- * does not fit.
+ * It gives way in the order the doc comment of generateMap asks for: keep
+ * every player off a small island of their own, then distance, then one
+ * landmass, then similar scores. The distance is never lowered below
+ * RULES.minCityDistance (rule H3); null if even that does not fit.
  */
 function placeCrowded(
   grid: Grid,
@@ -127,8 +128,7 @@ function placeCrowded(
   // The groups of sites to choose from, most wanted first:
   //   one landmass:   comfortable sites with fair scores, then all
   //                   comfortable sites, then every site on it;
-  //   any landmass with room to grow: the same three;
-  //   last resort:    every site there is.
+  //   any landmass with room to grow: the same three.
   const groups: Site[][] = [];
   for (const home of homes) {
     const comfortable = sites.filter((site) => site.area === home.area && site.comfortable);
@@ -139,15 +139,23 @@ function placeCrowded(
   const roomy = sites.filter((site) => areaSizes[site.area] >= MAPGEN.roomyLandmassTiles);
   const roomyAndComfortable = roomy.filter((site) => site.comfortable);
   groups.push(sitesNearTheBest(roomyAndComfortable, MAPGEN.fairScorePercent), roomyAndComfortable, roomy);
-  groups.push([...sites]);
-  const groupOrders = groups.filter((group) => group.length >= playerCount).map((group) => tryOrders(grid, group, rng));
+  const wanted = groups.filter((group) => group.length >= playerCount).map((group) => tryOrders(grid, group, rng));
+  // The last resort: every site there is, small islands included.
+  const anywhere = sites.length >= playerCount ? [tryOrders(grid, sites, rng)] : [];
 
-  // Distance matters most, so it is the outer loop: only when no group of
-  // sites fits at a spacing is the spacing lowered.
-  for (let spacing = RULES.minStartDistance; spacing >= RULES.minCityDistance; spacing--) {
-    for (const orders of groupOrders) {
-      const starts = spreadOut(grid, orders, playerCount, spacing, spacing);
-      if (starts !== null) return starts;
+  // The small islands wait until the land above has failed at EVERY spacing.
+  // A player alone on one has nowhere to found a second city and, with land
+  // units only, never meets anybody: a lost game from the first turn. That
+  // is worse than everybody starting a tile or two closer together.
+  //
+  // Within each of the two rounds distance matters most, so it is the outer
+  // loop: only when no group fits at a spacing is the spacing lowered.
+  for (const groupOrders of [wanted, anywhere]) {
+    for (let spacing = RULES.minStartDistance; spacing >= RULES.minCityDistance; spacing--) {
+      for (const orders of groupOrders) {
+        const starts = spreadOut(grid, orders, playerCount, spacing, spacing);
+        if (starts !== null) return starts;
+      }
     }
   }
   return null;

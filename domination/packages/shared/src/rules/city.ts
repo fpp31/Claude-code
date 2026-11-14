@@ -5,11 +5,11 @@
 
 import type { RuleErrorCode } from '../actions';
 import { RULES } from '../data/rules';
-import { tileAllowsCity, tileIsWorkable, tileYields } from '../data/terrain';
+import { tileAllowsCity, tileIsWorkable, tileMoveCost, tileYields } from '../data/terrain';
 import { UNITS, UNIT_TYPE_IDS } from '../data/units';
 import type { UnitTypeId } from '../data/units';
-import { distance } from '../hex';
-import type { BuildItem, City, GameState, TileIndex, Unit } from '../types';
+import { distance, neighbors } from '../hex';
+import type { BuildItem, City, GameMap, GameState, TileIndex, Unit } from '../types';
 import type { BuildOption, ProductionBlock } from '../viewTypes';
 import { boardFromState, canEnterTile } from './movement';
 import { tileOwner, tilesOfCity } from './stateQueries';
@@ -148,22 +148,56 @@ export function buildOptions(state: GameState, city: City): BuildOption[] {
  *
  * A tile has room if canEnterTile allows a unit of this type and owner to
  * stand there. Candidates in order: the city tile; then the tiles owned by
- * this city (`cityId`), nearest to the centre first, ties by lower tile index.
+ * this city (`cityId`) that are joined to the city tile by the city's own
+ * land (joinedByOwnLand), nearest to the centre first, ties by lower tile
+ * index.
+ *
+ * Why "joined": a city by the sea may own land on the far side of a
+ * channel. A unit that appeared there would stand where no land unit could
+ * have walked to, and could never come back. Such a tile is no room; when
+ * everything nearer is full the city waits.
  */
 export function findSpawnTile(state: GameState, city: City, unitType: UnitTypeId): TileIndex | null {
   const board = boardFromState(state);
   const newcomer = { owner: city.owner, type: unitType };
+  if (canEnterTile(board, newcomer, city.tile) === null) return city.tile;
 
-  // The city tile first; then the rest of the city's land, nearest first,
-  // equal distances in tile order.
+  // The rest of the city's land, nearest first, equal distances in tile order.
   const others = tilesOfCity(state, city.id)
     .filter((tile) => tile !== city.tile)
     .sort((a, b) => distance(city.tile, a, state.map) - distance(city.tile, b, state.map) || a - b);
+  const joined = joinedByOwnLand(state.map, city.tile, others);
 
-  for (const tile of [city.tile, ...others]) {
-    if (canEnterTile(board, newcomer, tile) === null) return tile;
+  for (const tile of others) {
+    if (joined.has(tile) && canEnterTile(board, newcomer, tile) === null) return tile;
   }
   return null;
+}
+
+/**
+ * The tiles of `land` (a city's tiles) that a land unit could walk to from
+ * `from` (the city tile) without leaving `land`, as far as the ground goes:
+ * units in the way are ignored (they move on; water does not).
+ *
+ * The walk stays on the city's own land on purpose. The answer ends up in
+ * the owner's view (productionBlocked), and a view may depend only on what
+ * its player sees: a city's tiles are always in its owner's sight, the land
+ * beyond them need not be. (It also keeps the walk short: a city has at
+ * most 19 tiles.) Land that is joined to the city only by a way around
+ * outside its borders therefore counts as not joined.
+ */
+function joinedByOwnLand(map: GameMap, from: TileIndex, land: readonly TileIndex[]): Set<TileIndex> {
+  const notReached = new Set(land.filter((tile) => tileMoveCost(map.tiles[tile]) !== null));
+  const reached = new Set<TileIndex>();
+  const queue: TileIndex[] = [from];
+  for (let next = 0; next < queue.length; next++) {
+    for (const tile of neighbors(queue[next], map)) {
+      if (!notReached.delete(tile)) continue; // not the city's, not walkable, or reached before
+      reached.add(tile);
+      queue.push(tile);
+    }
+  }
+  return reached;
 }
 
 /**
@@ -181,8 +215,9 @@ export function findSpawnTile(state: GameState, city: City, unitType: UnitTypeId
  *  - buildPlayerView puts it into OwnCityDetail.productionBlocked, so the
  *    city panel can say why a full progress bar is not turning into a unit.
  *
- * Fog note: it reads only the city's own population and what stands on the
- * city's own tiles, all of which the owner sees, so showing it leaks nothing.
+ * Fog note: it reads only the city's own population, and the ground of the
+ * city's own tiles and what stands on them, all of which the owner sees, so
+ * showing it leaks nothing.
  */
 export function productionBlocked(state: GameState, city: City): ProductionBlock | null {
   if (city.production === null) return null;

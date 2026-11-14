@@ -8,6 +8,7 @@ import type { PlayerView, TileIndex } from '@domination/shared';
 import { installDebugHook } from '../debugHook';
 import { createController } from '../game/controller';
 import { overlayFor, sameOverlay } from '../game/selectors';
+import { clickWasByPointer } from '../input/keys';
 import { attachMapInput } from '../input/mapInput';
 import type { Connection } from '../net/connection';
 import { EMPTY_OVERLAY } from '../render/api';
@@ -58,6 +59,10 @@ const REVEAL_MARGIN = 44;
  * take their room from the map area, so they have to be in place before the
  * renderer measures the canvas; that is the very point of step 1.
  *
+ * The screen also takes the keyboard focus off any of its buttons that was
+ * clicked with the mouse or a finger, so that the map keys (Enter above
+ * all) keep their meaning after a click on a zoom or build button.
+ *
  * Unmounting undoes all of it (renderer.destroy(), detachInput(),
  * controller.destroy(), the debug hook, the panels, the canvas).
  *
@@ -82,6 +87,16 @@ export function mountGameScreen(parent: HTMLElement, store: Store, connection: C
     h('div', { className: 'hud-bottom' }, hudLeft, hudRight),
   );
   parent.append(screen);
+
+  // A button of this screen that was clicked with the mouse or a finger
+  // hands the keyboard focus back to the page, so that Enter goes on ending
+  // the turn (see clickWasByPointer in input/keys.ts). One listener for all
+  // of them: zoom, "Show me", the build menu, the panels' close buttons.
+  screen.addEventListener('click', (event) => {
+    if (!clickWasByPointer(event.detail)) return;
+    const button = event.target instanceof Element ? event.target.closest('button') : null;
+    if (button !== null && document.activeElement === button) button.blur();
+  });
 
   // 3. and 5. The controller and the panels come BEFORE the renderer (the
   // one change to the order in the doc comment above): the top bar and the

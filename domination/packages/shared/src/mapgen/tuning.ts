@@ -210,7 +210,10 @@ export const MAPGEN = {
   homeLandmassTries: 3,
   /**
    * On a crowded map, a landmass smaller than this is used only as a last
-   * resort: a player alone on a tiny island has nowhere to grow.
+   * resort: when the larger ones have no room for everybody even at the
+   * smallest distance the rules allow (RULES.minCityDistance). A player
+   * alone on a tiny island has nowhere to grow. (All players together on
+   * one such landmass is a different matter and is tried like any other.)
    */
   roomyLandmassTiles: 30,
 };

@@ -10,8 +10,10 @@ import {
   cityEconomy,
   cloneJson,
   distance,
+  buildPlayerView,
   findSpawnTile,
   foundCityError,
+  productionBlocked,
   tileYields,
 } from '../src/index';
 import type { BuildItem, City, GameState, PlayerId, TileIndex } from '../src/index';
@@ -24,6 +26,7 @@ import {
   at,
   citiesOf,
   cityOn,
+  endTurnForAll,
   foundCityAt,
   newGame,
   placeUnit,
@@ -599,6 +602,85 @@ describe('city economy and production (WP2)', () => {
       placeUnit(draft, 'p1', 'settler', peakCity.tile);
     });
     expect(findSpawnTile(peakFull, peakCity, 'settler')).toBeNull();
+  });
+
+  it('findSpawnTile never puts a unit on land of the city that lies across the water', () => {
+    // A city on a spit of three tiles. One tile of sea to the east lies more
+    // land, close enough to belong to the city. The tiles marked L and C are
+    // sea or grassland, depending on the case:
+    //   L  a way around from the spit to the far shore, outside the city's borders;
+    //   C  the channel between the city and the far shore.
+    const coast = (way: '~' | 'g', channel: '~' | 'g'): string[] =>
+      [
+        '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+        ' ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+        '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+        ' ~ g g g C g g g ~ ~ ~',
+        '~ L ~ ~ ~ ~ ~ ~ L ~ ~',
+        ' ~ L ~ ~ ~ ~ ~ ~ L ~ ~',
+        '~ L L L L L L L L ~ ~',
+        ' ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+      ].map((row) => row.replaceAll('L', way).replaceAll('C', channel));
+
+    /** The city on (3,3), its starting warrior inside, and own scouts on every other tile of the city on its side of the channel. */
+    function crowded(way: '~' | 'g', channel: '~' | 'g'): { state: GameState; city: City; across: TileIndex } {
+      const founded = withCapital(newGame(coast(way, channel), [[3, 3]]));
+      const map = founded.map;
+      const state = arrange(founded, (draft) => {
+        placeUnit(draft, 'p1', 'scout', at(map, 2, 3));
+        placeUnit(draft, 'p1', 'scout', at(map, 1, 3));
+        if (channel === 'g') placeUnit(draft, 'p1', 'scout', at(map, 4, 3));
+        draft.cities[Object.keys(draft.cities)[0]].production = { kind: 'unit', unitType: 'warrior' };
+      });
+      const city = cityOn(state, at(map, 3, 3));
+      const across = at(map, 5, 3);
+      // The far shore is the city's, two steps away, with nothing standing on it;
+      // the way around (where there is one) is nobody's land.
+      expect(state.map.tiles[across].cityId).toBe(city.id);
+      expect(distance(city.tile, across, map)).toBe(2);
+      expect(unitsOf(state, 'p1').some((unit) => unit.tile === across)).toBe(false);
+      for (const [x, y] of [[1, 4], [1, 5], [4, 6], [8, 5], [8, 4]]) expect(state.map.tiles[at(map, x, y)].cityId).toBeNull();
+      return { state, city, across };
+    }
+
+    // An islet: the free tile over there is no room, so the city waits, and says so.
+    const islet = crowded('~', '~');
+    expect(islet.state.map.tiles[at(islet.state.map, 4, 3)].terrain).toBe('ocean');
+    expect(findSpawnTile(islet.state, islet.city, 'warrior')).toBeNull();
+    expect(findSpawnTile(islet.state, islet.city, 'scout')).toBeNull();
+    expect(productionBlocked(islet.state, islet.city)).toBe('noRoom');
+    expect(buildPlayerView(islet.state, 'p1').cities[0].own?.productionBlocked).toBe('noRoom');
+    // A civilian still fits into the city itself, and a freed tile of the spit is taken at once.
+    expect(findSpawnTile(islet.state, islet.city, 'settler')).toBe(islet.city.tile);
+    const freed = arrange(islet.state, (draft) => {
+      const scout = Object.values(draft.units).find((unit) => unit.tile === at(draft.map, 1, 3));
+      if (scout !== undefined) delete draft.units[scout.id];
+    });
+    expect(findSpawnTile(freed, cityOn(freed, islet.city.tile), 'warrior')).toBe(at(freed.map, 1, 3));
+
+    // The turn resolves the same way: the paid-for warrior does not appear over there.
+    const paid = arrange(islet.state, (draft) => {
+      draft.cities[islet.city.id].productionStored = UNITS.warrior.cost;
+    });
+    const waited = endTurnForAll(paid).state;
+    expect(unitsOf(waited, 'p1', 'warrior')).toHaveLength(1);
+    expect(unitsOf(waited, 'p1').some((unit) => unit.tile === islet.across)).toBe(false);
+    expect(waited.cities[islet.city.id].productionStored).toBeGreaterThanOrEqual(UNITS.warrior.cost);
+
+    // The far shore joined to the spit by a long way around, outside the
+    // city's borders: still no room. The rule looks no further than the
+    // city's own land, which is all its owner is sure to see; so the answer
+    // (which the owner is shown) cannot depend on land out of their sight.
+    const wayAround = crowded('g', '~');
+    expect(findSpawnTile(wayAround.state, wayAround.city, 'warrior')).toBeNull();
+    expect(productionBlocked(wayAround.state, wayAround.city)).toBe('noRoom');
+
+    // The channel filled in: now the far shore is joined to the city by the
+    // city's own land, and is room like any other.
+    const filled = crowded('~', 'g');
+    expect(filled.state.map.tiles[at(filled.state.map, 4, 3)].cityId).toBe(filled.city.id);
+    expect(findSpawnTile(filled.state, filled.city, 'warrior')).toBe(filled.across);
+    expect(productionBlocked(filled.state, filled.city)).toBeNull();
   });
 
   it('buildOptions reads the city\'s own stored production, not another city\'s', () => {

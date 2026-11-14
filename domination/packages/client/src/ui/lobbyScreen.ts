@@ -6,13 +6,14 @@
 import { CIVS, CIV_IDS, MAP_SIZE_IDS, RULES } from '@domination/shared';
 import type { CivId, LobbyView, MapSizeId } from '@domination/shared';
 import type { Connection } from '../net/connection';
-import { shareLink } from '../net/identity';
+import { pageIsLocalOnly, shareLink } from '../net/identity';
 import type { AppState, Store } from '../state/store';
 import { setCivColors } from './civColors';
 import { h, setAttribute, setClass, setDisabled, setHidden, setText } from './dom';
 import type { Unmount } from './dom';
+import { createPressGuard } from './pressGuard';
 import { TEST_IDS } from './testIds';
-import { countOf, ghostSeatWarning, mapSizeNote, mapSizeText } from './texts';
+import { LOCAL_LINK_NOTE, countOf, ghostSeatWarning, mapSizeNote, mapSizeText } from './texts';
 import { showToast } from './toasts';
 
 /** The parts of one row of the seat list. */
@@ -34,7 +35,9 @@ interface CivButton {
  * Shows store.lobby (a LobbyView) and sends lobby messages.
  *
  *  - The game code (TEST_IDS.lobbyCode) and the shareable link (lobbyLink,
- *    from shareLink(code)) with a "Copy link" button.
+ *    from shareLink(code)) with a "Copy link" button. If the page was opened
+ *    through "localhost", a note under the link (lobbyLocalNote) says that
+ *    the link only works on this computer and what to do about it.
  *  - Seats: always RULES.maxSeats (8) rows, so the layout is ready for 8
  *    players. Taken seats (`lobby-seat-<playerId>`) show name, civilization
  *    colours, a host mark and whether the player is connected; free seats
@@ -58,21 +61,29 @@ interface CivButton {
  *    way out is for that player to come back and press Leave, or to make a
  *    new game.
  *  - "Leave" (lobbyLeaveButton): sends `leaveGame`.
+ *  - Start and Leave share one press guard (ui/pressGuard.ts): for a second
+ *    after one of them went out, presses of either are ignored, so a
+ *    double-click sends one message, not two.
  *  - Names are untrusted text: textContent only.
  */
 export function mountLobbyScreen(parent: HTMLElement, store: Store, connection: Connection): Unmount {
   // ---- Build once -------------------------------------------------------------
 
   const code = h('span', { className: 'lobby-code', testId: TEST_IDS.lobbyCode });
+  /** One guard for both buttons: whichever is pressed, the lobby is over for this page. */
+  const leaveOrStart = createPressGuard();
   const leaveButton = h('button', {
     className: 'button',
     text: 'Leave',
     testId: TEST_IDS.lobbyLeaveButton,
-    onClick: () => connection.send({ type: 'leaveGame' }),
+    onClick: () => leaveOrStart.press(() => connection.send({ type: 'leaveGame' })),
   });
 
   const link = h('span', { className: 'link-text', testId: TEST_IDS.lobbyLink });
   const copyButton = h('button', { className: 'button', text: 'Copy link', onClick: copyLink });
+  const localNote = h('p', { className: 'invite-note attention', text: LOCAL_LINK_NOTE, testId: TEST_IDS.lobbyLocalNote });
+  // The address the page was opened through does not change while the page is open.
+  localNote.hidden = !pageIsLocalOnly();
 
   const seatsTitle = h('h2', { className: 'section-title' });
   const seatRows: SeatRow[] = [];
@@ -129,6 +140,7 @@ export function mountLobbyScreen(parent: HTMLElement, store: Store, connection: 
       { className: 'invite' },
       h('p', { className: 'invite-text', text: 'Send this link to your friends so they can join:' }),
       h('div', { className: 'link-row' }, link, copyButton),
+      localNote,
     ),
     h(
       'div',
@@ -168,7 +180,7 @@ export function mountLobbyScreen(parent: HTMLElement, store: Store, connection: 
     if (lobby === null) return;
     const absent = lobby.seats.filter((seat) => !seat.connected).map((seat) => seat.name);
     if (absent.length > 0 && !window.confirm(ghostSeatWarning(absent))) return;
-    connection.send({ type: 'startGame' });
+    leaveOrStart.press(() => connection.send({ type: 'startGame' }));
   }
 
   function copyLink(): void {

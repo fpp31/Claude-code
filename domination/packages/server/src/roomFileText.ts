@@ -59,7 +59,10 @@ export type CheckedRoomFile = { ok: true; file: RoomFile } | { ok: false; proble
  * Only the envelope is checked here: code, settings and seats. The game
  * state inside is the rules engine's business; of it this function only
  * makes sure that it is an object with a layout number (`schema`), which
- * storage.ts then compares with STATE_SCHEMA.
+ * storage.ts then compares with STATE_SCHEMA, and that its players are
+ * exactly the seats. A seat line that was deleted or renamed by hand would
+ * otherwise load without a word and freeze the game: every turn would wait
+ * for a player nobody can be, or every action would fail.
  */
 export function checkRoomFile(content: Record<string, unknown>, code: GameCode): CheckedRoomFile {
   const { format, createdAt, hostId, game } = content;
@@ -89,10 +92,19 @@ export function checkRoomFile(content: Record<string, unknown>, code: GameCode):
     return bad('"hostId" is not one of the seats');
   }
 
+  // A secret opens one seat. If two seats carried the same one, its owner
+  // would always get the first and nobody could ever sit on the second.
+  for (const [index, seat] of seats.entries()) {
+    const twin = seats.slice(0, index).find((earlier) => earlier.tokenHash !== null && earlier.tokenHash === seat.tokenHash);
+    if (twin !== undefined) return bad(`seats ${twin.playerId} and ${seat.playerId} have the same "tokenHash"`);
+  }
+
   if (game !== null) {
     if (typeof game !== 'object' || Array.isArray(game)) return bad('"game" is neither null nor a game state');
-    const schema = (game as Record<string, unknown>).schema;
+    const { schema, players } = game as Record<string, unknown>;
     if (typeof schema !== 'number' || !Number.isInteger(schema)) return bad('the game state has no layout number');
+    const mismatch = seatsVersusPlayers(seats, players);
+    if (mismatch !== null) return bad(mismatch);
   }
 
   return {
@@ -103,6 +115,26 @@ export function checkRoomFile(content: Record<string, unknown>, code: GameCode):
 
 function bad(problem: string): CheckedRoomFile {
   return { ok: false, problem };
+}
+
+/**
+ * A started game's seats must be its players, one seat each. Returns a
+ * sentence naming the first seat or player that does not fit, or null.
+ */
+function seatsVersusPlayers(seats: SeatRecord[], players: unknown): string | null {
+  if (!Array.isArray(players)) return 'the game state has no list of players';
+  const playerIds = players.map((player: unknown) =>
+    typeof player === 'object' && player !== null ? (player as Record<string, unknown>).id : undefined,
+  );
+  const stray = seats.find((seat) => !playerIds.includes(seat.playerId));
+  if (stray !== undefined) {
+    return `seat ${stray.playerId} is not a player of the game inside (a seat's "playerId" must stay as it was)`;
+  }
+  const seatless = playerIds.find((id) => !seats.some((seat) => seat.playerId === id));
+  if (seatless !== undefined) {
+    return `player ${String(seatless)} of the game inside has no seat (a seat's line cannot be deleted)`;
+  }
+  return null;
 }
 
 /** One entry of "seats", rebuilt; or a sentence saying what is wrong with it. */

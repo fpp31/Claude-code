@@ -5,7 +5,7 @@
 
 import { GAME_CODE_LENGTH, RULES } from '@domination/shared';
 import type { Connection } from '../net/connection';
-import { gameCodeFromUrl, loadLastGame, savePlayerName } from '../net/identity';
+import { gameCodeFromUrl, gameLinkIsBroken, loadLastGame, savePlayerName } from '../net/identity';
 import type { AppState, Store } from '../state/store';
 import { h, setClass, setDisabled, setHidden, setText } from './dom';
 import type { Unmount } from './dom';
@@ -41,6 +41,11 @@ const CREATE_GUARD_MS = 4000;
  *    it does not exist, it has already started, it is full), the screen does
  *    NOT say "you are invited": the reason stays under the code field until
  *    the code is edited, and "Create private game" becomes the gold button.
+ *  - If the link the page was opened through names something that cannot
+ *    be a game code (a link damaged on its way), nothing is asked of the
+ *    server and nothing from the link is shown: the code field stays empty
+ *    and the line under it says that the link is damaged, until a code is
+ *    typed.
  *  - Works on a phone: large touch targets, no hover-only controls.
  *
  * "The matching button" for the NAME field is Join while a game code is
@@ -51,6 +56,8 @@ const CREATE_GUARD_MS = 4000;
  */
 export function mountHomeScreen(parent: HTMLElement, store: Store, connection: Connection): Unmount {
   const invitedTo = gameCodeFromUrl();
+  /** The address named a game, but not by anything that could be a code. Cleared when the code field is edited. */
+  let brokenLink = gameLinkIsBroken();
 
   // ---- Build once -------------------------------------------------------------
   const intro = h('p', { className: 'home-intro', testId: TEST_IDS.homeIntro });
@@ -91,7 +98,8 @@ export function mountHomeScreen(parent: HTMLElement, store: Store, connection: C
       placeholder: '5 letters',
     },
   });
-  codeInput.value = invitedTo ?? loadLastGame() ?? '';
+  // (After a damaged link the last game is not offered either: the player came for another one.)
+  codeInput.value = invitedTo ?? (brokenLink ? '' : loadLastGame() ?? '');
   const joinButton = h('button', { className: 'button big', text: 'Join', testId: TEST_IDS.homeJoinButton, onClick: joinGame });
   const codeHint = h('p', { className: 'field-hint', testId: TEST_IDS.homeCodeHint });
 
@@ -182,6 +190,7 @@ export function mountHomeScreen(parent: HTMLElement, store: Store, connection: C
       if (cursor !== null) codeInput.setSelectionRange(cursor, cursor);
     }
     codeProblem = false;
+    brokenLink = false;
     // Another code is another game: the server's verdict on the old one goes with it.
     if (store.get().joinProblem !== null) store.set({ joinProblem: null });
     else update(store.get());
@@ -231,8 +240,8 @@ export function mountHomeScreen(parent: HTMLElement, store: Store, connection: C
     // game after a reload is not "invited"), and only if the game can be joined.
     setText(intro, homeIntroText(invitedTo, opening, state.joinProblem));
 
-    setText(codeHint, codeHintText(codeProblem, state.joinProblem));
-    setClass(codeHint, 'attention', codeProblem || state.joinProblem !== null);
+    setText(codeHint, codeHintText(codeProblem, state.joinProblem, brokenLink));
+    setClass(codeHint, 'attention', codeProblem || brokenLink || state.joinProblem !== null);
 
     // (A lost connection needs no line here: the app shows its own notice at the top of every screen.)
     let statusText = '';

@@ -5,6 +5,7 @@ import { tileAllowsCity, tileIsWorkable, tileMoveCost, tileYields } from '../src
 import type { TerrainId } from '../src/data/terrain';
 import { distance, isValidTile, neighbors, ring, tilesInRange } from '../src/hex';
 import { generateMap } from '../src/mapgen/generateMap';
+import { MAPGEN } from '../src/mapgen/tuning';
 import { mapFromAscii } from '../src/testing/asciiMap';
 import type { GameMap, TileIndex } from '../src/types';
 
@@ -19,7 +20,9 @@ import type { GameMap, TileIndex } from '../src/types';
  *     the generator works (it only uses hex.ts and the terrain tables);
  *  2. shows on hand-drawn maps that each check really notices a broken rule;
  *  3. runs all checks on 200 seeds x 3 map sizes x 1..8 players = 4800
- *     generated maps (the "sweep").
+ *     generated maps (the "sweep");
+ *  4. looks at what a crowded map must still give every player: land to
+ *     grow on (nobody alone on a small island).
  *
  * The sweep is by far the slowest test of the shared package: 10 to 20
  * seconds, depending on how busy the machine is. Its length is in
@@ -350,6 +353,8 @@ interface Measurement {
   landmassesUsed: number;
   /** Lowest start score divided by the highest. */
   fairness: number;
+  /** Starts on a landmass under MAPGEN.roomyLandmassTiles tiles that not all players share (see playersCutOff). */
+  cutOff: number;
   /** Is seat 1's start worth more / less than seat 2's? (0 for a tie or a single player.) */
   seatOneAdvantage: number;
   /** Does seat 1's start come before seat 2's in tile order? */
@@ -363,9 +368,36 @@ function measure(placement: Placement): Measurement {
     smallestDistance: smallestDistance(placement),
     landmassesUsed: new Set(starts.map((start) => areaOf[start])).size,
     fairness: Math.min(...scores) / Math.max(...scores),
+    cutOff: playersCutOff(placement).length,
     seatOneAdvantage: starts.length < 2 ? 0 : Math.sign(scores[0] - scores[1]),
     seatOneFirstOnMap: starts.length >= 2 && starts[0] < starts[1],
   };
+}
+
+/**
+ * The starts whose player is cut off on an island too small to grow on: the
+ * landmass has fewer than MAPGEN.roomyLandmassTiles walkable tiles, and at
+ * least one other player starts somewhere else. (Land units cannot cross
+ * water, so such a player never meets the others.)
+ */
+function playersCutOff({ starts, areaOf, areaSizes }: Placement): TileIndex[] {
+  const together = new Set(starts.map((start) => areaOf[start])).size === 1;
+  return together ? [] : starts.filter((start) => areaSizes[areaOf[start]] < MAPGEN.roomyLandmassTiles);
+}
+
+/**
+ * The starts whose player could never found a second city: once every
+ * capital stands on its start tile, no tile of the player's own landmass is
+ * a legal city site at least RULES.minCityDistance from every capital.
+ */
+function playersWithoutSecondCity({ map, starts, areaOf }: Placement): TileIndex[] {
+  return starts.filter((start) => {
+    for (let tile = 0; tile < map.tiles.length; tile++) {
+      if (areaOf[tile] !== areaOf[start] || !tileAllowsCity(map.tiles[tile])) continue;
+      if (starts.every((capital) => distance(capital, tile, map) >= RULES.minCityDistance)) return false;
+    }
+    return true;
+  });
 }
 
 /** The measurements of one combination, for example measuredFor('small', 8). */
@@ -495,6 +527,66 @@ describe('generateMap: what the starts are like beyond the rules', () => {
     const distances = measuredFor('small', RULES.maxSeats).map((m) => m.smallestDistance);
     expect(Math.min(...distances)).toBeGreaterThanOrEqual(RULES.minCityDistance);
     expect(average(distances)).toBeGreaterThanOrEqual(RULES.minCityDistance + 2);
+  });
+
+  it('on a crowded map puts nobody alone on an island too small to grow on (every crowded combination of the sweep)', () => {
+    let crowdedMaps = 0;
+    for (const mapSize of MAP_SIZE_IDS) {
+      for (let playerCount = MAP_SIZES[mapSize].recommendedPlayers + 1; playerCount <= RULES.maxSeats; playerCount++) {
+        const measurements = measuredFor(mapSize, playerCount);
+        crowdedMaps += measurements.length;
+        const cutOff = measurements.filter((m) => m.cutOff > 0).length;
+        expect(cutOff, `${mapSize}, ${playerCount} players: maps with a player cut off`).toBe(0);
+      }
+    }
+    // Small with 4 to 8 players and medium with 6 to 8.
+    expect(crowdedMaps).toBe(SEEDS_PER_SIZE * 8);
+  });
+
+  it('six players on the small map: the seeds that once left players on islands of 12 to 26 tiles now keep everybody on land with room for a second city', () => {
+    // Each of these maps has one continent of about 200 tiles and two or
+    // three islands; the starts used to be 8 apart with up to three players
+    // on the islands. (The first two are from the report of the fault.)
+    const seeds = ['121b3f99cd657f21007326e03a53142f', 'wide-1272', 'fix-319', 'fix-1359', 'fix-4122'];
+    for (const seed of seeds) {
+      const { map, starts } = generateMap(seed, 'small', 6);
+      const placement = examine(map, starts, 6);
+      for (const name of Object.keys(HARD_RULES) as (keyof typeof HARD_RULES)[]) {
+        expect(HARD_RULES[name](placement), `${seed}: ${name}`).toBeNull();
+      }
+      // The islands are there, and nobody is on them.
+      expect(placement.areaSizes.filter((size) => size >= RULES.minStartLandmass && size < MAPGEN.roomyLandmassTiles).length, seed).toBeGreaterThanOrEqual(2);
+      expect(playersCutOff(placement), seed).toEqual([]);
+      expect(playersWithoutSecondCity(placement), seed).toEqual([]);
+      // It cost a single tile of distance.
+      expect(smallestDistance(placement), seed).toBe(RULES.minStartDistance - 1);
+    }
+  });
+
+  it('the checks for "cut off" and "no second city" notice both on a hand-drawn map', () => {
+    // A long island and a small one of 15 tiles, 4 columns of sea apart.
+    const rows: string[] = [];
+    for (let y = 0; y < 7; y++) {
+      const row: string[] = [];
+      for (let x = 0; x < 24; x++) {
+        const land = y >= 1 && y <= 5 && ((x >= 1 && x <= 14) || (x >= 19 && x <= 21));
+        row.push(land ? 'g' : '~');
+      }
+      rows.push(row.join(' '));
+    }
+    const map = mapFromAscii(rows);
+    const onIsland = at(20, 3);
+    const split = examine(map, [at(2, 3), at(12, 3), onIsland], 3);
+    expect(split.areaSizes).toEqual([70, 15]);
+    expect(playersCutOff(split)).toEqual([onIsland]);
+    // Between the two capitals on the long island there is room for a third city; on the small one there is none.
+    expect(playersWithoutSecondCity(split)).toEqual([onIsland]);
+
+    const together = examine(map, [at(2, 3), at(12, 3)], 2);
+    expect(playersCutOff(together)).toEqual([]);
+    expect(playersWithoutSecondCity(together)).toEqual([]);
+    // Everybody together on the small island is cramped, but nobody is cut off from the others.
+    expect(playersCutOff(examine(map, [at(19, 1), at(21, 5)], 2))).toEqual([]);
   });
 
   it('shuffles the starts, so seat 1 has no systematic advantage', () => {

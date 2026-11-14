@@ -25,7 +25,7 @@
  * in the address bar; shareLink leaves it out.
  */
 
-import { WS_PATH } from '@domination/shared';
+import { GAME_CODE_ALPHABET, GAME_CODE_LENGTH, WS_PATH } from '@domination/shared';
 import type { GameCode } from '@domination/shared';
 
 /** localStorage keys used by the game (before the profile suffix, see above). */
@@ -120,10 +120,24 @@ function writeStored(key: string, value: string | null): boolean {
   }
 }
 
-/** A game code as the rest of the app expects it: trimmed, upper case; null if nothing is left. */
-function cleanGameCode(text: string | null): GameCode | null {
+/**
+ * A game code as the rest of the app expects it: trimmed, upper case; null
+ * for anything that cannot be a code (GAME_CODE_LENGTH characters from
+ * GAME_CODE_ALPHABET, exactly what the server accepts).
+ *
+ * The text comes from outside: the address somebody was sent, or storage.
+ * A link that was cut short, grew a full stop in a chat message, or was
+ * made up by a stranger must never be printed as "You are invited to game
+ * <that text>", nor sent to the server, which would only answer that it did
+ * not understand.
+ */
+export function cleanGameCode(text: string | null): GameCode | null {
   const code = (text ?? '').trim().toUpperCase();
-  return code === '' ? null : code;
+  if (code.length !== GAME_CODE_LENGTH) return null;
+  for (const character of code) {
+    if (!GAME_CODE_ALPHABET.includes(character)) return null;
+  }
+  return code;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,9 +204,22 @@ export function urlParameter(name: string): string | null {
   return urlParameters().get(name);
 }
 
-/** The game code in the address bar (`?g=CODE`), trimmed and upper-cased, or null. */
+/**
+ * The game code in the address bar (`?g=CODE`), trimmed and upper-cased, or
+ * null if there is none or it is not a code (see cleanGameCode).
+ */
 export function gameCodeFromUrl(): GameCode | null {
   return cleanGameCode(urlParameters().get('g'));
+}
+
+/**
+ * True if the address names a game (`?g=` with something after it) that
+ * cannot be a game code: a link that was damaged on its way. The home
+ * screen then says so instead of showing an empty form without a word.
+ */
+export function gameLinkIsBroken(): boolean {
+  const given = urlParameters().get('g');
+  return given !== null && given.trim() !== '' && cleanGameCode(given) === null;
 }
 
 /**
@@ -205,7 +232,9 @@ export function setGameCodeInUrl(code: GameCode | null): void {
     const where = pageLocation();
     const past = pageHistory();
     if (where === null || past === null) return;
-    if (gameCodeFromUrl() === code) return; // already right: leave the address alone
+    // Already right: leave the address alone. (The text as it stands is
+    // compared, so that a `g` that is no code is taken out with the rest.)
+    if (urlParameters().get('g') === code) return;
 
     const parameters = urlParameters();
     if (code === null) parameters.delete('g');
@@ -229,6 +258,26 @@ export function shareLink(code: GameCode): string {
   } catch {
     return query;
   }
+}
+
+/**
+ * True if this page was opened through an address that only means
+ * something on the computer the server runs on (localhost and its
+ * numbers). The link the lobby shows is built from that address, so
+ * nobody else can open it; the lobby says so.
+ */
+export function pageIsLocalOnly(): boolean {
+  try {
+    return isLocalOnlyHost(pageLocation()?.hostname ?? '');
+  } catch {
+    return false;
+  }
+}
+
+/** The decision behind pageIsLocalOnly, for a host name as `location.hostname` gives it. */
+export function isLocalOnlyHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' || host === '::1' || /^127(\.\d{1,3}){3}$/.test(host);
 }
 
 /**

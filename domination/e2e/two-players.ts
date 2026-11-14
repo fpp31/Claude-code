@@ -25,6 +25,17 @@
  *  11. Two players with the longest names allowed, in a narrow window: the
  *      top bar stays a bar.
  *
+ * And five small things that only show on a real page, each of which once
+ * went wrong (`checkTheSmallThings`, one more player in a game of her own):
+ *  12. A damaged link invites nobody and is called damaged.
+ *  13. The lobby shows the leaders' names as written, warns that a
+ *      "localhost" link only works on this computer, and a double-click on
+ *      Start gives no error message.
+ *  14. Enter ends the turn also right after a mouse click on a zoom button.
+ *  15. "Turn N has begun." is on the screen once, however fast turns go by.
+ *  16. A double-click on Leave gives no error message, and the first screen
+ *      does not offer the game that was just left.
+ *
  * Playwright is NOT a dependency of this project and `npm install` does not
  * fetch it. It is loaded from a global install; the default path below only
  * fits the machine this was first written on, so on your own computer set
@@ -221,6 +232,7 @@ async function playTwoPlayers(setup: TestSetup): Promise<void> {
   check(/^[A-Z0-9]{5}$/.test(code), `the game code should be five letters or digits, got "${code}"`);
   check(link === `${setup.baseUrl}/?g=${code}`, `the invite link should end in ?g=${code}, got "${link}"`);
   check((await seatCount(ada)) === 1, 'a new game has one taken seat, the host');
+  check((await ada.inputValue(byTestId(TEST_IDS.lobbyMapSize))) === 'small', 'a new game starts on the small map');
 
   step('2. Ben opens the link: it shows the code but takes no seat until he presses Join');
   await ben.goto(link);
@@ -349,6 +361,7 @@ async function playTwoPlayers(setup: TestSetup): Promise<void> {
   for (const page of [ada, ben]) await waitForTurn(page, 3);
 
   await checkTheScreenHoldsTogether(setup, crashes, ada, link, city);
+  await checkTheSmallThings(setup, crashes);
 
   check(crashes.length === 0, `no page may crash, but: ${crashes.join('; ')}`);
 }
@@ -413,6 +426,94 @@ async function checkTheScreenHoldsTogether(setup: TestSetup, crashes: string[], 
   }
   await max.context().close();
   await neb.context().close();
+}
+
+/** The texts of the toasts on the page right now, oldest first. */
+async function toastTexts(page: any): Promise<string[]> {
+  return page.evaluate(
+    (selector: string) => [...document.querySelectorAll(selector)].map((toast: any) => (toast.textContent ?? '').trim()),
+    byTestId(TEST_IDS.toast),
+  );
+}
+
+/** How many red (error) toasts are on the page right now. */
+async function errorToastCount(page: any): Promise<number> {
+  return page.locator(`${byTestId(TEST_IDS.toast)}.toast-error`).count();
+}
+
+/** How far apart two neighboring tiles are drawn, in CSS pixels: it changes with every zoom step. */
+async function tilePitch(page: any): Promise<number> {
+  return page.evaluate(() => {
+    const hook = window.__domination;
+    const tile = hook.view().units[0].tile;
+    return Math.round(Math.abs(hook.tileToScreen(tile + 1).x - hook.tileToScreen(tile).x));
+  });
+}
+
+/**
+ * Steps 12 to 16: small things that only show on a real page, played by one
+ * more player in a game of her own (a game with one player moves on the
+ * moment she ends her turn, which is what steps 14 and 15 need).
+ */
+async function checkTheSmallThings(setup: TestSetup, crashes: string[]): Promise<void> {
+  const dora = await openPlayer(setup.browser, 'Dora', crashes);
+
+  step('12. Dora opens a damaged link: she is not invited to anything, nothing of the link is repeated, and the page says the link is damaged');
+  await dora.goto(`${setup.baseUrl}/?g=K7QXM%20AND%20SEND%205%20DOLLARS%20TO%20MALLORY%20FIRST`);
+  await dora.fill(byTestId(TEST_IDS.homeNameInput), 'Dora');
+  // The buttons are switched on once the page is connected: whatever it was going to ask the server, it has asked by now.
+  await dora.waitForSelector(`${byTestId(TEST_IDS.homeCreateButton)}:enabled`);
+  await dora.waitForTimeout(300);
+  check((await textOf(dora, TEST_IDS.homeCodeHint)).includes('damaged'), 'the line under the code field says that the link is damaged');
+  check(!(await textOf(dora, TEST_IDS.homeIntro)).includes('invited'), 'a damaged link invites nobody');
+  check((await dora.inputValue(byTestId(TEST_IDS.homeCodeInput))) === '', 'the code field is empty');
+  check(!((await dora.textContent('body')) ?? '').includes('MALLORY'), 'nothing of the link is printed on the page');
+  check((await toastTexts(dora)).length === 0, `the server was not asked about it, so there is no message (got: ${(await toastTexts(dora)).join(' | ')})`);
+
+  step('13. Dora creates a game: the lobby prints the leaders as written and warns about the localhost link; a double-click on Start starts the game without an error message');
+  await dora.click(byTestId(TEST_IDS.homeCreateButton));
+  await dora.waitForSelector(byTestId(TEST_IDS.lobbyCode));
+  check((await textOf(dora, TEST_IDS.lobbyCiv + 'maya')).includes("Yax K'uk' Mo'"), `the Maya leader is printed with his apostrophes (the button says "${await textOf(dora, TEST_IDS.lobbyCiv + 'maya')}")`);
+  check((await textOf(dora, TEST_IDS.lobbyCiv + 'china')).includes('Taizong of Tang'), 'the Chinese leader is Taizong of Tang');
+  check(await dora.isVisible(byTestId(TEST_IDS.lobbyLocalNote)), 'a lobby opened through localhost says that its link only works on this computer');
+  await dora.dblclick(byTestId(TEST_IDS.lobbyStartButton));
+  await dora.waitForSelector(byTestId(TEST_IDS.gameCanvas));
+  await waitForTurn(dora, 1);
+  await dora.waitForTimeout(500); // the answer to a second Start would be here by now
+  check((await errorToastCount(dora)) === 0, `the second click of the double-click sent nothing (messages on screen: ${(await toastTexts(dora)).join(' | ')})`);
+
+  step('14. Dora clicks "-" with the mouse and presses Enter: the turn ends, and the map is not zoomed out a second time');
+  const pitchBefore = await tilePitch(dora);
+  await dora.click('button[aria-label="Zoom out"]');
+  const pitchAfterClick = await tilePitch(dora);
+  check(pitchAfterClick < pitchBefore, `the click zoomed out (tiles ${pitchBefore} pixels apart before, ${pitchAfterClick} after)`);
+  await dora.keyboard.press('Enter');
+  await waitForTurn(dora, 2);
+  check((await tilePitch(dora)) === pitchAfterClick, 'Enter did not press the zoom button again');
+
+  step('15. Dora ends the next turn at once: "Turn 3 has begun." takes the place of "Turn 2 has begun."');
+  check((await toastTexts(dora)).includes('Turn 2 has begun.'), 'the new turn was announced');
+  await dora.waitForTimeout(END_TURN_PAUSE_MS);
+  await dora.keyboard.press('Enter');
+  await waitForTurn(dora, 3);
+  const begun = (await toastTexts(dora)).filter((text) => text.includes('has begun'));
+  check(isDeepStrictEqual(begun, ['Turn 3 has begun.']), `one announcement, the newest (on screen: ${begun.join(' | ')})`);
+
+  step('16. Dora makes another game and leaves it with a double-click: no error message, and the first screen does not offer that game again');
+  await dora.goto(setup.baseUrl);
+  await dora.waitForSelector(`${byTestId(TEST_IDS.homeCreateButton)}:enabled`);
+  await dora.click(byTestId(TEST_IDS.homeCreateButton));
+  await dora.waitForSelector(byTestId(TEST_IDS.lobbyCode));
+  await dora.dblclick(byTestId(TEST_IDS.lobbyLeaveButton));
+  await dora.waitForSelector(byTestId(TEST_IDS.homeCreateButton));
+  await dora.waitForTimeout(500); // the answer to a second Leave would be here by now
+  check((await errorToastCount(dora)) === 0, `the second click of the double-click sent nothing (messages on screen: ${(await toastTexts(dora)).join(' | ')})`);
+  check((await dora.inputValue(byTestId(TEST_IDS.homeCodeInput))) === '', 'the code of the game she left is not filled in');
+  const gold = async (id: string): Promise<boolean> => dora.evaluate((selector: string) => document.querySelector(selector).classList.contains('primary'), byTestId(id));
+  check((await gold(TEST_IDS.homeCreateButton)) && !(await gold(TEST_IDS.homeJoinButton)), 'the gold button, the one Enter presses, is "Create private game" again');
+  check(!dora.url().includes('g='), 'the address no longer names the game');
+
+  await dora.context().close();
 }
 
 // ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ import { MAP_SIZES, MAP_SIZE_IDS, UNITS } from '@domination/shared';
 import type { OwnCityDetail, PlayerView } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import {
+  LOCAL_LINK_NOTE,
   buildOptionText,
   codeHintText,
   countOf,
@@ -320,6 +321,18 @@ describe('home screen texts', () => {
     expect(codeHintText(true, null)).toContain('5 letters or digits');
     expect(codeHintText(true, 'gameFull')).toBe(codeHintText(true, null));
   });
+
+  it('a link whose code is no code is called damaged, without repeating what it held', () => {
+    const damaged = codeHintText(false, null, true);
+    expect(damaged).toContain('damaged');
+    expect(damaged).toContain('5 letters or digits');
+    expect(damaged).not.toBe(codeHintText(false, null));
+    // Nobody is invited through such a link: the address held no code as far as the page is concerned.
+    expect(homeIntroText(null, false, null)).not.toContain('invited');
+    // Once a code was typed and the server has spoken about it, that is what counts.
+    expect(codeHintText(false, 'noSuchGame', true)).toBe(codeHintText(false, 'noSuchGame'));
+    expect(codeHintText(true, null, true)).toBe(codeHintText(true, null));
+  });
 });
 
 describe('lobby texts (WP4)', () => {
@@ -345,6 +358,12 @@ describe('lobby texts (WP4)', () => {
       expect(mapSizeNote(id, null)).toBe(`${size.width} x ${size.height} tiles. A bigger map makes a longer game.`);
       expect(mapSizeNote(id, 'Ada')).toBe(`${size.width} x ${size.height} tiles. Ada chooses the map.`);
     }
+  });
+
+  it('the note about a link that only works on this computer says why, and what to do', () => {
+    expect(LOCAL_LINK_NOTE).toContain('only works on this computer');
+    expect(LOCAL_LINK_NOTE).toContain('localhost');
+    expect(LOCAL_LINK_NOTE).toContain('README');
   });
 
   it('ghostSeatWarning lists every absent player and asks before starting', () => {

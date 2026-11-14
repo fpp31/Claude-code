@@ -47,6 +47,12 @@ export interface Toast {
   id: number;
   text: string;
   kind: 'info' | 'error';
+  /**
+   * Toasts with the same slot are never on screen together: a new one
+   * takes the older one's place (see toastsWith). Used for news that only
+   * the latest of matters, such as "Turn 8 has begun."
+   */
+  slot?: string;
 }
 
 /** The running game this client is attached to. */

@@ -12,6 +12,7 @@
 import {
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -77,6 +78,10 @@ export interface Storage {
    * any moment leaves either the old or the new file, never half of one.
    * On Windows a rename can briefly fail with EPERM/EBUSY: retry a few times.
    * Throws if the save fails; the caller then keeps its old state.
+   *
+   * A disk that is nearly full may take only the first part of a file and
+   * report no error. So the file is written until every byte is in it, its
+   * size is checked, and only a complete file is renamed over the old save.
    */
   save(file: RoomFile): void;
 
@@ -96,10 +101,19 @@ const RENAME_ATTEMPTS = 5;
 const RENAME_PAUSE_MS = 20;
 
 /**
+ * The system's "write these bytes to this open file" call, as storage uses
+ * it: it returns how many bytes it took, which can be fewer than it was
+ * given (a disk that is nearly full).
+ */
+export type WriteCall = (handle: number, bytes: Uint8Array, offset: number, length: number) => number;
+
+/**
  * @param dataDir  absolute path of the data folder (ServerConfig.dataDir)
  * @param log      receives one line per noteworthy event (corrupt file, ...)
+ * @param write    for tests only: stands in for the system's write call, so a
+ *                 test can play a disk that runs full in the middle of a save
  */
-export function createStorage(dataDir: string, log: (line: string) => void): Storage {
+export function createStorage(dataDir: string, log: (line: string) => void, write: WriteCall = writeSync): Storage {
   const roomsDir = join(dataDir, 'rooms');
 
   /**
@@ -147,7 +161,11 @@ export function createStorage(dataDir: string, log: (line: string) => void): Sto
   function loadOne(path: string, name: string, code: GameCode): RoomFile | null {
     let parsed: unknown;
     try {
-      parsed = JSON.parse(readFileSync(path, 'utf8'));
+      // Some editors (on Windows above all) put an invisible mark, U+FEFF,
+      // in front of a file they save. JSON does not allow it; a save that
+      // was edited by hand must not count as damaged because of it. The next
+      // save writes the file without the mark.
+      parsed = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, ''));
     } catch (error) {
       moveAside(path, name, `it cannot be read (${describe(error)})`);
       return null;
@@ -229,16 +247,22 @@ export function createStorage(dataDir: string, log: (line: string) => void): Sto
   function save(file: RoomFile): void {
     const path = pathOf(file.code);
     const temporary = `${path}.tmp`;
-    const text = serializeRoomFile(file);
+    const bytes = Buffer.from(serializeRoomFile(file), 'utf8');
 
     mkdirSync(roomsDir, { recursive: true });
     try {
       const handle = openSync(temporary, 'w');
       try {
-        writeSync(handle, text);
+        writeWhole(handle, bytes, write);
         // Without this the rename below could reach the disk before the
         // file's contents do, and a power cut would leave an empty save.
         fsyncSync(handle);
+        // The last line of defence: a file that is not exactly as long as
+        // the save must never replace the previous save.
+        const size = fstatSync(handle).size;
+        if (size !== bytes.length) {
+          throw new Error(`the save file is ${size} bytes long instead of ${bytes.length} (is the disk full?)`);
+        }
       } finally {
         closeSync(handle);
       }
@@ -268,6 +292,21 @@ function gameSchemaOf(content: Record<string, unknown>): number | null {
   if (typeof game !== 'object' || game === null) return null;
   const schema = (game as Record<string, unknown>).schema;
   return typeof schema === 'number' && Number.isInteger(schema) ? schema : null;
+}
+
+/**
+ * Writes all of `bytes` to an open file. One write call may take only part
+ * of what it is given (it says how much), which happens when the disk is
+ * nearly full; the rest is then written again, and that call fails with the
+ * real reason ("no space left on device").
+ */
+function writeWhole(handle: number, bytes: Uint8Array, write: WriteCall): void {
+  let done = 0;
+  while (done < bytes.length) {
+    const taken = write(handle, bytes, done, bytes.length - done);
+    if (taken <= 0) throw new Error('the disk took no more of the save file (is it full?)');
+    done += taken;
+  }
 }
 
 /**

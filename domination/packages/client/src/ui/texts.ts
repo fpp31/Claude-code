@@ -59,11 +59,16 @@ export function homeIntroText(invitedTo: GameCode | null, opening: boolean, prob
 /**
  * The line under the game code field. It normally says where a code comes
  * from; it turns into a warning when the typed code is too short to be one
- * (`tooShort`, set when Join was pressed), or when the server has said that
- * the game cannot be joined.
+ * (`tooShort`, set when Join was pressed), when the server has said that
+ * the game cannot be joined, or when the page was opened through a link
+ * whose code is not a code at all (`brokenLink`: cut short, or with
+ * something stuck to its end; what it held is not repeated on the page).
  */
-export function codeHintText(tooShort: boolean, problem: JoinProblem | null): string {
+export function codeHintText(tooShort: boolean, problem: JoinProblem | null, brokenLink = false): string {
   if (tooShort) return `A game code has ${GAME_CODE_LENGTH} letters or digits. Ask your friend for it, or open the link they sent.`;
+  if (brokenLink && problem === null) {
+    return `The link you opened is damaged: it has no game code in it. Ask your friend for the code (${GAME_CODE_LENGTH} letters or digits) or for the link again.`;
+  }
   switch (problem) {
     case 'noSuchGame':
       return 'There is no game with this code. Check the code or the link with your friend.';
@@ -265,6 +270,16 @@ export function mapSizeNote(id: MapSizeId, hostName: string | null): string {
   const who = hostName === null ? 'A bigger map makes a longer game.' : `${hostName} chooses the map.`;
   return `${size.width} x ${size.height} tiles. ${who}`;
 }
+
+/**
+ * The note under the invite link when the page was opened through an
+ * address that only works on the computer the server runs on (see
+ * pageIsLocalOnly in net/identity.ts): the link is built from that
+ * address, so a friend who is sent it gets nowhere.
+ */
+export const LOCAL_LINK_NOTE =
+  'This link only works on this computer, because you opened the game through "localhost". ' +
+  'For friends, open the game through this computer\'s network address or the server\'s address (see the README), and send the link shown then.';
 
 /**
  * The question asked before starting a game with seats nobody is sitting

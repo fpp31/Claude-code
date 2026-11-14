@@ -54,6 +54,25 @@ function twoIslands(widthA: number, widthB: number, height: number, gap: number)
   return mapFromAscii(a.map((row, y) => `${row} ${sea} ${b[y]}`));
 }
 
+/**
+ * Any number of islands side by side, all `height` tiles tall, with four
+ * columns of sea between two neighbors. `ground` is the character every
+ * tile of an island is drawn with (see ASCII_LEGEND): 'g' open grassland,
+ * 'd' desert (a city site, but a poor one), 'f' forest (walkable, no city site).
+ */
+function islandRow(height: number, islands: readonly { width: number; ground?: string }[]): GameMap {
+  const drawn = islands.map((island) => grassIsland(island.width, height).map((row) => row.replaceAll('g', island.ground ?? 'g')));
+  const rows: string[] = [];
+  for (let y = 0; y < height + 2; y++) rows.push(drawn.map((island) => island[y]).join(' ~ ~ '));
+  return mapFromAscii(rows);
+}
+
+/** How many of the starts lie on each walkable area, in the order the areas appear on the map (west to east for islandRow). */
+function startsPerIsland(map: GameMap, starts: readonly TileIndex[]): number[] {
+  const areas = labelRegions(gridFor(map), map.tiles.map((tile) => !tileIsWater(tile)));
+  return areas.sizes.map((_, area) => starts.filter((start) => areas.regionOf[start] === area).length);
+}
+
 describe('startRules: the generator\'s own check of its promises', () => {
   const map = mapFromAscii(grassIsland(22, 5));
   const grid = gridFor(map);
@@ -262,6 +281,30 @@ describe('starts: placing the players', () => {
     }
   });
 
+  it('would rather find no room than start a player on land smaller than RULES.minStartLandmass', () => {
+    // West: 25 tiles of forest with one clearing, the only tile of that island a city may stand on.
+    // East: 10 tiles of open grassland, too small an island for anybody.
+    const map = mapFromAscii([
+      '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+      ' ~ f f f f f ~ ~ ~ g g ~ ~',
+      '~ f f f f f ~ ~ ~ g g ~ ~',
+      ' ~ f f g f f ~ ~ ~ g g ~ ~',
+      '~ f f f f f ~ ~ ~ g g ~ ~',
+      ' ~ f f f f f ~ ~ ~ g g ~ ~',
+      '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+    ]);
+    const grid = gridFor(map);
+    const clearing = at(map, 3, 3);
+    expect(labelRegions(grid, map.tiles.map((tile) => !tileIsWater(tile))).sizes).toEqual([25, 10]);
+    expect(RULES.minStartLandmass).toBeGreaterThan(10);
+    // The small island is far enough away: only its size keeps the second player off it.
+    expect(distance(clearing, at(map, 9, 3), map)).toBeGreaterThanOrEqual(RULES.minCityDistance);
+    expect(hardRulesHold(grid, map, [clearing, at(map, 9, 3)])).toBe(false);
+
+    expect(placeStarts(grid, map, 1, true, rng())).toEqual([clearing]);
+    expect(placeStarts(grid, map, 2, true, rng())).toBeNull();
+  });
+
   it('keeps everybody on one landmass when that costs no distance', () => {
     // Both islands could take a player, but the eastern one has room for both at the standard distance.
     const map = twoIslands(6, 20, 5, 4);
@@ -284,6 +327,101 @@ describe('starts: placing the players', () => {
     expect(starts).toHaveLength(2);
     expect(areas.regionOf[starts[0]]).not.toBe(areas.regionOf[starts[1]]);
     expect(closest(map, starts)).toBeGreaterThanOrEqual(RULES.minStartDistance);
+  });
+});
+
+describe('starts: which land a crowded map falls back on', () => {
+  const rng = () => seedRng('starts', 'map:starts');
+
+  /** The smallest distance between two of the starts. */
+  function closest(map: GameMap, starts: readonly TileIndex[]): number {
+    let smallest = Infinity;
+    for (const a of starts) for (const b of starts) if (a !== b) smallest = Math.min(smallest, distance(a, b, map));
+    return smallest;
+  }
+
+  it('the examples are drawn for the numbers in the tables', () => {
+    expect(RULES.minStartDistance).toBe(8);
+    expect(RULES.minCityDistance).toBe(4);
+    expect(RULES.minStartLandmass).toBe(12);
+    expect(MAPGEN.roomyLandmassTiles).toBe(30);
+  });
+
+  it('uses a second landmass with room to grow at the full distance, and leaves a small island empty', () => {
+    // 60, 30 and 15 tiles. The big island is too short for three starts 8
+    // apart; with the middle one they fit. Nobody needs the small one.
+    const map = islandRow(5, [{ width: 12 }, { width: 6 }, { width: 3 }]);
+    const grid = gridFor(map);
+    const starts = placeStarts(grid, map, 3, true, rng()) as TileIndex[];
+    expect(hardRulesHold(grid, map, starts)).toBe(true);
+    expect(startsPerIsland(map, starts)).toEqual([2, 1, 0]);
+    expect(closest(map, starts)).toBeGreaterThanOrEqual(RULES.minStartDistance);
+  });
+
+  it('moves the starts closer together rather than leave one player alone on an island too small to grow on', () => {
+    // 60 and 15 tiles. Two starts 8 apart fit on the big island, and the
+    // third would fit on the small one at that distance. But whoever starts
+    // there has no site for a second city and can never leave.
+    const map = islandRow(5, [{ width: 12 }, { width: 3 }]);
+    const grid = gridFor(map);
+    const starts = placeStarts(grid, map, 3, true, rng()) as TileIndex[];
+    expect(hardRulesHold(grid, map, starts)).toBe(true);
+    expect(startsPerIsland(map, starts)).toEqual([3, 0]);
+
+    // As little closer as the big island demands: the best any three tiles of it can do.
+    const big: TileIndex[] = [];
+    for (let tile = 0; tile < grid.count; tile++) if (!tileIsWater(map.tiles[tile]) && tile % map.width <= 12) big.push(tile);
+    expect(big).toHaveLength(60);
+    let best = 0;
+    for (const a of big) {
+      for (const b of big) {
+        for (const c of big) best = Math.max(best, Math.min(distance(a, b, map), distance(a, c, map), distance(b, c, map)));
+      }
+    }
+    expect(best).toBeLessThan(RULES.minStartDistance);
+    expect(closest(map, starts)).toBe(best);
+  });
+
+  it('uses small islands when the players fit nowhere else', () => {
+    // Two strips of 12 tiles: neither is long enough for two starts at any
+    // distance the rules allow... so three players need both.
+    const map = islandRow(2, [{ width: 6 }, { width: 6 }]);
+    const grid = gridFor(map);
+    expect(placeStarts(grid, map, 3, false, rng())).toBeNull();
+    const starts = placeStarts(grid, map, 3, true, rng()) as TileIndex[];
+    expect(starts).toHaveLength(3);
+    expect(hardRulesHold(grid, map, starts)).toBe(true);
+    expect([...startsPerIsland(map, starts)].sort()).toEqual([1, 2]);
+  });
+
+  it('keeps everybody together on poor land when one landmass has room, although a second one is as good', () => {
+    // Desert is a legal city site but no comfortable one, so only the
+    // "every site of one landmass" choice can keep these two together.
+    const map = islandRow(5, [{ width: 12, ground: 'd' }, { width: 6, ground: 'd' }]);
+    const grid = gridFor(map);
+    expect(placeStarts(grid, map, 2, false, rng())).toBeNull();
+    const starts = placeStarts(grid, map, 2, true, rng()) as TileIndex[];
+    expect(hardRulesHold(grid, map, starts)).toBe(true);
+    expect(startsPerIsland(map, starts)).toEqual([2, 0]);
+    expect(closest(map, starts)).toBeGreaterThanOrEqual(RULES.minStartDistance);
+  });
+
+  it('tries the next largest landmass when the largest has no room, MAPGEN.homeLandmassTries landmasses in all', () => {
+    // Forest can be walked on but not built on: a big forest island is the
+    // largest landmass and no home for anybody.
+    const forest = { width: 22, ground: 'f' };
+    const open = { width: 20 };
+    const forestsBefore = (count: number) => islandRow(5, [...new Array<typeof forest>(count).fill(forest), open]);
+
+    const within = forestsBefore(MAPGEN.homeLandmassTries - 1);
+    const starts = placeStarts(gridFor(within), within, 2, false, rng()) as TileIndex[];
+    expect(starts).toHaveLength(2);
+    expect(standardRulesHold(gridFor(within), within, starts)).toBe(true);
+    expect(startsPerIsland(within, starts)[MAPGEN.homeLandmassTries - 1]).toBe(2);
+
+    // One landmass further down the list is no longer looked at.
+    const beyond = forestsBefore(MAPGEN.homeLandmassTries);
+    expect(placeStarts(gridFor(beyond), beyond, 2, false, rng())).toBeNull();
   });
 });
 
@@ -358,6 +496,73 @@ describe('attempts: trying again when a map has no room', () => {
     for (const seed of ['hopeless-1', 'hopeless-2', 'hopeless-3']) {
       expect(() => generateForSize(seed, HOPELESS, 2)).toThrow(Error);
     }
+  });
+
+  describe('the generator checks what the placement step hands it', () => {
+    const SMALL: MapDimensions = { width: 32, height: 20, recommendedPlayers: 3 };
+    const grid = gridFor(SMALL);
+    const seed = 'checked-starts';
+    const firstMap = buildMap(grid, attemptStreams(seed, 1));
+    const secondMap = buildMap(grid, attemptStreams(seed, 2));
+    const honest = placeStarts(grid, firstMap, 2, false, attemptStreams(seed, 1)('starts')) as TileIndex[];
+
+    /** A placement step that hands out `starts` for the first map it is asked about, and does its real work afterwards. */
+    function cheatingOnce(starts: TileIndex[]): { place: typeof placeStarts; calls: number } {
+      const cheat: { place: typeof placeStarts; calls: number } = {
+        calls: 0,
+        place: (...args) => {
+          cheat.calls++;
+          return cheat.calls === 1 ? starts : placeStarts(...args);
+        },
+      };
+      return cheat;
+    }
+
+    it('the example: the first map of this seed has room, and the second map is another one', () => {
+      expect(hardRulesHold(grid, firstMap, honest)).toBe(true);
+      expect(standardRulesHold(grid, firstMap, honest)).toBe(true);
+      expect(generateForSize(seed, SMALL, 2).map).toEqual(firstMap);
+      expect(secondMap).not.toEqual(firstMap);
+    });
+
+    it('throws a map away whose starts break a hard rule, and goes on with the next attempt', () => {
+      const breaking: TileIndex[][] = [
+        [honest[0], honest[0]], // H1: one tile for two players
+        [honest[0], 0], // H2: the corner of the map is sea
+        [honest[0]], // one start for two players
+      ];
+      for (const starts of breaking) {
+        const cheat = cheatingOnce(starts);
+        const result = generateForSize(seed, SMALL, 2, cheat.place);
+        expect(cheat.calls).toBe(2);
+        expect(result.map).toEqual(secondMap);
+        expect(hardRulesHold(grid, result.map, result.starts)).toBe(true);
+        expect(standardRulesHold(grid, result.map, result.starts)).toBe(true);
+      }
+    });
+
+    it('throws a map away whose starts break a standard rule, but only when the map is not crowded', () => {
+      // A second start that is a legal city site in its own right, but closer than rule S1 allows.
+      let tooClose: TileIndex[] | null = null;
+      for (let tile = 0; tile < grid.count && tooClose === null; tile++) {
+        const starts = [honest[0], tile];
+        if (hardRulesHold(grid, firstMap, starts) && !standardRulesHold(grid, firstMap, starts)) tooClose = starts;
+      }
+      expect(tooClose).not.toBeNull();
+
+      const uncrowded = cheatingOnce(tooClose as TileIndex[]);
+      const refused = generateForSize(seed, SMALL, 2, uncrowded.place);
+      expect(uncrowded.calls).toBe(2);
+      expect(refused.map).toEqual(secondMap);
+      expect(standardRulesHold(grid, refused.map, refused.starts)).toBe(true);
+
+      // The same starts on the same map are good enough when two players are more than the size recommends.
+      const crowded = cheatingOnce(tooClose as TileIndex[]);
+      const accepted = generateForSize(seed, { ...SMALL, recommendedPlayers: 1 }, 2, crowded.place);
+      expect(crowded.calls).toBe(1);
+      expect(accepted.map).toEqual(firstMap);
+      expect([...accepted.starts].sort((a, b) => a - b)).toEqual([...(tooClose as TileIndex[])].sort((a, b) => a - b));
+    });
   });
 
   it('gets the starts on the same small map when it counts as crowded: only the hard rules are demanded then', () => {

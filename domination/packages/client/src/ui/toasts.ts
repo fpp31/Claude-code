@@ -17,6 +17,8 @@ export const TOAST_LIFETIME_MS = 4000;
 export interface NewToast {
   text: string;
   kind: 'info' | 'error';
+  /** See Toast.slot. */
+  slot?: string;
 }
 
 /**
@@ -36,14 +38,20 @@ const lastToastId = new WeakMap<Store, number>();
  * one already showing says takes that one's place (as the newest, with its
  * four seconds starting again). Otherwise pressing a button that is refused
  * three times in a row stacks up three copies of the same sentence.
+ *
+ * In the same way a toast with a `slot` takes the place of the one that
+ * holds that slot, whatever it says: "Turn 9 has begun." replaces "Turn 8
+ * has begun." instead of piling up under it when turns go by quickly.
  */
 export function toastsWith(store: Store, added: NewToast[]): Toast[] {
   let id = lastToastId.get(store) ?? 0;
   let toasts = store.get().toasts.slice();
   for (const toast of added) {
     id += 1;
-    toasts = toasts.filter((shown) => shown.text !== toast.text || shown.kind !== toast.kind);
-    toasts.push({ id, text: toast.text, kind: toast.kind });
+    const replaces = (shown: Toast): boolean =>
+      (shown.text === toast.text && shown.kind === toast.kind) || (toast.slot !== undefined && shown.slot === toast.slot);
+    toasts = toasts.filter((shown) => !replaces(shown));
+    toasts.push(toast.slot === undefined ? { id, text: toast.text, kind: toast.kind } : { id, text: toast.text, kind: toast.kind, slot: toast.slot });
   }
   lastToastId.set(store, id);
   return toasts.slice(-MAX_TOASTS);

@@ -5,7 +5,7 @@
  * Look: chunky pixel-game UI to match the map art: dark navy chrome, hard
  * edges, hard offset shadows, no rounded-soft web look. Colours come from
  * the variables below; civilization colours are set from code as inline CSS
- * variables (--civ and --civ-accent, see ui/civColors.ts).
+ * variables (--civ, --civ-accent and --civ-text, see ui/civColors.ts).
  *
  * Two rules that keep the end-to-end test honest:
  *  - nothing with a data-testid gets `text-transform`: what a test reads
@@ -386,6 +386,12 @@ select.field:disabled {
   gap: 12px;
 }
 
+/* The warning that the link only works on this computer (the page was opened through localhost). */
+.invite-note {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
 .link-text {
   flex: 1;
   min-width: 0;
@@ -492,7 +498,7 @@ select.field:disabled {
   border: 2px solid var(--edge-dark);
   border-radius: 0;
   background: var(--civ);
-  color: var(--civ-accent);
+  color: var(--civ-text, var(--civ-accent)); /* words on a civ's colour: see ui/civColors.ts */
   font-family: var(--font-ui);
   text-align: left;
   cursor: pointer;
@@ -677,7 +683,7 @@ select.field:disabled {
   padding: 2px 8px 2px 4px;
   border: 2px solid var(--edge-dark);
   background: var(--civ);
-  color: var(--civ-accent);
+  color: var(--civ-text, var(--civ-accent)); /* words on a civ's colour: see ui/civColors.ts */
   font-size: 13px;
   font-weight: 700;
   white-space: nowrap;
@@ -751,7 +757,13 @@ select.field:disabled {
   height: 10px;
   border: 2px solid var(--edge-dark);
   background: var(--danger);
-  animation: blink 1s steps(2, jump-none) infinite;
+}
+
+/* Blinks while there is no connection, unless the player's system asks for less movement on screen (it is red either way). */
+@media (prefers-reduced-motion: no-preference) {
+  .connection-dot {
+    animation: blink 1s steps(2, jump-none) infinite;
+  }
 }
 
 .top-connection[data-status='online'] .connection-dot {
@@ -1025,7 +1037,13 @@ select.field:disabled {
   background: var(--paper);
   color: var(--ink);
   cursor: pointer;
-  animation: toast-in 0.18s steps(3, jump-none);
+}
+
+/* A new toast slides in, unless the player's system asks for less movement on screen. */
+@media (prefers-reduced-motion: no-preference) {
+  .toast {
+    animation: toast-in 0.18s steps(3, jump-none);
+  }
 }
 
 .toast-error {

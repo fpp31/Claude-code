@@ -9,13 +9,17 @@
 // people work on one machine:  PORT=8801 DEV_PORT=5201 npm run dev
 //   PORT       the game server (default 8787)
 //   DEV_PORT   the Vite page (default 5173)
-// Both programs inherit the variables from this one.
+// Both programs inherit the variables from this one, plus one: the games of
+// the development server are saved in data-dev/, not in data/ where
+// `npm start` keeps the real ones (see devEnv.mjs for why). Setting
+// DOMINATION_DATA_DIR yourself overrides that.
 //
 // Stop with Ctrl+C.
 
 import { spawn } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { devEnvironment } from './devEnv.mjs';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -26,11 +30,13 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const tsxCli = join(projectRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 const viteCli = join(projectRoot, 'node_modules', 'vite', 'bin', 'vite.js');
 
+const env = devEnvironment(process.env, projectRoot);
+
 const children = [];
 let stopping = false;
 
 function start(label, script, args, cwd) {
-  const child = spawn(process.execPath, [script, ...args], { cwd, stdio: 'inherit' });
+  const child = spawn(process.execPath, [script, ...args], { cwd, env, stdio: 'inherit' });
   child.on('error', (error) => {
     console.log(`[dev] could not start the ${label}: ${error.message}. Did you run "npm install"?`);
     stopAll(1);

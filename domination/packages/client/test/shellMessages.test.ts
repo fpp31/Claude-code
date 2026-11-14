@@ -2,10 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { cloneJson, RULE_ERROR_MESSAGES, SERVER_ERROR_MESSAGE } from '@domination/shared';
 import type { ClientMessage, GameEvent, ServerMessage } from '@domination/shared';
 import { sampleLobby, sampleView } from '@domination/shared/testing';
-import { describeEvent, handleServerMessage } from '../src/state/serverMessages';
-import { createStore, initialState } from '../src/state/store';
-import type { AppState, Store } from '../src/state/store';
-import { MAX_TOASTS, showToast } from '../src/ui/toasts';
+import {
+  NO_LONGER_IN_GAME_MESSAGE,
+  STARTED_BEFORE_LEAVE_MESSAGE,
+  TURN_TOAST_SLOT,
+  describeEvent,
+  handleServerMessage,
+} from '../src/state/serverMessages';
+import { createStore, currentScreen, initialState } from '../src/state/store';
+import type { AppState, JoinProblem, Store } from '../src/state/store';
+import { MAX_TOASTS, showToast, toastsWith } from '../src/ui/toasts';
 import { SAMPLE, storeInGame, viewOf } from './shellKit';
 
 /**
@@ -180,11 +186,89 @@ describe('handleServerMessage (WP4)', () => {
     expect(home.get().toasts).toEqual([]);
   });
 
-  it('error noSuchGame clears joining and shows the toast, so the home screen appears with the reason', () => {
+  it('error noSuchGame on a page that is still on the home screen: clears joining and shows the toast', () => {
     const store = createStore(initialState('Ada', SAMPLE.code));
     deliver(store, { type: 'error', code: 'noSuchGame', message: 'the server text' });
+    expect(currentScreen(store.get())).toBe('home');
     expect(store.get().joining).toBeNull();
     expect(store.get().toasts.map((toast) => toast.kind)).toEqual(['error']);
+  });
+
+  /** The four answers to `joinGame` that mean "you are not in that game", with what the home screen is told afterwards. */
+  const REFUSED_REJOINS: { code: 'noSuchGame' | 'nameRequired' | 'gameAlreadyStarted' | 'gameFull'; problem: JoinProblem | null; toast: string }[] = [
+    { code: 'noSuchGame', problem: 'noSuchGame', toast: 'the server text' },
+    { code: 'gameAlreadyStarted', problem: 'gameAlreadyStarted', toast: 'the server text' },
+    { code: 'gameFull', problem: 'gameFull', toast: 'the server text' },
+    // The game is there and has a seat: no "problem", but a word on why the page is back on the first screen.
+    { code: 'nameRequired', problem: null, toast: NO_LONGER_IN_GAME_MESSAGE },
+  ];
+
+  it('a rejoin that is refused while a GAME is on screen takes the game down: the home screen appears with the reason', () => {
+    for (const { code, problem, toast } of REFUSED_REJOINS) {
+      const store = storeInGame({
+        joining: SAMPLE.code,
+        busy: true,
+        selection: { kind: 'unit', unitId: SAMPLE.warriorId },
+        hoverTile: SAMPLE.emptyTile,
+      });
+      expect(currentScreen(store.get())).toBe('game');
+
+      const replies = deliver(store, { type: 'error', code, message: 'the server text' });
+
+      const state = store.get();
+      expect(currentScreen(state), code).toBe('home');
+      expect(state.game, code).toBeNull();
+      expect(state.joinProblem, code).toBe(problem);
+      expect(state.selection, code).toBeNull();
+      expect(state.hoverTile, code).toBeNull();
+      expect(state.joining, code).toBeNull();
+      expect(state.busy, code).toBe(false);
+      expect(state.toasts.map((shown) => [shown.kind, shown.text]), code).toEqual([['error', toast]]);
+      expect(replies, code).toEqual([]);
+    }
+  });
+
+  it('a rejoin that is refused while a LOBBY is on screen takes the lobby down in the same way', () => {
+    for (const { code, problem, toast } of REFUSED_REJOINS) {
+      const store = createStore(initialState('Ada'));
+      store.set({ connection: 'online', lobby: sampleLobby(), joining: SAMPLE.code });
+      expect(currentScreen(store.get())).toBe('lobby');
+
+      deliver(store, { type: 'error', code, message: 'the server text' });
+
+      const state = store.get();
+      expect(currentScreen(state), code).toBe('home');
+      expect(state.lobby, code).toBeNull();
+      expect(state.joinProblem, code).toBe(problem);
+      expect(state.joining, code).toBeNull();
+      expect(state.toasts.map((shown) => [shown.kind, shown.text]), code).toEqual([['error', toast]]);
+    }
+  });
+
+  it('the refusal counts also when an earlier, unrelated error has already cleared `joining`', () => {
+    const store = storeInGame({ joining: SAMPLE.code });
+    deliver(store, { type: 'error', code: 'rateLimited', message: 'slow down' });
+    expect(store.get().joining).toBeNull();
+    expect(currentScreen(store.get())).toBe('game');
+
+    deliver(store, { type: 'error', code: 'gameAlreadyStarted', message: 'the server text' });
+    expect(currentScreen(store.get())).toBe('home');
+    expect(store.get().joinProblem).toBe('gameAlreadyStarted');
+  });
+
+  it('an error that says nothing about membership leaves the game or lobby on screen', () => {
+    for (const code of ['serverError', 'rateLimited', 'notInGame', 'badMessage', 'notHost', 'civTaken', 'badName'] as const) {
+      const inGame = storeInGame({ selection: { kind: 'unit', unitId: SAMPLE.warriorId } });
+      const game = inGame.get().game;
+      deliver(inGame, { type: 'error', code, message: 'the server text' });
+      expect(inGame.get().game, code).toBe(game);
+      expect(inGame.get().selection, code).toEqual({ kind: 'unit', unitId: SAMPLE.warriorId });
+
+      const inLobby = createStore(initialState('Ada'));
+      inLobby.set({ lobby: sampleLobby() });
+      deliver(inLobby, { type: 'error', code, message: 'the server text' });
+      expect(currentScreen(inLobby.get()), code).toBe('lobby');
+    }
   });
 
   it('a refused join that trying again cannot cure is remembered, so the home screen can go on saying why', () => {
@@ -251,7 +335,11 @@ describe('handleServerMessage (WP4)', () => {
   });
 
   it('left: clears lobby, game, selection and joining', () => {
-    const store = storeInGame({
+    // (The page left a lobby. A selection and a hovered tile cannot exist
+    // there; they are set here to see that nothing of a map is carried along.)
+    const store = createStore(initialState('Ada'));
+    store.set({
+      connection: 'online',
       lobby: sampleLobby(),
       selection: { kind: 'city', cityId: SAMPLE.romeId },
       joining: SAMPLE.code,
@@ -259,15 +347,45 @@ describe('handleServerMessage (WP4)', () => {
       hoverTile: 3,
     });
 
-    deliver(store, { type: 'left' });
+    const replies = deliver(store, { type: 'left' });
 
     const state = store.get();
+    expect(currentScreen(state)).toBe('home');
     expect(state.lobby).toBeNull();
     expect(state.game).toBeNull();
     expect(state.selection).toBeNull();
     expect(state.joining).toBeNull();
     expect(state.busy).toBe(false);
     expect(state.hoverTile).toBeNull();
+    expect(state.toasts).toEqual([]);
+    expect(replies).toEqual([]);
+
+    // On the home screen already (a second answer to a Leave pressed twice): nothing to do, nothing breaks.
+    expect(deliver(store, { type: 'left' })).toEqual([]);
+    expect(currentScreen(store.get())).toBe('home');
+  });
+
+  it('left while a GAME is on screen (Leave was pressed in the lobby as the game started): the page stays in the game and asks to be let back in', () => {
+    // What the server sends a player whose Leave arrives just after the
+    // host's Start: the game, and then the answer to the Leave.
+    const store = createStore(initialState('Cy'));
+    store.set({ connection: 'online', lobby: sampleLobby() });
+    const replies = deliver(store, gameSync(1), { type: 'left' });
+
+    const state = store.get();
+    expect(currentScreen(state)).toBe('game');
+    expect(state.game?.code).toBe(SAMPLE.code);
+    expect(replies).toEqual([{ type: 'joinGame', code: SAMPLE.code, name: null }]);
+    expect(state.toasts.map((toast) => [toast.kind, toast.text])).toEqual([['info', STARTED_BEFORE_LEAVE_MESSAGE]]);
+
+    // Nothing the player had on the map is thrown away while the page waits for the server's answer.
+    const playing = storeInGame({ selection: { kind: 'unit', unitId: SAMPLE.warriorId }, hoverTile: SAMPLE.emptyTile });
+    const before = playing.get();
+    deliver(playing, { type: 'left' });
+    expect({ ...playing.get(), toasts: [] }).toEqual({ ...before, toasts: [] });
+    // The server's answer is a full view, which puts the page back in step.
+    deliver(playing, gameSync(9));
+    expect(playing.get().game?.seq).toBe(9);
   });
 
   it('drops the selection when the selected unit or city is no longer in the view', () => {
@@ -322,6 +440,30 @@ describe('handleServerMessage (WP4)', () => {
       ['info', describeEvent(events[1], view)],
       ['info', describeEvent(events[2], view)],
     ]);
+  });
+
+  it('"Turn N has begun." never piles up: the newest takes the place of the one before, other news stays', () => {
+    const store = storeInGame();
+    const grew: GameEvent = { type: 'cityGrew', playerId: 'p1', cityId: SAMPLE.romeId, name: 'Rome', population: 3 };
+    deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 8 }, events: [grew, { type: 'turnStarted', turn: 8 }] });
+    deliver(store, { type: 'gameUpdate', seq: 7, patch: { turn: 9 }, events: [{ type: 'turnStarted', turn: 9 }] });
+    expect(store.get().toasts.map((toast) => toast.text)).toEqual(['Rome grew to 3.', 'Turn 9 has begun.']);
+
+    // The same through a full view (after a reconnect, or with patches switched off).
+    const view = sampleView();
+    view.turn = 10;
+    deliver(store, gameSync(20, { view, events: [{ type: 'turnStarted', turn: 10 }] }));
+    const toasts = store.get().toasts;
+    expect(toasts.map((toast) => toast.text)).toEqual(['Rome grew to 3.', 'Turn 10 has begun.']);
+    // It is a new toast each time (its four seconds start again), in the slot the turn news shares.
+    expect(toasts[1].id).toBeGreaterThan(toasts[0].id + 2);
+    expect(toasts.map((toast) => toast.slot)).toEqual([undefined, TURN_TOAST_SLOT]);
+
+    // Ten turns in a row, as in a game played alone with Enter held down: still one.
+    for (let turn = 11; turn <= 20; turn++) {
+      deliver(store, { type: 'gameUpdate', seq: 10 + turn, patch: { turn }, events: [{ type: 'turnStarted', turn }] });
+    }
+    expect(store.get().toasts.filter((toast) => toast.text.includes('has begun')).map((toast) => toast.text)).toEqual(['Turn 20 has begun.']);
   });
 
   it('ends up with the same state whether events are present or stripped from the messages', () => {
@@ -457,6 +599,14 @@ describe('toasts in the store (WP4)', () => {
     handleServerMessage(store, refusal, () => {});
     handleServerMessage(store, refusal, () => {});
     expect(store.get().toasts.map((toast) => toast.text)).toEqual(['This game is full.']);
+  });
+
+  it('a toast with a slot takes the place of the one holding that slot; toasts without a slot never do', () => {
+    const store = createStore(initialState(''));
+    store.set({ toasts: toastsWith(store, [{ text: 'one', kind: 'info', slot: 'a' }, { text: 'plain', kind: 'info' }]) });
+    store.set({ toasts: toastsWith(store, [{ text: 'two', kind: 'error', slot: 'a' }, { text: 'other slot', kind: 'info', slot: 'b' }]) });
+    showToast(store, 'plain two', 'info');
+    expect(store.get().toasts.map((toast) => toast.text)).toEqual(['plain', 'two', 'other slot', 'plain two']);
   });
 
   it('keeps only the newest few: a flood of news pushes the oldest out', () => {

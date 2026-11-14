@@ -101,14 +101,22 @@ export type MapGenerator = (seed: string, mapSize: MapSizeId, playerCount: numbe
  *
  *  On a crowded map (more players than recommended) S1-S3 become aims, in
  *  this order of importance:
- *   1. distance: the smallest distance between two starts is as large as
+ *   1. nobody cut off on a small island: a landmass with fewer than
+ *      MAPGEN.roomyLandmassTiles walkable tiles gets a start only if every
+ *      start is on it, or if the starts fit nowhere else at any distance
+ *      rule H3 allows. (A player alone on such an island has no site for a
+ *      second city, and land units cannot leave it.)
+ *   2. distance: the smallest distance between two starts is as large as
  *      the land allows, up to RULES.minStartDistance (the S1 value; more
  *      than that is not chased at the cost of the next two aims);
- *   2. one landmass for everybody;
- *   3. similar scores.
- *  So six players on the small map still start 8 tiles apart on one
- *  landmass, but their land can differ a good deal in quality. The lobby
- *  shows the recommended player count for this reason.
+ *   3. one landmass for everybody;
+ *   4. similar scores.
+ *  So six players on the small map nearly always start 8 tiles apart on
+ *  one landmass, but their land can differ a good deal in quality. About
+ *  one such map in 160 gives way a little: the starts are 7 apart, or 8
+ *  apart with one or two players on a second landmass of at least
+ *  MAPGEN.roomyLandmassTiles tiles. The lobby shows the recommended player
+ *  count for this reason.
  *
  *  How the promises are kept: check the rules after placing the starts; if
  *  they do not hold, generate again from the next attempt stream (see

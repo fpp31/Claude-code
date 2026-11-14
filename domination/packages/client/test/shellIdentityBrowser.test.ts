@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ClientMessage, ServerMessage } from '@domination/shared';
+import { sampleLobby, sampleView } from '@domination/shared/testing';
 import type * as IdentityModule from '../src/net/identity';
+import type { Store } from '../src/state/store';
 
 /**
  * net/identity.ts against a pretend browser. identity.ts is the one file of
@@ -62,6 +65,7 @@ async function browserAt(address: string, storage: { local?: object; session?: o
     get hash() { return url.hash; },
     get origin() { return url.origin; },
     get host() { return url.host; },
+    get hostname() { return url.hostname; },
     get protocol() { return url.protocol; },
     reload() { reloadCount += 1; },
   });
@@ -171,6 +175,52 @@ describe('identity in a browser (WP4)', () => {
     expect((await browserAt('http://game.test/?g=')).identity.gameCodeFromUrl()).toBeNull();
   });
 
+  it('a ?g= that cannot be a game code is no code: it is neither shown nor sent, and the page knows the link is broken', async () => {
+    const broken = [
+      'ABCDEFGHJKMNPQRSTUVWXYZ23456789ABCDEFGHJKMNPQRSTUVWXYZ23456789', // 62 characters
+      'K7QXMK7QXMK7QXMK7', // 17: one more than the server reads at all
+      'K7QXMM', // one too many
+      'K7QX', // one too few
+      'K7QXM.', // a full stop that a chat program took into the link
+      'K7QX0', // 0, 1, I, L and O are not used in codes
+      'K7 XM',
+      '%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E',
+      'K7QXM%20AND%20SEND%205%20DOLLARS%20TO%20MALLORY%20FIRST',
+    ];
+    for (const text of broken) {
+      const { identity } = await browserAt(`http://game.test/?g=${text}`);
+      expect(identity.gameCodeFromUrl(), text).toBeNull();
+      expect(identity.gameLinkIsBroken(), text).toBe(true);
+    }
+    // A code, in whatever case and with spaces around it, is a good link; so is no code at all.
+    for (const address of ['http://game.test/?g=k7qxm', 'http://game.test/?g=%20K7QXM%20', 'http://game.test/', 'http://game.test/?g=', 'http://game.test/?g=%20']) {
+      expect((await browserAt(address)).identity.gameLinkIsBroken(), address).toBe(false);
+    }
+  });
+
+  it('a remembered last game that is not a code is forgotten rather than offered', async () => {
+    const { identity, local } = await browserAt('http://game.test/');
+    local.items.set(identity.STORAGE_KEYS.lastGame, 'K7QXM<script>');
+    expect(identity.loadLastGame()).toBeNull();
+    local.items.set(identity.STORAGE_KEYS.lastGame, ' k7qxm ');
+    expect(identity.loadLastGame()).toBe('K7QXM');
+  });
+
+  it('setGameCodeInUrl(null) also takes a ?g= out of the address that was never a code', async () => {
+    const browser = await browserAt('http://game.test/?g=NOT-A-CODE&profile=2');
+    browser.identity.setGameCodeInUrl(null);
+    expect(browser.address()).toBe('http://game.test/?profile=2');
+  });
+
+  it('pageIsLocalOnly: localhost and its numbers are addresses nobody else can open', async () => {
+    for (const address of ['http://localhost:8787/', 'http://LOCALHOST/', 'http://127.0.0.1:8787/?g=K7QXM', 'http://127.1.2.3/', 'http://[::1]:8787/', 'http://game.localhost/']) {
+      expect((await browserAt(address)).identity.pageIsLocalOnly(), address).toBe(true);
+    }
+    for (const address of ['http://192.168.1.20:8787/', 'https://game.example.com/', 'http://localhost.example.com/', 'http://10.0.0.127/', 'http://1127.0.0.1.example/']) {
+      expect((await browserAt(address)).identity.pageIsLocalOnly(), address).toBe(false);
+    }
+  });
+
   it('urlParameter tells a bare ?demo from ?demo=lobby from no parameter', async () => {
     expect((await browserAt('http://game.test/?demo')).identity.urlParameter('demo')).toBe('');
     expect((await browserAt('http://game.test/?demo=lobby')).identity.urlParameter('demo')).toBe('lobby');
@@ -231,5 +281,92 @@ describe('identity in a browser (WP4)', () => {
     browser.identity.reloadPage();
     browser.identity.reloadPage();
     expect(browser.reloads()).toBe(2);
+  });
+});
+
+/**
+ * What server messages do to the address bar and to the remembered last
+ * game. (What they do to the store is tested in shellMessages.test.ts, in
+ * plain Node, where these two do not exist.)
+ */
+describe('server messages in a browser: the address bar and the remembered game (WP4)', () => {
+  const CODE = 'K7QXM';
+
+  /** A page at `address` with a store, and a way to hand it server messages. */
+  async function pageAt(address: string) {
+    const browser = await browserAt(address);
+    // Loaded after browserAt, so that these modules use the pretend browser's copy of identity.ts.
+    const { handleServerMessage } = await import('../src/state/serverMessages');
+    const { createStore, currentScreen, initialState } = await import('../src/state/store');
+    const store: Store = createStore(initialState('Ada', browser.identity.gameCodeFromUrl()));
+    const sent: ClientMessage[] = [];
+    const deliver = (...messages: ServerMessage[]): void => {
+      for (const message of messages) handleServerMessage(store, message, (reply) => sent.push(reply));
+    };
+    return { ...browser, store, sent, deliver, screen: () => currentScreen(store.get()) };
+  }
+
+  const lobby: ServerMessage = { type: 'lobby', lobby: sampleLobby() };
+  const game: ServerMessage = { type: 'gameSync', code: CODE, seq: 1, view: sampleView(), connected: ['p1'], events: [] };
+
+  it('the examples use the code of the sample lobby', () => {
+    expect(sampleLobby().code).toBe(CODE);
+  });
+
+  it('Leave in a lobby: the address loses the code and the game is no longer remembered, so the home screen does not offer it again', async () => {
+    const page = await pageAt('http://game.test/');
+    page.deliver(lobby);
+    expect(page.address()).toBe(`http://game.test/?g=${CODE}`);
+    expect(page.identity.loadLastGame()).toBe(CODE);
+
+    page.deliver({ type: 'left' });
+
+    expect(page.screen()).toBe('home');
+    expect(page.address()).toBe('http://game.test/');
+    expect(page.identity.loadLastGame()).toBeNull();
+  });
+
+  it('`left` during a game (the Leave that lost the race against Start) keeps the address and the remembered game', async () => {
+    const page = await pageAt(`http://game.test/?g=${CODE}`);
+    page.deliver(lobby, game, { type: 'left' });
+
+    expect(page.screen()).toBe('game');
+    expect(page.address()).toBe(`http://game.test/?g=${CODE}`);
+    expect(page.identity.loadLastGame()).toBe(CODE);
+    expect(page.sent).toEqual([{ type: 'joinGame', code: CODE, name: null }]);
+  });
+
+  it('`left` on the home screen leaves a game remembered from earlier alone', async () => {
+    const page = await pageAt('http://game.test/');
+    page.identity.saveLastGame(CODE);
+    page.deliver({ type: 'left' });
+    expect(page.identity.loadLastGame()).toBe(CODE);
+  });
+
+  it('a refused rejoin while a game is on screen: the code stays in the address, except for a game that no longer exists', async () => {
+    for (const code of ['nameRequired', 'gameAlreadyStarted', 'gameFull'] as const) {
+      const page = await pageAt(`http://game.test/?g=${CODE}`);
+      page.deliver(game, { type: 'error', code, message: 'the server text' });
+      expect(page.screen(), code).toBe('home');
+      // The home screen reads the code from here, to print it with the invitation or with the reason.
+      expect(page.address(), code).toBe(`http://game.test/?g=${CODE}`);
+      expect(page.identity.loadLastGame(), code).toBe(CODE);
+    }
+
+    const gone = await pageAt(`http://game.test/?g=${CODE}`);
+    gone.deliver(game);
+    // An unrelated error first: the page no longer counts as "joining", and must still forget the game.
+    gone.deliver({ type: 'error', code: 'rateLimited', message: 'slow down' });
+    // The home screen is put up by the store change. What it finds in the address at that moment is the code it shows.
+    const { currentScreen } = await import('../src/state/store');
+    const codeWhenHomeAppeared: (string | null)[] = [];
+    gone.store.subscribe((state) => {
+      if (currentScreen(state) === 'home') codeWhenHomeAppeared.push(gone.identity.gameCodeFromUrl());
+    });
+    gone.deliver({ type: 'error', code: 'noSuchGame', message: 'the server text' });
+    expect(gone.screen()).toBe('home');
+    expect(codeWhenHomeAppeared).toEqual([CODE]);
+    expect(gone.address()).toBe('http://game.test/');
+    expect(gone.identity.loadLastGame()).toBeNull();
   });
 });

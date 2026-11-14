@@ -157,6 +157,33 @@ describe('civilizations', () => {
     expect([CIVS.norse.primary, CIVS.norse.secondary]).toEqual(['#4a5a9a', '#dfe5f2']);
   });
 
+  it('small page text on a civilization\'s colour can be read: at least 4.5 to 1 (WCAG AA), and the accent wherever the accent manages that', () => {
+    /** Relative luminance of '#rrggbb', as WCAG 2 defines it. */
+    const luminance = (color: string): number => {
+      const channel = (offset: number): number => {
+        const value = parseInt(color.slice(offset, offset + 2), 16) / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      };
+      return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+    };
+    const contrast = (a: string, b: string): number => {
+      const [dark, light] = [luminance(a), luminance(b)].sort((x, y) => x - y);
+      return (light + 0.05) / (dark + 0.05);
+    };
+    // The formula, on pairs whose contrast everybody knows.
+    expect(contrast('#000000', '#ffffff')).toBeCloseTo(21, 5);
+    expect(contrast('#777777', '#ffffff')).toBeCloseTo(4.48, 2);
+
+    for (const id of CIV_IDS) {
+      const civ = CIVS[id];
+      expect(civ.text).toMatch(/^#[0-9a-f]{6}$/);
+      expect(contrast(civ.text, civ.primary), `${id}: text on primary`).toBeGreaterThanOrEqual(4.5);
+      if (contrast(civ.secondary, civ.primary) >= 4.5) expect(civ.text, id).toBe(civ.secondary);
+    }
+    // Three accents do not manage it (cream on red and on green, mint on blue): those are the ones with a text colour of their own.
+    expect(CIV_IDS.filter((id) => CIVS[id].text !== CIVS[id].secondary)).toEqual(['rome', 'china', 'maya']);
+  });
+
   it('have distinct primary colours and names the pixel font can draw', () => {
     expect(new Set(CIV_IDS.map((id) => CIVS[id].primary)).size).toBe(CIV_IDS.length);
     const everyCityName: string[] = [];
@@ -165,10 +192,30 @@ describe('civilizations', () => {
       expect(civ.primary).toMatch(/^#[0-9a-f]{6}$/);
       expect(civ.secondary).toMatch(/^#[0-9a-f]{6}$/);
       expect(civ.cityNames.length).toBeGreaterThanOrEqual(4);
-      for (const name of [civ.name, civ.leader, ...civ.cityNames]) expect(name).toMatch(/^[A-Za-z]+( [A-Za-z]+)*$/);
+      // What the pixel font of the city banners has: letters, and single spaces between words.
+      for (const name of [civ.name, ...civ.cityNames]) expect(name).toMatch(/^[A-Za-z]+( [A-Za-z]+)*$/);
+      // A leader's name is only ever page text (the lobby), so its words may carry apostrophes: "Yax K'uk' Mo'".
+      expect(civ.leader).toMatch(/^[A-Za-z][A-Za-z']*( [A-Za-z][A-Za-z']*)*$/);
       everyCityName.push(...civ.cityNames);
     }
     expect(new Set(everyCityName).size).toBe(everyCityName.length);
+  });
+
+  it('have the leaders and capitals of the approved civilization board', () => {
+    const board = CIV_IDS.map((id) => [CIVS[id].name, CIVS[id].leader, cityNameFor(id, 0)]);
+    expect(board).toEqual([
+      ['Rome', 'Hadrian', 'Rome'],
+      ['Egypt', 'Hatshepsut', 'Thebes'],
+      ['China', 'Taizong of Tang', 'Changan'],
+      ['Mali', 'Mansa Musa', 'Niani'],
+      ['Maya', "Yax K'uk' Mo'", 'Copan'],
+      ['Norse', 'Harald Hardrada', 'Nidaros'],
+    ]);
+    // The lists kept their other names: Copan only moved to the front, and
+    // Nidaros replaced Trondheim (the same town under its later name).
+    expect(CIVS.maya.cityNames).toEqual(['Copan', 'Tikal', 'Palenque', 'Calakmul', 'Uxmal', 'Chichen Itza', 'Caracol', 'Yaxchilan']);
+    expect(CIVS.norse.cityNames).toEqual(['Nidaros', 'Uppsala', 'Birka', 'Hedeby', 'Ribe', 'Kaupang', 'Jelling', 'Sigtuna']);
+    expect(CIV_IDS.flatMap((id) => CIVS[id].cityNames)).not.toContain('Trondheim');
   });
 
   it('names cities in list order and numbers them when the list runs out', () => {

@@ -57,10 +57,13 @@ const LONGEST_FRAME_SECONDS = 0.05;
  *  - Ignore keys pressed with Ctrl/Alt/Meta.
  *  - Ignore ALL keys while a text-entry element has focus: input, textarea,
  *    select, or anything contenteditable.
- *  - A focused BUTTON does not switch the keyboard off: after a mouse click
- *    on End Turn or a zoom button, that button keeps the focus, and the map
- *    keys must go on working. Skip only Enter and Space then, because the
- *    button handles those itself (otherwise End Turn would fire twice).
+ *  - A focused BUTTON does not switch the keyboard off: the map keys must
+ *    go on working. Skip only Enter and Space then, because the button
+ *    handles those itself (otherwise End Turn would fire twice). A button
+ *    has the focus only when it was reached with the Tab key: the game
+ *    screen takes the focus off a button that was clicked with the mouse
+ *    (ui/gameScreen.ts), so Enter after a click on a zoom button still
+ *    ends the turn.
  *  - Ignore keydown events with `event.repeat` set: holding a key must not
  *    fire a command thirty times a second. (Panning does not need repeats;
  *    it tracks keydown and keyup.)

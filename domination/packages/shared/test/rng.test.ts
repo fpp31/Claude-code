@@ -104,6 +104,29 @@ describe('nextInt', () => {
     }
   });
 
+  it('draws again instead of folding the top of the range over, so no value is favoured', () => {
+    // 3 * 2^30 does not divide 2^32: a draw in the top quarter cannot be
+    // used, and folding it over (value % bound) would make the numbers
+    // below 2^30 twice as likely as the rest.
+    const bound = 3 * 2 ** 30;
+    const rng = seedRng('redraw', 'dice');
+    const raw = seedRng('redraw', 'dice');
+    let skipped = 0;
+    for (let i = 0; i < 2000; i++) {
+      // What nextInt must return: the next raw draw that is below the bound.
+      let expected = nextUint32(raw);
+      while (expected >= bound) {
+        skipped += 1;
+        expected = nextUint32(raw);
+      }
+      expect(nextInt(rng, bound)).toBe(expected);
+    }
+    // About a quarter of all draws had to be thrown away, so the loop above was really used...
+    expect(skipped).toBeGreaterThan(500);
+    // ...and both streams stand at the same place afterwards.
+    expect(rng).toEqual(raw);
+  });
+
   it('always returns 0 for bound 1', () => {
     const rng = seedRng('ints', 'dice');
     for (let i = 0; i < 10; i++) expect(nextInt(rng, 1)).toBe(0);

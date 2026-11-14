@@ -69,6 +69,26 @@ export function focusKind(target: { tagName?: string; isContentEditable?: boolea
 }
 
 /**
+ * Was this click made with a mouse or a finger, rather than with the
+ * keyboard (Enter or Space on the focused button)?
+ *
+ * The game screen asks, because the two leave the keyboard in different
+ * hands. A button that was clicked keeps the focus, and Enter and Space on
+ * a focused button belong to that button (see keyCommand): after a mouse
+ * click on "-", Enter would zoom out once more instead of ending the turn.
+ * So after a click by pointer the game screen gives the focus back to the
+ * page. A button reached with Tab keeps it, because there Enter and Space
+ * are the way to press it.
+ *
+ * @param detail  MouseEvent.detail of the click event: how many times the
+ *                pointer went down for it (1, 2 for a double-click...), and
+ *                0 for a click that came from the keyboard or from code
+ */
+export function clickWasByPointer(detail: number): boolean {
+  return detail > 0;
+}
+
+/**
  * The command for a key press, or null if the key does nothing here.
  *
  *  - Keys pressed with Ctrl, Alt or Meta are the browser's: null.
