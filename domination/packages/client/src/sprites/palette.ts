@@ -80,6 +80,13 @@ export const PALETTE = {
   plank: '#c08040',
   plankShade: '#8a5428',
 
+  // Not in the reference: the Worker and what it builds.
+  steelShade: '#b8c8e0',
+  soil: '#b07a48',
+  soilShade: '#8a5428',
+  desertSoil: '#c89858',
+  crop: '#2f9a40',
+
   /** Not in the reference: the pale line around a unit that stands among trees (sprites/rim.ts). */
   unitRim: '#fff8e0',
 

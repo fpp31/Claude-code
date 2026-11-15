@@ -1,45 +1,86 @@
 import { describe, expect, it } from 'vitest';
-import { MAP_SIZES, MAP_SIZE_IDS, UNITS } from '@domination/shared';
-import type { OwnCityDetail, PlayerView } from '@domination/shared';
+import { IMPROVEMENTS, IMPROVEMENT_IDS, MAP_SIZES, MAP_SIZE_IDS, RULES, RULE_ERROR_MESSAGES, UNITS, cloneJson } from '@domination/shared';
+import type { BuildWait, JobOption, OwnCityDetail, PlayerView, QueueEntryView, RuleErrorCode, UnitJobView } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
+import { improvementBonusText as bonusTextOfTileInfo } from '../src/game/tileInfo';
 import {
   LOCAL_LINK_NOTE,
   buildOptionText,
+  buildWaitText,
   codeHintText,
   countOf,
   firstStepsText,
   foodText,
   ghostSeatWarning,
   homeIntroText,
+  improvementBonusText,
+  jobButtonText,
+  jobProgressText,
+  jobReasonText,
+  jobsReasonText,
   mapSizeNote,
   mapSizeText,
   movesText,
   nameList,
   populationText,
-  productionBlockedText,
+  productionNoteText,
   productionText,
   progressFraction,
+  queueCountText,
+  queueNoteText,
+  queueRowText,
   signed,
   tabTitleText,
   todoHints,
+  unitHintParts,
   unitHintText,
   waitingForText,
 } from '../src/ui/texts';
-import { SAMPLE } from './shellKit';
+import { SAMPLE, cityIn, ownOf, romeOf, unitIn } from './shellKit';
 
 /**
  * The sentences the panels print (ui/texts.ts). The doc comments of the
- * panels pin several of these formats down ("Moves 1/2", "Food 4/16 (+2 per
+ * panels pin several of these formats down ("Moves 1/2", "Food 4/16 (+3 per
  * turn)", "Warrior 6/18 (+3 per turn, 4 turns)"), and the end-to-end test
  * reads some of them from the page, so they are checked word for word here.
  * Change the wording in texts.ts and in these expectations together.
  */
 
-/** Rome's details from the sample view: food 4/16 (+2), a Warrior at 6/18 (+3, 4 turns). */
+/** Rome's details from the sample view: food 4/16 (+3); a Warrior at 6/18 (+3, 4 turns), then a Scout (in 7 turns). */
 function rome(changes: Partial<OwnCityDetail> = {}): OwnCityDetail {
   const own = sampleView().cities.find((city) => city.id === SAMPLE.romeId)?.own;
   if (own == null) throw new Error('the sample view has no Rome');
   return { ...own, ...changes };
+}
+
+/** One row of a build queue. */
+function entry(unitType: QueueEntryView['item']['unitType'], turns: number | null, wait: BuildWait | null = null): QueueEntryView {
+  return { item: { kind: 'unit', unitType }, cost: UNITS[unitType].cost, turns, wait };
+}
+
+/** Rome with this queue. */
+function romeBuilding(queue: QueueEntryView[], changes: Partial<OwnCityDetail> = {}): OwnCityDetail {
+  return rome({ buildQueue: queue, ...changes });
+}
+
+/** Adds a second city of the player's to a view: a copy of Rome under another id, with a change applied. */
+function addOwnCity(view: PlayerView, id: string, name: string, change: (own: OwnCityDetail) => void): void {
+  const city = { ...cloneJson(cityIn(view, SAMPLE.romeId)), id, name, tile: SAMPLE.romeTile + 28 };
+  if (city.own === null) throw new Error('unexpected sample view');
+  change(city.own);
+  view.cities.push(city);
+}
+
+/** What a view says about a first entry that is paid for and cannot be completed, with no end in sight. */
+function hold(own: OwnCityDetail, why: 'needsPopulation' | 'noRoom'): void {
+  own.buildQueue = [entry('settler', null, why), entry('warrior', null, 'earlier')];
+  own.productionStored = 30;
+  own.held = why;
+}
+
+/** A job option of a Worker. */
+function option(improvement: JobOption['improvement'], error: RuleErrorCode | null, turns = IMPROVEMENTS[improvement].turns): JobOption {
+  return { improvement, turns, error };
 }
 
 /** The sample view with the given players having ended their turn, and nobody else. */
@@ -97,50 +138,147 @@ describe('unit panel texts (WP4)', () => {
 describe('city panel texts (WP4)', () => {
   it('populationText and foodText print the numbers of the view as they are', () => {
     expect(populationText(2)).toBe('Population 2');
-    expect(foodText(rome())).toBe('Food 4/16 (+2 per turn)');
+    expect(foodText(rome())).toBe('Food 4/16 (+3 per turn)');
     expect(foodText(rome({ foodPerTurn: 0 }))).toBe('Food 4/16 (+0 per turn)');
     expect(foodText(rome({ foodPerTurn: -1 }))).toBe('Food 4/16 (-1 per turn)');
   });
 
-  it('productionText names the item, the progress, the rate and the turns left', () => {
+  it('productionText names the current build ("4 turns", "1 turn", no turns without a number), or says there is nothing to build and what is saved', () => {
     expect(productionText(rome())).toBe('Warrior 6/18 (+3 per turn, 4 turns)');
-    expect(productionText(rome({ turnsLeft: 1 }))).toBe('Warrior 6/18 (+3 per turn, 1 turn)');
+    expect(productionText(romeBuilding([entry('warrior', 1)], { productionStored: 15 }))).toBe('Warrior 15/18 (+3 per turn, 1 turn)');
+    // Only the first entry is the current build, whatever follows it.
+    expect(productionText(romeBuilding([entry('scout', 2), entry('warrior', 8), entry('settler', 20)]))).toBe('Scout 6/12 (+3 per turn, 2 turns)');
+
+    // No number: a city that makes no production, and a paid-for Settler that is held.
+    expect(productionText(romeBuilding([entry('warrior', null, 'noProduction')], { productionPerTurn: 0 }))).toBe('Warrior 6/18 (+0 per turn)');
+    expect(productionText(romeBuilding([entry('settler', null, 'needsPopulation')], { productionStored: 30, productionPerTurn: 2, held: 'needsPopulation' }))).toBe(
+      'Settler 30/30 (+2 per turn)',
+    );
+    // Held, and the forecast sees the end of the wait: the number says when.
+    expect(productionText(romeBuilding([entry('settler', 2)], { productionStored: 30, productionPerTurn: 2, held: 'needsPopulation' }))).toBe(
+      'Settler 30/30 (+2 per turn, 2 turns)',
+    );
+    // The store can hold more than the first entry costs while it waits.
+    expect(productionText(romeBuilding([entry('warrior', null, 'noRoom')], { productionStored: 30, held: 'noRoom' }))).toBe('Warrior 30/18 (+3 per turn)');
+
+    expect(productionText(romeBuilding([], { productionStored: 0 }))).toBe('Nothing to build.');
+    expect(productionText(romeBuilding([], { productionStored: 7 }))).toBe('Nothing to build (7 production saved).');
   });
 
-  it('productionText says "Nothing chosen" when nothing is', () => {
-    expect(productionText(rome({ production: null, productionCost: null, turnsLeft: null }))).toBe('Nothing chosen');
-    expect(productionBlockedText(rome({ production: null, productionCost: null, turnsLeft: null }))).toBeNull();
+  it('productionNoteText says "Waiting: ..." exactly when held is set, warns about an idle city, and is null for a first entry that has no number but is not paid for', () => {
+    expect(productionNoteText(rome())).toBeNull();
+
+    expect(productionNoteText(romeBuilding([entry('settler', null, 'needsPopulation')], { productionStored: 30, held: 'needsPopulation' }))).toBe(
+      'Waiting: the city must grow first',
+    );
+    expect(productionNoteText(romeBuilding([entry('warrior', null, 'noRoom')], { productionStored: 18, held: 'noRoom' }))).toBe(
+      'Waiting: no free tile for the unit',
+    );
+    // Held with the end in sight: still waiting right now.
+    expect(productionNoteText(romeBuilding([entry('settler', 2)], { productionStored: 30, held: 'needsPopulation' }))).toBe('Waiting: the city must grow first');
+
+    // No number, but nothing is held: the entry is simply not paid for yet. Nothing waits.
+    expect(productionNoteText(romeBuilding([entry('warrior', null, 'noProduction')], { productionPerTurn: 0 }))).toBeNull();
+    expect(productionNoteText(romeBuilding([entry('settler', null, 'tooFar')]))).toBeNull();
+    expect(productionNoteText(romeBuilding([entry('settler', null, 'needsPopulation')], { productionStored: 12 }))).toBeNull();
+
+    expect(productionNoteText(romeBuilding([]))).toBe("This city's production is lost every turn.");
+    expect(productionNoteText(romeBuilding([], { productionStored: 7 }))).toBe("This city's production is lost every turn.");
   });
 
-  it('productionText leaves the turns out when the city makes no production', () => {
-    expect(productionText(rome({ productionPerTurn: 0, turnsLeft: null }))).toBe('Warrior 6/18 (+0 per turn)');
+  it('queueRowText: "now, 4 turns", "now, 1 turn", "in 8 turns", and the reason where there is no number, for the first row too', () => {
+    expect(queueRowText(entry('warrior', 4), 0)).toBe('now, 4 turns');
+    expect(queueRowText(entry('warrior', 1), 0)).toBe('now, 1 turn');
+    expect(queueRowText(entry('scout', 8), 1)).toBe('in 8 turns');
+    expect(queueRowText(entry('scout', 1), 1)).toBe('in 1 turn');
+    expect(queueRowText(entry('scout', 21), 7)).toBe('in 21 turns');
+
+    expect(queueRowText(entry('settler', null, 'needsPopulation'), 0)).toBe('the city must grow first');
+    expect(queueRowText(entry('warrior', null, 'noRoom'), 0)).toBe('no free tile for the unit');
+    expect(queueRowText(entry('warrior', null, 'noProduction'), 0)).toBe('this city makes no production');
+    expect(queueRowText(entry('settler', null, 'tooFar'), 0)).toBe('more than 50 turns');
+    expect(queueRowText(entry('settler', null, 'tooFar'), 2)).toBe('more than 50 turns');
+    expect(queueRowText(entry('warrior', null, 'earlier'), 1)).toBe('after the item above');
+
+    // The sample queue, as the panel prints it.
+    expect(rome().buildQueue.map(queueRowText)).toEqual(['now, 4 turns', 'in 7 turns']);
+
+    // A row with neither a number nor a reason (the server never sends one) still says something true.
+    expect(queueRowText(entry('warrior', null, null), 0)).toBe('now');
+    expect(queueRowText(entry('warrior', null, null), 3)).toBe('after the item above');
   });
 
-  it('a blocked item is explained, and the turns are left out because they would mislead', () => {
-    const settler = { kind: 'unit', unitType: 'settler' } as const;
-    const waitingForPeople = rome({
-      production: settler, productionStored: 30, productionCost: 30, turnsLeft: 0, productionBlocked: 'needsPopulation',
-    });
-    expect(productionText(waitingForPeople)).toBe('Settler 30/30 (+3 per turn)');
-    // "needs 2 population": the city must keep one citizen after the Settler has taken one.
-    expect(productionBlockedText(waitingForPeople)).toBe(`Waiting: the city needs ${1 + UNITS.settler.populationCost} population`);
+  it('buildWaitText has a sentence for each of the five reasons; "more than 50 turns" reads the table', () => {
+    const sentences: Record<BuildWait, string> = {
+      needsPopulation: 'the city must grow first',
+      noRoom: 'no free tile for the unit',
+      noProduction: 'this city makes no production',
+      tooFar: `more than ${RULES.forecastTurns} turns`,
+      earlier: 'after the item above',
+    };
+    for (const [wait, sentence] of Object.entries(sentences)) expect(buildWaitText(wait as BuildWait)).toBe(sentence);
+    expect(buildWaitText('tooFar')).toBe('more than 50 turns');
 
-    const noRoom = rome({ productionStored: 18, turnsLeft: 0, productionBlocked: 'noRoom' });
-    expect(productionBlockedText(noRoom)).toBe('Waiting: no free tile for the unit');
-
-    expect(productionBlockedText(rome())).toBeNull();
+    const before = RULES.forecastTurns;
+    try {
+      RULES.forecastTurns = 30;
+      expect(buildWaitText('tooFar')).toBe('more than 30 turns');
+    } finally {
+      RULES.forecastTurns = before;
+    }
   });
 
-  it('buildOptionText gives cost and turns, and notes a unit that takes a citizen', () => {
+  it('buildOptionText gives cost, turns ("in 1 turn", "in 4 turns") and population, and the reason in brackets where there is no number', () => {
     const options = rome().buildOptions;
-    const warrior = options.find((option) => option.item.unitType === 'warrior');
-    const settler = options.find((option) => option.item.unitType === 'settler');
+    const warrior = options.find((candidate) => candidate.item.unitType === 'warrior');
+    const settler = options.find((candidate) => candidate.item.unitType === 'settler');
     if (warrior === undefined || settler === undefined) throw new Error('unexpected sample view');
 
-    expect(buildOptionText(warrior)).toBe('18 production, 4 turns');
-    expect(buildOptionText({ ...warrior, turns: 1 })).toBe('18 production, 1 turn');
-    expect(buildOptionText({ ...warrior, turns: null })).toBe('18 production');
-    expect(buildOptionText(settler)).toBe(`30 production, 8 turns, uses ${UNITS.settler.populationCost} population`);
+    // The sample menu: when each would be done if added now, behind the Warrior and the Scout.
+    expect(options.map(buildOptionText)).toEqual([
+      '18 production, in 12 turns',
+      '12 production, in 10 turns',
+      '30 production, in 14 turns, uses 1 population',
+      '20 production, in 12 turns',
+    ]);
+    expect(buildOptionText({ ...warrior, turns: 4 })).toBe('18 production, in 4 turns');
+    expect(buildOptionText({ ...warrior, turns: 1 })).toBe('18 production, in 1 turn');
+    expect(buildOptionText({ ...settler, turns: 18 })).toBe(`30 production, in 18 turns, uses ${UNITS.settler.populationCost} population`);
+
+    // No number: the reason in brackets...
+    expect(buildOptionText({ ...settler, turns: null, wait: 'needsPopulation' })).toBe('30 production, uses 1 population (the city must grow first)');
+    expect(buildOptionText({ ...warrior, turns: null, wait: 'tooFar' })).toBe('18 production (more than 50 turns)');
+    expect(buildOptionText({ ...warrior, turns: null, wait: 'noRoom' })).toBe('18 production (no free tile for the unit)');
+    expect(buildOptionText({ ...warrior, turns: null, wait: 'noProduction' })).toBe('18 production (this city makes no production)');
+    // ...except behind a queue that has no end: the rows above already say why.
+    expect(buildOptionText({ ...warrior, turns: null, wait: 'earlier' })).toBe('18 production');
+    expect(buildOptionText({ ...settler, turns: null, wait: 'earlier' })).toBe('30 production, uses 1 population');
+    // A full queue changes nothing in this line: the note under the queue title says it.
+    expect(buildOptionText({ ...warrior, addError: 'queueFull' })).toBe('18 production, in 12 turns');
+  });
+
+  it('queueNoteText says why the queue cannot be changed: no connection, turn ended, queue full', () => {
+    expect(queueNoteText(rome(), null)).toBeNull();
+    expect(queueNoteText(rome(), 'offline')).toBe('No connection: the queue cannot be changed right now.');
+    expect(queueNoteText(rome(), 'turnEnded')).toBe('You have ended your turn. Cancel that to change the queue.');
+
+    const full = rome();
+    full.buildOptions = full.buildOptions.map((candidate) => ({ ...candidate, addError: 'queueFull' as const }));
+    expect(queueNoteText(full, null)).toBe('The build queue is full.');
+    expect(queueNoteText(full, null)).toBe(RULE_ERROR_MESSAGES.queueFull);
+    // The lasting reasons come first: they stop every button, not only the add buttons.
+    expect(queueNoteText(full, 'offline')).toBe('No connection: the queue cannot be changed right now.');
+    expect(queueNoteText(full, 'turnEnded')).toBe('You have ended your turn. Cancel that to change the queue.');
+
+    // An empty queue, and a city with nothing in its menu, have nothing to say here.
+    expect(queueNoteText(romeBuilding([]), null)).toBeNull();
+    expect(queueNoteText(rome({ buildOptions: [] }), null)).toBeNull();
+  });
+
+  it('queueCountText is "Queue 2 of 8" for the sample city', () => {
+    expect(queueCountText(rome())).toBe('Queue 2 of 8');
+    expect(queueCountText(romeBuilding([]))).toBe(`Queue 0 of ${RULES.maxQueueLength}`);
+    expect(queueCountText(romeBuilding(Array.from({ length: RULES.maxQueueLength }, () => entry('warrior', null, 'earlier'))))).toBe('Queue 8 of 8');
   });
 });
 
@@ -149,26 +287,60 @@ describe('End Turn and top bar texts (WP4)', () => {
     const view = sampleView();
     expect(todoHints(view)).toEqual(['2 units can still move']);
 
-    const settler = view.units.find((unit) => unit.id === SAMPLE.settlerId);
-    const city = view.cities.find((candidate) => candidate.id === SAMPLE.romeId);
-    if (settler?.own == null || city?.own == null) throw new Error('unexpected sample view');
-    settler.own.movesLeft = 0;
-    city.own.production = null;
-    expect(todoHints(view)).toEqual(['1 unit can still move', '1 city has nothing to build']);
+    ownOf(view, SAMPLE.settlerId).movesLeft = 0;
+    romeOf(view).buildQueue = [];
+    expect(todoHints(view)).toEqual(['Rome has nothing to build', '1 unit can still move']);
 
     for (const unit of view.units) if (unit.own !== null) unit.own.movesLeft = 0;
-    city.own.production = { kind: 'unit', unitType: 'scout' };
+    romeOf(view).buildQueue = [entry('scout', 2)];
     expect(todoHints(view)).toEqual([]);
   });
 
   it('todoHints counts cities in the plural too', () => {
     const view = sampleView();
     for (const unit of view.units) if (unit.own !== null) unit.own.movesLeft = 0;
-    const city = view.cities.find((candidate) => candidate.id === SAMPLE.romeId);
-    if (city?.own == null) throw new Error('unexpected sample view');
-    city.own.production = null;
-    view.cities.push({ ...city, id: 'c1_second', name: 'Ostia', tile: 5, own: { ...city.own } });
+    romeOf(view).buildQueue = [];
+    addOwnCity(view, 'c1_second', 'Ostia', (own) => {
+      own.buildQueue = [];
+    });
     expect(todoHints(view)).toEqual(['2 cities have nothing to build']);
+  });
+
+  it('todoHints: idle cities first (named when there is one), then waiting cities ("Rome is waiting: the city must grow first"; "2 cities are waiting to finish a unit"), then units; a unit at work is not counted', () => {
+    // The sample view: three own units, one of them at work.
+    const sample = sampleView();
+    expect(sample.units.filter((unit) => unit.owner === sample.you)).toHaveLength(3);
+    expect(todoHints(sample)).toEqual(['2 units can still move']);
+    ownOf(sample, SAMPLE.workerId).job = null;
+    expect(todoHints(sample)).toEqual(['3 units can still move']);
+
+    // One city waits with no end in sight: its name and why.
+    const waiting = sampleView();
+    hold(romeOf(waiting), 'needsPopulation');
+    expect(todoHints(waiting)).toEqual(['Rome is waiting: the city must grow first', '2 units can still move']);
+    hold(romeOf(waiting), 'noRoom');
+    expect(todoHints(waiting)).toEqual(['Rome is waiting: no free tile for the unit', '2 units can still move']);
+
+    // Held, but the first row has a number (the wait will be over): the panel says it, the hint does not.
+    romeOf(waiting).buildQueue[0].turns = 2;
+    romeOf(waiting).buildQueue[0].wait = null;
+    expect(todoHints(waiting)).toEqual(['2 units can still move']);
+
+    // An idle city and a waiting one: the idle one first.
+    const both = sampleView();
+    hold(romeOf(both), 'needsPopulation');
+    addOwnCity(both, 'c1_zzzzzz', 'Capua', (own) => {
+      own.buildQueue = [];
+    });
+    expect(todoHints(both)).toEqual(['Capua has nothing to build', 'Rome is waiting: the city must grow first', '2 units can still move']);
+
+    // Two of each: counted, not named.
+    addOwnCity(both, 'c1_aaaaaa', 'Ostia', (own) => {
+      own.buildQueue = [];
+    });
+    addOwnCity(both, 'c1_bbbbbb', 'Antium', (own) => hold(own, 'noRoom'));
+    for (const unit of both.units) if (unit.own !== null) unit.own.movesLeft = 0;
+    expect(todoHints(both)).toEqual(['2 cities have nothing to build', '2 cities are waiting to finish a unit']);
   });
 
   it('waitingForText names who has not ended the turn yet, "you" first', () => {
@@ -234,6 +406,64 @@ describe('unit hint and first steps', () => {
   it('has nothing to say about somebody else\'s unit', () => {
     const view = sampleView();
     expect(unitHintText(view, unitOf(view, SAMPLE.foreignWarriorId), true)).toBe('');
+    expect(unitHintParts(view, unitOf(view, SAMPLE.foreignWarriorId), true)).toEqual({ main: '', more: '' });
+  });
+
+  it('unitHintParts: "At work here ..." for a unit with a job, after "No connection" and "You have ended your turn"; the second sentence apart; unitHintText is the two joined', () => {
+    const view = sampleView();
+    const worker = unitIn(view, SAMPLE.workerId);
+    expect(unitHintParts(view, worker, true)).toEqual({ main: 'At work here. Stop the work to move this unit.', more: '' });
+    expect(unitHintText(view, worker, true)).toBe('At work here. Stop the work to move this unit.');
+
+    // The lasting reasons come first: with them, "Stop work" cannot be pressed either.
+    expect(unitHintParts(view, worker, false).main).toBe('No connection: orders have to wait.');
+    const ended = viewWithEnded('p1');
+    expect(unitHintParts(ended, unitIn(ended, SAMPLE.workerId), true).main).toBe('You have ended your turn. Cancel that to give orders.');
+    expect(unitHintParts(ended, unitIn(ended, SAMPLE.workerId), false).main).toBe('No connection: orders have to wait.');
+
+    // A unit at work that has no moves left is still "at work": that is what keeps it here.
+    const tired = viewWith((changed) => {
+      ownOf(changed, SAMPLE.workerId).movesLeft = 0;
+    });
+    expect(unitHintParts(tired, unitIn(tired, SAMPLE.workerId), true).main).toBe('At work here. Stop the work to move this unit.');
+    // Without a job it is a unit like any other.
+    const idle = viewWith((changed) => {
+      ownOf(changed, SAMPLE.workerId).job = null;
+    });
+    expect(unitHintParts(idle, unitIn(idle, SAMPLE.workerId), true).main).toBe('Choose a highlighted tile to move there.');
+    ownOf(idle, SAMPLE.workerId).movesLeft = 0;
+    expect(unitHintParts(idle, unitIn(idle, SAMPLE.workerId), true).main).toBe('No moves left this turn.');
+
+    // The second sentence, apart: the Warrior shares the Worker's tile.
+    const stacked = viewWith((changed) => {
+      unitIn(changed, SAMPLE.warriorId).tile = SAMPLE.workerTile;
+    });
+    expect(unitHintParts(stacked, unitIn(stacked, SAMPLE.workerId), true)).toEqual({
+      main: 'At work here. Stop the work to move this unit.',
+      more: 'Tap the same tile again to select the Warrior.',
+    });
+    expect(unitHintParts(stacked, unitIn(stacked, SAMPLE.warriorId), true)).toEqual({
+      main: 'Choose a highlighted tile to move there.',
+      more: 'Tap the same tile again to select the Worker.',
+    });
+    expect(unitHintText(stacked, unitIn(stacked, SAMPLE.workerId), true)).toBe(
+      'At work here. Stop the work to move this unit. Tap the same tile again to select the Warrior.',
+    );
+    // The second sentence is there whatever the first one says.
+    expect(unitHintParts(stacked, unitIn(stacked, SAMPLE.workerId), false)).toEqual({
+      main: 'No connection: orders have to wait.',
+      more: 'Tap the same tile again to select the Warrior.',
+    });
+
+    // For every own unit of the sample view, in every state: the one string is the two parts joined.
+    for (const candidate of [view, stacked, tired, idle, ended]) {
+      for (const unit of candidate.units) {
+        for (const online of [true, false]) {
+          const { main, more } = unitHintParts(candidate, unit, online);
+          expect(unitHintText(candidate, unit, online)).toBe(more === '' ? main : `${main} ${more}`);
+        }
+      }
+    }
   });
 
   it('when two own units share a tile, says how to get at the other one (as at the start of every game)', () => {
@@ -284,6 +514,72 @@ describe('unit hint and first steps', () => {
       view.units = [{ id: 'u2_zzzzzz', type: 'settler', owner: 'p2', tile: SAMPLE.emptyTile, own: null }];
     });
     expect(firstStepsText(foreignSettler)).toBeNull();
+  });
+});
+
+describe('job texts (the unit panel of a Worker)', () => {
+  it('jobButtonText ("Build Farm (4 turns)", "Build Farm (1 turn)") and jobProgressText (one turn / several turns)', () => {
+    expect(jobButtonText(option('farm', null))).toBe('Build Farm (4 turns)');
+    expect(jobButtonText(option('mine', null))).toBe('Build Mine (5 turns)');
+    expect(jobButtonText(option('farm', null, 1))).toBe('Build Farm (1 turn)');
+    // The button says the same whether it can be pressed or not; the reason is a line of its own.
+    expect(jobButtonText(option('farm', 'notYourLand'))).toBe('Build Farm (4 turns)');
+    // The sample Worker's options, as its panel would print them.
+    expect(ownOf(sampleView(), SAMPLE.workerId).jobOptions.map(jobButtonText)).toEqual(['Build Farm (4 turns)', 'Build Mine (5 turns)']);
+
+    const job: UnitJobView = { improvement: 'farm', turnsWorked: 1, turnsTotal: 4, turnsLeft: 3 };
+    expect(jobProgressText(job)).toBe('Building a Farm: 3 turns left');
+    expect(jobProgressText({ improvement: 'mine', turnsWorked: 4, turnsTotal: 5, turnsLeft: 1 })).toBe('Building a Mine: 1 turn left');
+    expect(jobProgressText({ improvement: 'farm', turnsWorked: 0, turnsTotal: 4, turnsLeft: 4 })).toBe('Building a Farm: 4 turns left');
+  });
+
+  it('jobReasonText: null without an error; the table\'s "needs" phrase for badImprovementTile; the improvement\'s name for alreadyImproved; the standard sentence for every other code', () => {
+    expect(jobReasonText(option('farm', null))).toBeNull();
+    expect(jobReasonText(option('mine', null))).toBeNull();
+
+    expect(jobReasonText(option('farm', 'badImprovementTile'))).toBe('A Farm needs open grassland, plains or desert.');
+    expect(jobReasonText(option('mine', 'badImprovementTile'))).toBe('A Mine needs hills.');
+    expect(jobReasonText(option('farm', 'alreadyImproved'))).toBe('This tile already has a Farm.');
+    expect(jobReasonText(option('mine', 'alreadyImproved'))).toBe('This tile already has a Mine.');
+    for (const id of IMPROVEMENT_IDS) {
+      expect(jobReasonText(option(id, 'badImprovementTile'))).toBe(`A ${IMPROVEMENTS[id].name} needs ${IMPROVEMENTS[id].needs}.`);
+    }
+
+    expect(jobReasonText(option('farm', 'notYourLand'))).toBe('That can only be built on your own land.');
+    expect(jobReasonText(option('mine', 'cityOnTile'))).toBe('Nothing can be built on the tile of a city.');
+    expect(jobReasonText(option('farm', 'unitBusy'))).toBe('This unit is at work. Stop the work first.');
+    const others: RuleErrorCode[] = ['notYourLand', 'cityOnTile', 'unitBusy', 'cannotImprove', 'noSuchUnit', 'badAction'];
+    for (const code of others) {
+      for (const id of IMPROVEMENT_IDS) expect(jobReasonText(option(id, code)), code).toBe(RULE_ERROR_MESSAGES[code]);
+    }
+  });
+
+  it('jobsReasonText: the one sentence when every option has the same reason; null when the reasons differ, when one option is possible and for an empty list', () => {
+    // Outside the borders, and on the tile of a city: one line for the whole block.
+    expect(jobsReasonText([option('farm', 'notYourLand'), option('mine', 'notYourLand')])).toBe('That can only be built on your own land.');
+    expect(jobsReasonText([option('farm', 'cityOnTile'), option('mine', 'cityOnTile')])).toBe('Nothing can be built on the tile of a city.');
+    expect(jobsReasonText([option('farm', 'notYourLand')])).toBe('That can only be built on your own land.');
+
+    // On forest both are impossible, each for its own reason: the same code, two sentences.
+    expect(jobsReasonText([option('farm', 'badImprovementTile'), option('mine', 'badImprovementTile')])).toBeNull();
+    // On a finished farm: one already stands, the other does not fit.
+    expect(jobsReasonText([option('farm', 'alreadyImproved'), option('mine', 'badImprovementTile')])).toBeNull();
+    expect(jobsReasonText([option('farm', 'notYourLand'), option('mine', 'cityOnTile')])).toBeNull();
+
+    // One of them can be started: each button speaks for itself.
+    expect(jobsReasonText([option('farm', null), option('mine', 'badImprovementTile')])).toBeNull();
+    expect(jobsReasonText([option('farm', 'badImprovementTile'), option('mine', null)])).toBeNull();
+    expect(jobsReasonText([option('farm', null), option('mine', null)])).toBeNull();
+
+    // A unit that builds nothing has no block and no sentence.
+    expect(jobsReasonText([])).toBeNull();
+    expect(jobsReasonText(ownOf(sampleView(), SAMPLE.warriorId).jobOptions)).toBeNull();
+  });
+
+  it('what a job adds is said in the words of the tile information ("+1 food")', () => {
+    expect(improvementBonusText('farm')).toBe('+1 food');
+    expect(improvementBonusText('mine')).toBe('+1 production');
+    expect(improvementBonusText).toBe(bonusTextOfTileInfo);
   });
 });
 

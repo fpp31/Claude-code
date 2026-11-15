@@ -1,6 +1,8 @@
 /**
  * Marker sprites (work package WP5): what the renderer draws on top of the
- * map for the selection and the highlights of the overlay (render/api.ts).
+ * map for the selection and the highlights of the overlay (render/api.ts),
+ * and the two small signs it draws from the view alone: "at work" beside a
+ * unit and "builds nothing" over a city (render/frame.ts).
  * None of them is in the reference picture; they follow its rules (hard
  * pixels, dark outline, a shadow under raised things).
  *
@@ -14,10 +16,10 @@ import type { SpriteSource } from '../format';
 import { PALETTE } from '../palette';
 import { hexRows } from './hexShape';
 
-export type MarkerId = 'selection' | 'reachable' | 'hover' | 'worked' | 'pathStep' | 'pathEnd';
+export type MarkerId = 'selection' | 'reachable' | 'hover' | 'worked' | 'pathStep' | 'pathEnd' | 'working' | 'idle';
 
 /** All marker ids (for loops and tests). */
-export const MARKER_IDS: readonly MarkerId[] = ['selection', 'reachable', 'hover', 'worked', 'pathStep', 'pathEnd'];
+export const MARKER_IDS: readonly MarkerId[] = ['selection', 'reachable', 'hover', 'worked', 'pathStep', 'pathEnd', 'working', 'idle'];
 
 /** The selected tile: a bold white ring with a dark line on both sides, so it shows on any ground. */
 const selection: SpriteSource = {
@@ -111,6 +113,61 @@ const pathEnd: SpriteSource = {
   ],
 };
 
+/**
+ * A unit that is at work: a small white SQUARE sign with a dark hammer, left
+ * of the figure. Square on purpose: the dots of the path preview are round
+ * and white, and at the smallest zoom the two must not be mistaken for each
+ * other.
+ */
+const working: SpriteSource = {
+  width: 7,
+  height: 7,
+  offsetX: 1,
+  offsetY: 7,
+  colors: { w: PALETTE.markerWhite },
+  rows: [
+    '#######',
+    '#wwwww#',
+    '#w###w#',
+    '#ww#ww#',
+    '#ww#ww#',
+    '#wwwww#',
+    '#######',
+  ],
+};
+
+/**
+ * An own city that builds nothing: a small gold sign with a dark
+ * exclamation mark at the upper left of the hall, left of the flag and
+ * right under the name banner. Gold is the colour of every warning on the
+ * page.
+ *
+ * Why the left: a unit alone in a city stands at the right of the hall
+ * (render/scene.ts), and a city's queue usually runs empty in the very turn
+ * that puts a new unit there. At the right the sign sat on that unit's head
+ * and looked like the unit's own. Why two rows taller than the "at work"
+ * sign: with gold above and below it the mark reads as "!"; in a 7 x 7
+ * sign it touched the frame and the gold beside it read as the letter H.
+ */
+const idle: SpriteSource = {
+  width: 7,
+  height: 9,
+  offsetX: 0,
+  offsetY: 2,
+  colors: { g: PALETTE.gold },
+  rows: [
+    '#######',
+    '#ggggg#',
+    '#gg#gg#',
+    '#gg#gg#',
+    '#gg#gg#',
+    '#ggggg#',
+    '#gg#gg#',
+    '#ggggg#',
+    '#######',
+  ],
+};
+
 export const MARKER_SPRITES: Record<MarkerId, SpriteSource> = {
   selection,
   reachable,
@@ -118,4 +175,6 @@ export const MARKER_SPRITES: Record<MarkerId, SpriteSource> = {
   worked,
   pathStep,
   pathEnd,
+  working,
+  idle,
 };

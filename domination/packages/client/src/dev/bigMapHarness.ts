@@ -5,11 +5,13 @@
  *
  * It shows a made-up game on the largest map size (syntheticView.ts) through
  * the real renderer, with the same simple input as the map test page (drag
- * to pan, wheel to zoom, click an own unit or city), and it measures how
- * long the renderer takes to draw a frame. The read-out in the corner shows
- * the last frame and the slowest of the last 120. Press P for a pan test:
- * the map is dragged about for a few seconds by itself and the read-out
- * then shows the average and the slowest frame and the frames per second.
+ * to pan, wheel to zoom, click an own unit or city: a city shows the tiles
+ * it works, a unit where it could go, a Worker at work nothing), and it
+ * measures how long the renderer takes to draw a frame. The read-out in the
+ * corner shows the last frame and the slowest of the last 120. Press P for
+ * a pan test: the map is dragged about for a few seconds by itself and the
+ * read-out then shows the average and the slowest frame and the frames per
+ * second.
  *
  * In the address:
  *   ?size=small|medium|large   map size (default large)
@@ -25,7 +27,7 @@
  * not include it.
  */
 
-import { MAP_SIZES, neighbors, tilesInRange } from '@domination/shared';
+import { MAP_SIZES, tilesInRange } from '@domination/shared';
 import type { MapSizeId, PlayerView, TileIndex } from '@domination/shared';
 import '../styles.css';
 import { EMPTY_OVERLAY } from '../render/api';
@@ -149,14 +151,15 @@ function select(tile: TileIndex): void {
   const unit = view.units.find((candidate) => candidate.tile === tile && candidate.owner === view.you);
   const city = view.cities.find((candidate) => candidate.tile === tile && candidate.owner === view.you);
   if (unit !== undefined) {
-    // Not the real movement rules: simply the explored land within two steps.
-    const reachable = tilesInRange(tile, 2, view).filter((near) => {
+    // Not the real movement rules: simply the explored land within two steps. A unit at work goes nowhere.
+    const atWork = unit.own !== null && unit.own.job !== null;
+    const reachable = atWork ? [] : tilesInRange(tile, 2, view).filter((near) => {
       const seen = view.tiles[near];
       return near !== tile && seen !== null && seen.terrain !== 'ocean' && seen.terrain !== 'coast' && seen.feature !== 'mountains';
     });
     setOverlay({ selectedTile: tile, selectedUnitId: unit.id, reachable, path: [], workedTiles: [] });
   } else if (city !== undefined) {
-    setOverlay({ selectedTile: tile, selectedUnitId: null, reachable: [], path: [], workedTiles: neighbors(tile, view).slice(0, 4) });
+    setOverlay({ selectedTile: tile, selectedUnitId: null, reachable: [], path: [], workedTiles: city.own?.worked ?? [] });
   } else {
     setOverlay({ selectedTile: null, selectedUnitId: null, reachable: [], path: [], workedTiles: [] });
   }

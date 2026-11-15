@@ -95,7 +95,7 @@ export function createGame(setup: GameSetup, generate: MapGenerator = generateMa
   players.forEach((player, seatIndex) => {
     for (const type of RULES.startingUnits) {
       const id = newUnitId(state, player.id);
-      state.units[id] = { id, type, owner: player.id, tile: starts[seatIndex], movesLeft: UNITS[type].moves };
+      state.units[id] = { id, type, owner: player.id, tile: starts[seatIndex], movesLeft: UNITS[type].moves, job: null };
     }
   });
 

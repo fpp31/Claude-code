@@ -2,13 +2,14 @@
  * Health check for a game state (work package WP2).
  */
 
+import { IMPROVEMENTS, improvementFits } from '../data/improvements';
 import { RULES } from '../data/rules';
 import { FEATURES, TERRAIN, tileMoveCost } from '../data/terrain';
 import { UNITS } from '../data/units';
 import { distance, isValidTile } from '../hex';
 import { playerIdForSeat } from '../ids';
 import { STATE_SCHEMA } from '../types';
-import type { GameState, PlayerId } from '../types';
+import type { City, GameState, PlayerId, Unit } from '../types';
 import { computeVisible } from '../view/visibility';
 
 /**
@@ -22,22 +23,37 @@ import { computeVisible } from '../view/visibility';
  * It checks at least:
  *  - schema is STATE_SCHEMA; turn is a whole number >= 1;
  *  - map.tiles.length is width * height; features only on allowed grounds;
+ *    a tile's `improvement` is null or a known improvement on ground that
+ *    suits it (improvementFits);
  *  - at least 1 and at most RULES.maxSeats players, whose ids are seat names
  *    ('p1'..'p8') in ascending seat order, each at most once;
  *  - every unit: key equals id, known type, owner is a player, tile is on the
  *    map and passable, movesLeft is a whole number from 0 to its type's moves;
+ *    `job` is there, and is null or a job for a known improvement with a
+ *    whole number of 0 or more turns worked, held by a unit whose type can
+ *    build improvements;
  *  - stacking: no tile holds two units of the same class, or units of two
  *    different players;
  *  - every city: key equals id, owner is a player, tile is on the map,
  *    population >= 1, foodStored >= 0, productionStored >= 0, the city
- *    tile's `cityId` is this city, no other player's unit on the city tile;
+ *    tile's `cityId` is this city and the tile carries no improvement, no
+ *    other player's unit on the city tile;
+ *  - every city's `buildQueue` is a list of at most RULES.maxQueueLength
+ *    entries, each an object with exactly the two fields `kind` ('unit') and
+ *    `unitType` (a key of UNITS); no city still carries the field
+ *    `production` of layout 1;
  *  - no two cities closer than RULES.minCityDistance;
  *  - every tile's `cityId` is null or the id of an existing city;
  *  - every player's knowledge.explored has one 0/1 entry per tile, and every
  *    tile currently visible to the player (computeVisible) is explored.
- * And a little more: terrain and feature ids are known ones, a city's
- * production item exists, and every remembered tile is an explored tile of
- * the map.
+ * And a little more: terrain and feature ids are known ones, and every
+ * remembered tile is an explored tile of the map whose remembered
+ * improvement is null or a known one.
+ *
+ * NOT checked, on purpose: that the first entry of a queue is affordable;
+ * that a job's tile is its owner's land (resolveTurn drops such a job, step
+ * runJobs); that `turnsWorked` is less than the table's `turns` (the table
+ * may be tuned under a running game).
  *
  * A state can be so damaged that a group of checks cannot even be carried
  * out. That is reported as one more sentence ("The state is too damaged to
@@ -110,6 +126,12 @@ function checkMap(state: GameState, problems: string[]): void {
       problems.push(`Tile ${index} has the unknown feature '${tile.feature}'.`);
     } else if (tile.feature !== null && !FEATURES[tile.feature].allowedOn.includes(tile.terrain)) {
       problems.push(`Tile ${index} has ${tile.feature} on ${tile.terrain}, which is not allowed.`);
+    } else if (tile.improvement === undefined) {
+      problems.push(`Tile ${index} has no field "improvement".`);
+    } else if (tile.improvement !== null && !hasKey(IMPROVEMENTS, tile.improvement)) {
+      problems.push(`Tile ${index} has the unknown improvement '${tile.improvement}'.`);
+    } else if (tile.improvement !== null && !improvementFits(tile.improvement, tile)) {
+      problems.push(`Tile ${index} has a ${tile.improvement} on ground that does not suit it.`);
     }
   });
 }
@@ -150,6 +172,33 @@ function checkUnits(state: GameState, problems: string[]): void {
     } else if (!isWholeNumber(unit.movesLeft) || unit.movesLeft < 0 || unit.movesLeft > UNITS[unit.type].moves) {
       problems.push(`Unit ${key} has ${unit.movesLeft} moves left, expected 0 to ${UNITS[unit.type].moves}.`);
     }
+
+    checkJob(key, unit, problems);
+  }
+}
+
+/** The unit's `job`: there, and null or a job this unit can have (see Unit.job in types.ts). */
+function checkJob(key: string, unit: Unit, problems: string[]): void {
+  // A state of an older layout, or a hand-edited one, can hold anything here.
+  const job: unknown = unit.job;
+  if (job === undefined) {
+    problems.push(`Unit ${key} has no field "job".`);
+    return;
+  }
+  if (job === null) return;
+  if (typeof job !== 'object' || Array.isArray(job)) {
+    problems.push(`Unit ${key} has a job that is not an object.`);
+    return;
+  }
+  const fields = job as Record<string, unknown>;
+  if (!hasKey(IMPROVEMENTS, fields.improvement)) {
+    problems.push(`Unit ${key} has a job for the unknown improvement '${String(fields.improvement)}'.`);
+  }
+  if (!isWholeNumber(fields.turnsWorked) || fields.turnsWorked < 0) {
+    problems.push(`Unit ${key} has worked ${String(fields.turnsWorked)} turns on its job, expected a whole number of 0 or more.`);
+  }
+  if (hasKey(UNITS, unit.type) && !UNITS[unit.type].canImprove) {
+    problems.push(`Unit ${key} has a job, but a unit of the type '${unit.type}' cannot build improvements.`);
   }
 }
 
@@ -183,21 +232,56 @@ function checkCities(state: GameState, problems: string[]): void {
     if (!isWholeNumber(city.productionStored) || city.productionStored < 0) {
       problems.push(`City ${key} has ${city.productionStored} production stored, expected 0 or more.`);
     }
-    if (city.production !== null && (city.production.kind !== 'unit' || !hasKey(UNITS, city.production.unitType))) {
-      problems.push(`City ${key} is building something that does not exist.`);
-    }
+    checkBuildQueue(key, city, problems);
 
     if (!isValidTile(city.tile, state.map)) {
       problems.push(`City ${key} stands on ${city.tile}, which is not a tile of the map.`);
       continue;
     }
-    if (state.map.tiles[city.tile].cityId !== key) problems.push(`The tile under city ${key} does not belong to it.`);
+    const centre = state.map.tiles[city.tile];
+    if (centre.cityId !== key) problems.push(`The tile under city ${key} does not belong to it.`);
+    if (centre.improvement !== null && centre.improvement !== undefined) {
+      problems.push(`The tile under city ${key} carries an improvement.`);
+    }
     for (const unit of Object.values(state.units)) {
       if (unit.tile === city.tile && unit.owner !== city.owner) {
         problems.push(`Unit ${unit.id} of ${unit.owner} stands in city ${key} of ${city.owner}.`);
       }
     }
   }
+}
+
+/**
+ * The city's build queue (see City.buildQueue in types.ts). Entries are
+ * counted from 1 in the sentences, as the city panel numbers its rows.
+ */
+function checkBuildQueue(key: string, city: City, problems: string[]): void {
+  // A state of an older layout, or a hand-edited one, can hold anything here.
+  const queue: unknown = city.buildQueue;
+  if (!Array.isArray(queue)) {
+    problems.push(`City ${key} has a build queue that is not a list.`);
+  } else {
+    if (queue.length > RULES.maxQueueLength) {
+      problems.push(`City ${key} has ${queue.length} entries in its build queue, expected at most ${RULES.maxQueueLength}.`);
+    }
+    queue.forEach((entry: unknown, index) => {
+      if (!isBuildItem(entry)) {
+        problems.push(`City ${key} has something in its build queue that does not exist (entry ${index + 1}).`);
+      } else if (Object.keys(entry).length !== 2) {
+        problems.push(`City ${key} has extra fields on entry ${index + 1} of its build queue.`);
+      }
+    });
+  }
+  if (Object.hasOwn(city, 'production')) {
+    problems.push(`City ${key} still has the field "production" of an older layout.`);
+  }
+}
+
+/** Is this something a city can build: an object whose `kind` is 'unit' and whose `unitType` is a real key of UNITS? */
+function isBuildItem(entry: unknown): entry is object {
+  if (typeof entry !== 'object' || entry === null) return false;
+  const fields = entry as Record<string, unknown>;
+  return fields.kind === 'unit' && hasKey(UNITS, fields.unitType);
 }
 
 function checkCityDistances(state: GameState, problems: string[]): void {
@@ -239,10 +323,15 @@ function checkKnowledge(state: GameState, problems: string[]): void {
       problems.push(`Player ${player.id} can see ${unexplored} tiles that are not marked as explored.`);
     }
     // A memory of a tile the player has never seen would be a contradiction.
-    for (const key of Object.keys(player.knowledge.remembered)) {
+    for (const [key, remembered] of Object.entries(player.knowledge.remembered)) {
       const tile = Number(key);
       if (!isValidTile(tile, state.map) || explored[tile] !== 1) {
         problems.push(`Player ${player.id} remembers tile '${key}' without having explored it.`);
+      }
+      if (remembered.improvement === undefined) {
+        problems.push(`Player ${player.id} remembers tile '${key}' without the field "improvement".`);
+      } else if (remembered.improvement !== null && !hasKey(IMPROVEMENTS, remembered.improvement)) {
+        problems.push(`Player ${player.id} remembers the unknown improvement '${remembered.improvement}' on tile '${key}'.`);
       }
     }
   }

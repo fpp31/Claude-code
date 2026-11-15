@@ -2,7 +2,17 @@ import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PROTOCOL_VERSION, WS_PATH } from '@domination/shared';
+import {
+  IMPROVEMENTS,
+  PROTOCOL_VERSION,
+  STATE_SCHEMA,
+  WS_PATH,
+  applyAction,
+  buildPlayerView,
+  migrateGameState,
+  playerIdForSeat,
+} from '@domination/shared';
+import type { GameEvent, ServerMessage } from '@domination/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import { projectRoot } from '../src/config';
 import { ROOM_FILE_FORMAT } from '../src/roomFile';
@@ -10,6 +20,15 @@ import { hashToken } from '../src/tokens';
 import { createFakeRules, fakeUnitId } from './fakeRules';
 import { TestClient, cleanUp, gameWith, lobbyWith, startTestServer, temporaryClientFolder, temporaryFolder } from './harness';
 import type { TestServer } from './harness';
+import {
+  PHASE_ONE_CODE,
+  PHASE_ONE_TOKENS,
+  phaseOneCities,
+  phaseOneSave,
+  phaseOneSaveText,
+  putPhaseOneSave,
+} from './phaseOneSave';
+import { endTurn, ownCity, ownUnit, queueItems, queueOf, raiseWorker, realRulesOnMeadow, setQueue, turnOf } from './realWorld';
 
 /**
  * The saved file is the truth: a server that stops, or is killed, and starts
@@ -378,5 +397,234 @@ describe('persistence and restart (WP3)', () => {
       const fourth = await firstView(random);
       expect(fourth.tiles).not.toEqual(third.tiles);
     });
+  });
+});
+
+/**
+ * What this round added to a game state must survive what every game state
+ * survives: a restart. And a game that the version before it saved must
+ * simply go on.
+ */
+describe('persistence and restart: older saves, queues and jobs (WP3, real rules)', () => {
+  /** Every event a socket has been sent so far, in order. */
+  function eventsSentTo(client: TestClient): GameEvent[] {
+    return client.frames
+      .map((frame) => JSON.parse(frame) as ServerMessage)
+      .flatMap((message) => (message.type === 'gameUpdate' || message.type === 'gameSync' ? message.events : []));
+  }
+
+  it('a game saved by phase 1 loads and continues', async () => {
+    const dataDir = temporaryFolder();
+    const path = putPhaseOneSave(dataDir);
+    const text = phaseOneSaveText();
+    const old = phaseOneSave();
+    const seats = PHASE_ONE_TOKENS.map((_, index) => playerIdForSeat(index + 1));
+
+    // The server starts on the folder: one game, brought up to date, and healthy.
+    const first = await startTestServer({ dataDir, noRateLimit: true });
+    expect(first.logs).toContain('Saved games loaded: 1.');
+    expect(first.logs.filter((line) => line.includes('WARNING'))).toEqual([]);
+    const aboutTheSave = first.logs.filter((line) => line.includes(`${PHASE_ONE_CODE}.json`));
+    expect(aboutTheSave).toHaveLength(1);
+    expect(aboutTheSave[0]).toContain(`layout ${old.game.schema}`);
+    expect(aboutTheSave[0]).toContain(`layout ${STATE_SCHEMA}`);
+    // Loading did not write: the file is still the one phase 1 wrote.
+    expect(readFileSync(path, 'utf8')).toBe(text);
+
+    // What the rules make of the converted game, to compare the views with.
+    const converted = migrateGameState(old.game);
+    if (converted === null) throw new Error('the phase 1 save was not converted');
+
+    // The four players come back with the tokens they had.
+    const players: TestClient[] = [];
+    for (const [index, token] of PHASE_ONE_TOKENS.entries()) {
+      const me = seats[index];
+      const client = await first.connect(token);
+      client.send({ type: 'joinGame', code: PHASE_ONE_CODE, name: null });
+      const { view } = await client.nextOfType('gameSync');
+      players.push(client);
+
+      // The turn the game was saved in, in the middle of it.
+      expect(view.you).toBe(me);
+      expect(view.turn).toBe(29);
+      expect(view.players.map((player) => player.endedTurn)).toEqual([true, false, true, false]);
+      expect(view).toEqual(buildPlayerView(converted, me));
+
+      // Every own city shows the queue [what it was building], with the production it had stored.
+      const ownCities = phaseOneCities().filter((city) => city.owner === me);
+      expect(ownCities.length, me).toBeGreaterThan(0);
+      for (const before of ownCities) {
+        const city = view.cities.find((candidate) => candidate.id === before.id);
+        expect(city?.own?.buildQueue.map((row) => row.item), before.name).toEqual(
+          before.production === null ? [] : [before.production],
+        );
+        expect(city?.own?.productionStored, before.name).toBe(before.productionStored);
+      }
+      // Every tile they know has nothing built on it, and none of their units has a job.
+      const known = view.tiles.filter((tile) => tile !== null);
+      expect(known.length, me).toBeGreaterThan(0);
+      for (const tile of known) expect(tile).toHaveProperty('improvement', null);
+      const ownUnits = view.units.filter((unit) => unit.own !== null);
+      expect(ownUnits.length, me).toBeGreaterThan(0);
+      for (const unit of ownUnits) expect(unit.own?.job).toBeNull();
+    }
+    for (const player of players) await player.drain();
+    // Coming back is not a change: still nothing was written.
+    expect(readFileSync(path, 'utf8')).toBe(text);
+
+    // The two who had not ended the turn do, and the turn resolves.
+    const [ada, ben, , dan] = players;
+    await ben.actOk(29, { type: 'endTurn' });
+    await dan.actOk(29, { type: 'endTurn' });
+    for (const player of players) await player.drain();
+    for (const player of players) {
+      expect(player.view?.turn).toBe(30);
+      expect(player.view?.players.map((seat) => seat.endedTurn)).toEqual([false, false, false, false]);
+    }
+
+    // The file on disk now has the new layout; nothing is left of the old one, and no copy of it.
+    const written = readFileSync(path, 'utf8');
+    expect(written).toContain(`"schema":${STATE_SCHEMA}`);
+    expect(written).not.toMatch(new RegExp(`"schema":${old.game.schema}\\b`));
+    expect(written).toContain('"buildQueue":');
+    expect(written).not.toContain('"production":');
+    expect(readdirSync(join(dataDir, 'rooms'))).toEqual([`${PHASE_ONE_CODE}.json`]);
+
+    // The game is exactly what the rules make of the converted game when p2 and p4 end the turn.
+    let expected = converted;
+    for (const seat of ['p2', 'p4']) {
+      const result = applyAction(expected, seat, 29, { type: 'endTurn' });
+      if (!result.ok) throw new Error(`the rules refused End Turn for ${seat}: ${result.error.code}`);
+      expected = result.state;
+    }
+    expect(first.save(PHASE_ONE_CODE).game).toEqual(expected);
+    for (const [index, player] of players.entries()) expect(player.view).toEqual(buildPlayerView(expected, seats[index]));
+
+    // In turn 30 Ada adds a Worker to the end of Rome's queue.
+    const rome = ownCity(ada.view);
+    expect(rome.name).toBe('Rome');
+    const romesQueue = [...queueItems(rome), ...queueOf('worker')];
+    await ada.actOk(30, setQueue(rome.id, romesQueue));
+    expect(queueItems(ownCity(ada.view))).toEqual(romesQueue);
+    for (const other of players.slice(1)) await other.expectNothingPending();
+
+    // After another restart all four views are deep-equal to what they were.
+    const viewsBefore = players.map((player) => player.view);
+    const fileBefore = readFileSync(path, 'utf8');
+    await first.close();
+    const second = await startTestServer({ dataDir, noRateLimit: true });
+    expect(second.logs).toContain('Saved games loaded: 1.');
+    // An ordinary save of today now: nothing to convert, nothing to warn about.
+    expect(second.logs.filter((line) => line.includes('WARNING') || line.includes(`${PHASE_ONE_CODE}.json`))).toEqual([]);
+    expect(readFileSync(path, 'utf8')).toBe(fileBefore);
+    const back: TestClient[] = [];
+    for (const [index, token] of PHASE_ONE_TOKENS.entries()) {
+      const client = await second.connect(token);
+      client.send({ type: 'joinGame', code: PHASE_ONE_CODE, name: null });
+      expect((await client.nextOfType('gameSync')).view).toEqual(viewsBefore[index]);
+      back.push(client);
+    }
+    for (const player of back) await player.drain();
+
+    // And the game goes on, twelve more turns. A city completes what phase 1
+    // had it building ONCE, and then builds nothing (phase 1 would have
+    // built the same unit over and over); Rome goes on to its Worker.
+    const queues = new Map(phaseOneCities().map((city) => [city.id, city.production === null ? [] : [city.production.unitType]]));
+    queues.set(rome.id, romesQueue.map((item) => item.unitType));
+    for (let round = 0; round < 12; round++) await endTurn(back);
+    expect(turnOf(back[0])).toBe(42);
+    for (const [index, player] of players.entries()) {
+      // Everything this seat was told since the game was loaded, over both servers.
+      const built = [...eventsSentTo(player), ...eventsSentTo(back[index])].flatMap((event) => (event.type === 'unitBuilt' ? [event] : []));
+      for (const city of back[index].view?.cities.filter((candidate) => candidate.own !== null) ?? []) {
+        const queue = queues.get(city.id) ?? [];
+        const done = built.filter((event) => event.cityId === city.id);
+        // What the city completed is the front of its queue, in order, each entry once...
+        expect(done.map((event) => event.unitType), city.name).toEqual(queue.slice(0, done.length));
+        // ...what it still has to build is the rest, and its owner was told when the last entry left.
+        expect(city.own?.buildQueue.map((row) => row.item.unitType), city.name).toEqual(queue.slice(done.length));
+        expect(done.map((event) => event.queueEmpty), city.name).toEqual(done.map((_, position) => position === queue.length - 1));
+      }
+    }
+  });
+
+  it('a job in progress and a finished farm survive a server restart', async () => {
+    const dataDir = temporaryFolder();
+    const rules = realRulesOnMeadow([[3, 5], [20, 5]]);
+    const first = await startTestServer({ dataDir, rules, noRateLimit: true });
+    const { code, clients } = await gameWith(first, ['Ada', 'Ben']);
+    const [ada, ben] = clients;
+
+    // Ada's Worker builds a farm east of Rome, from start to finish...
+    const worker = await raiseWorker(ada, clients);
+    const farm = worker.tile + 1;
+    await ada.actOk(turnOf(ada), { type: 'moveUnit', unitId: worker.id, path: [farm] });
+    await ada.actOk(turnOf(ada), { type: 'startJob', unitId: worker.id, improvement: 'farm' });
+    for (let turn = 0; turn < IMPROVEMENTS.farm.turns; turn++) await endTurn(clients);
+    expect(ada.view?.tiles[farm]?.improvement).toBe('farm');
+
+    // ...walks one tile on, starts a second one and works on it for two turns.
+    const site = farm + 1;
+    await ada.actOk(turnOf(ada), { type: 'moveUnit', unitId: worker.id, path: [site] });
+    await ada.actOk(turnOf(ada), { type: 'startJob', unitId: worker.id, improvement: 'farm' });
+    await endTurn(clients);
+    await endTurn(clients);
+    const halfDone = {
+      improvement: 'farm',
+      turnsWorked: 2,
+      turnsTotal: IMPROVEMENTS.farm.turns,
+      turnsLeft: IMPROVEMENTS.farm.turns - 2,
+    };
+    expect(ownUnit(ada.view, 'worker').own?.job).toEqual(halfDone);
+    expect(IMPROVEMENTS.farm.turns).toBeGreaterThan(2);
+
+    const viewsBefore = clients.map((client) => client.view);
+    const fileBefore = first.saveText(code);
+    // It is all in the file: the farm on its tile, the job on its unit, with the turns worked.
+    expect(first.save(code).game?.map.tiles[farm].improvement).toBe('farm');
+    expect(first.save(code).game?.map.tiles[site].improvement).toBeNull();
+    expect(first.save(code).game?.units[worker.id].job).toEqual({ improvement: 'farm', turnsWorked: 2 });
+    await first.close();
+
+    const second = await startTestServer({ dataDir, rules, noRateLimit: true });
+    expect(second.logs).toContain('Saved games loaded: 1.');
+    expect(second.logs.filter((line) => line.includes('WARNING'))).toEqual([]);
+    expect(second.saveText(code)).toBe(fileBefore);
+
+    // Both players see exactly what they saw: Ada her farm and her Worker at work, Ben nothing of either.
+    const back: TestClient[] = [];
+    for (const [index, old] of clients.entries()) {
+      const client = await second.connect(old.token);
+      client.send({ type: 'joinGame', code, name: null });
+      expect((await client.nextOfType('gameSync')).view).toEqual(viewsBefore[index]);
+      back.push(client);
+    }
+    for (const client of back) await client.drain();
+    const [adaBack, benBack] = back;
+    expect(adaBack.view?.tiles[farm]?.improvement).toBe('farm');
+    expect(ownUnit(adaBack.view, 'worker').own?.job).toEqual(halfDone);
+    expect(benBack.view?.tiles[farm]).toBeNull();
+
+    // The Worker is still held by its job...
+    expect(await adaBack.actRejected(turnOf(adaBack), { type: 'moveUnit', unitId: worker.id, path: [site + 1] })).toBe('unitBusy');
+
+    // ...and the job goes on where it was: the turns worked before the
+    // restart count. One more turn and it is not done; the turn after, it is.
+    await endTurn(back);
+    expect(ownUnit(adaBack.view, 'worker').own?.job).toEqual({ ...halfDone, turnsWorked: 3, turnsLeft: IMPROVEMENTS.farm.turns - 3 });
+    expect(adaBack.view?.tiles[site]?.improvement).toBeNull();
+    for (let turn = 3; turn < IMPROVEMENTS.farm.turns; turn++) await endTurn(back);
+    expect(adaBack.view?.tiles[site]?.improvement).toBe('farm');
+    expect(ownUnit(adaBack.view, 'worker').own?.job).toBeNull();
+    const news = eventsSentTo(adaBack).filter((event) => event.type === 'improvementBuilt');
+    expect(news).toEqual([
+      { type: 'improvementBuilt', playerId: 'p1', unitId: worker.id, improvement: 'farm', tile: site, cityName: 'Rome' },
+    ]);
+    expect(eventsSentTo(benBack).every((event) => event.type === 'turnStarted')).toBe(true);
+    // Both farms are in the file.
+    expect(second.save(code).game?.map.tiles.flatMap((tile, index) => (tile.improvement === null ? [] : [[index, tile.improvement]]))).toEqual([
+      [farm, 'farm'],
+      [site, 'farm'],
+    ]);
   });
 });

@@ -1,15 +1,20 @@
-import { RULE_ERROR_MESSAGES, SERVER_ERROR_MESSAGE } from '@domination/shared';
+import { IMPROVEMENTS, RULES, RULE_ERROR_MESSAGES, SERVER_ERROR_MESSAGE } from '@domination/shared';
 import type { ServerMessage } from '@domination/shared';
 import { afterEach, describe, expect, it } from 'vitest';
+import { MAX_BAD_MESSAGES } from '../src/config';
 import { CANARY, createFakeRules, fakeUnitId } from './fakeRules';
 import { cleanUp, failingStorage, gameWith, lobbyWith, newDiskControl, startTestServer } from './harness';
-import type { TestClient } from './harness';
+import type { TestClient, TestServer } from './harness';
+import { endTurn, ownCity, ownUnit, queueItems, queueOf, raiseWorker, realRulesOnMeadow, setQueue, turnOf } from './realWorld';
 
 /**
  * Actions in a running game: who may act, what the actor and the others are
  * told, and what happens when something goes wrong on the way. Socket level,
  * with the fake rules: in the fake game a move changes only the mover's own
  * view, and ending the turn changes everybody's.
+ *
+ * The second group, at the end of the file, plays build queues and a
+ * Worker's job with the real rules.
  */
 
 afterEach(cleanUp);
@@ -157,7 +162,9 @@ describe('authorisation and actions (WP3)', () => {
     expect(await ada.actRejected(1, moveOwnUnit('p2', 5))).toBe('noSuchUnit');
     expect(await ada.actRejected(1, { type: 'moveUnit', unitId: fakeUnitId('p1'), path: [] })).toBe('badPath');
     expect(await ada.actRejected(1, { type: 'foundCity', unitId: fakeUnitId('p1') })).toBe('cannotFoundCity');
-    expect(await ada.actRejected(1, { type: 'setProduction', cityId: 'c1_nope', item: { kind: 'unit', unitType: 'scout' } })).toBe('noSuchCity');
+    expect(await ada.actRejected(1, { type: 'setBuildQueue', cityId: 'c1_nope', queue: [{ kind: 'unit', unitType: 'scout' }] })).toBe('noSuchCity');
+    expect(await ada.actRejected(1, { type: 'startJob', unitId: fakeUnitId('p1'), improvement: 'farm' })).toBe('cannotImprove');
+    expect(await ada.actRejected(1, { type: 'stopJob', unitId: fakeUnitId('p1') })).toBe('noSuchUnit');
 
     expect(server.saveText(code)).toBe(before);
     expect(disk.saves).toBe(savesBefore);
@@ -459,5 +466,224 @@ describe('authorisation and actions (WP3)', () => {
 
     // Not one patch was sent.
     for (const client of clients) expect(neverSaw(client, 'gameUpdate')).toBe(true);
+  });
+});
+
+/**
+ * Build queues and jobs, with the real rules: Ada (p1) and Ben (p2) at the
+ * two ends of the long meadow, out of each other's sight.
+ */
+describe('build queues and jobs through the server (WP3, real rules)', () => {
+  function meadowServer(): Promise<TestServer> {
+    // Whole turns are played in a moment, far faster than the rate limit allows a person to click.
+    return startTestServer({ rules: realRulesOnMeadow([[3, 5], [20, 5]]), noRateLimit: true });
+  }
+
+  /** A second tab of the same player: another socket with the same token, attached to the same seat. */
+  async function secondTab(server: TestServer, code: string, first: TestClient): Promise<TestClient> {
+    const tab = await server.connect(first.token);
+    tab.send({ type: 'joinGame', code, name: null });
+    await tab.nextOfType('gameSync');
+    expect(tab.view).toEqual(first.view);
+    return tab;
+  }
+
+  /** True if this socket carried nothing but the pongs that prove it, from frame `from` on. */
+  function onlyPongsSince(client: TestClient, from: number): boolean {
+    return client.frames.slice(from).every((frame) => frame === '{"type":"pong"}');
+  }
+
+  it('two tabs of one player change the same queue: the list sent last wins, both tabs are sent the result, the other player is sent nothing', async () => {
+    const server = await meadowServer();
+    const { code, clients } = await gameWith(server, ['Ada', 'Ben']);
+    const [ada, ben] = clients;
+    await ada.actOk(1, { type: 'foundCity', unitId: ownUnit(ada.view, 'settler').id });
+    const rome = ownCity(ada.view).id;
+    const adaTab = await secondTab(server, code, ada);
+    await ben.expectNothingPending();
+    const benFrames = ben.frames.length;
+
+    // The first tab queues a Warrior and a Scout. Both tabs are sent the new city, and no news.
+    const first = queueOf('warrior', 'scout');
+    expect((await ada.actOk(1, setQueue(rome, first))).map((message) => message.type)).toEqual(['gameUpdate']);
+    const told = await adaTab.nextOfType('gameUpdate');
+    expect(Object.keys(told.patch)).toEqual(['cities']);
+    expect(told.events).toEqual([]);
+    expect(queueItems(ownCity(adaTab.view))).toEqual(first);
+
+    // The second tab sends a list that keeps nothing of the first: the whole list is replaced, not merged.
+    const second = queueOf('settler', 'worker', 'worker');
+    expect((await adaTab.actOk(1, setQueue(rome, second))).map((message) => message.type)).toEqual(['gameUpdate']);
+    await ada.nextOfType('gameUpdate');
+    expect(queueItems(ownCity(ada.view))).toEqual(second);
+    expect(ada.view).toEqual(adaTab.view);
+    expect(server.save(code).game?.cities[rome].buildQueue).toEqual(second);
+
+    // The same list once more, from the other tab: accepted, and nothing to save or send.
+    const saved = server.saveText(code);
+    expect(await ada.actOk(1, setQueue(rome, second))).toEqual([]);
+    await adaTab.expectNothingPending();
+    expect(server.saveText(code)).toBe(saved);
+
+    // A real race, several times over: both tabs send before either reads.
+    // The server sees one of them last, and that list is the queue: whole,
+    // never a mixture of the two.
+    for (let round = 1; round <= 5; round++) {
+      const one = queueOf(...Array.from({ length: round }, () => 'warrior' as const));
+      const two = queueOf(...Array.from({ length: round }, () => 'scout' as const), 'worker');
+      const oneRequest = ada.sendAction(1, setQueue(rome, one));
+      const twoRequest = adaTab.sendAction(1, setQueue(rome, two));
+      expect((await ada.readReply(oneRequest)).reply.type).toBe('actionOk');
+      expect((await adaTab.readReply(twoRequest)).reply.type).toBe('actionOk');
+      await ada.drain();
+      await adaTab.drain();
+
+      const queue = server.save(code).game?.cities[rome].buildQueue;
+      expect([one, two]).toContainEqual(queue);
+      // Both tabs were shown exactly what was saved.
+      expect(queueItems(ownCity(ada.view))).toEqual(queue);
+      expect(adaTab.view).toEqual(ada.view);
+    }
+
+    // Ben, who cannot see Rome, was sent nothing in all that time.
+    await ben.expectNothingPending();
+    expect(onlyPongsSince(ben, benFrames)).toBe(true);
+  });
+
+  it('a queue that is too long for the rules is answered actionRejected queueFull with its request id, and the socket stays open', async () => {
+    const server = await meadowServer();
+    const { code, clients } = await gameWith(server, ['Ada', 'Ben']);
+    const [ada, ben] = clients;
+    await ada.actOk(1, { type: 'foundCity', unitId: ownUnit(ada.view, 'settler').id });
+    const rome = ownCity(ada.view).id;
+    await ada.actOk(1, setQueue(rome, queueOf('warrior')));
+    const before = server.saveText(code);
+    const viewBefore = ada.view;
+
+    // Nine entries: one more than the rules allow, far fewer than a message may carry.
+    const tooLong = queueOf(...Array.from({ length: RULES.maxQueueLength + 1 }, () => 'scout' as const));
+    expect(tooLong).toHaveLength(9);
+    // As often as it takes bad messages to close a socket.
+    for (let attempt = 1; attempt <= MAX_BAD_MESSAGES; attempt++) {
+      const requestId = ada.sendAction(1, setQueue(rome, tooLong));
+      const { reply, before: earlier } = await ada.readReply(requestId);
+      expect(reply).toStrictEqual({
+        type: 'actionRejected',
+        requestId,
+        error: { code: 'queueFull', message: RULE_ERROR_MESSAGES.queueFull },
+      });
+      expect(earlier).toEqual([]);
+    }
+
+    // Nothing was saved, nobody was told, and the queue is the one Warrior it was.
+    expect(server.saveText(code)).toBe(before);
+    await ben.expectNothingPending();
+    await ada.expectNothingPending();
+    expect(ada.view).toEqual(viewBefore);
+
+    // Those five were answers of the rules, not bad messages: the socket's
+    // count of bad messages is untouched. It still takes four real ones
+    // (a list too long even to be a message) without closing...
+    const notAMessage = JSON.stringify({
+      type: 'action',
+      requestId: 999,
+      turn: 1,
+      action: setQueue(rome, queueOf(...Array.from({ length: 65 }, () => 'scout' as const))),
+    });
+    for (let bad = 1; bad < MAX_BAD_MESSAGES; bad++) {
+      ada.sendRaw(notAMessage);
+      const error = await ada.nextOfType('error');
+      expect(error.code).toBe('badMessage');
+      // No request id: what was sent was not an action at all.
+      expect(error).not.toHaveProperty('requestId');
+    }
+    await ada.expectNothingPending();
+    expect(server.saveText(code)).toBe(before);
+
+    // ...the longest queue the rules allow goes through, and fills the queue...
+    const longest = queueOf(...Array.from({ length: RULES.maxQueueLength }, () => 'scout' as const));
+    await ada.actOk(1, setQueue(rome, longest));
+    expect(queueItems(ownCity(ada.view))).toEqual(longest);
+    expect(ownCity(ada.view).own.buildOptions.map((option) => option.addError)).toEqual(
+      ownCity(ada.view).own.buildOptions.map(() => 'queueFull'),
+    );
+
+    // ...and only the fifth bad message closes the socket.
+    ada.sendRaw(notAMessage);
+    await ada.expectError('badMessage');
+    expect(await ada.waitForClose()).toBe(1008);
+  });
+
+  it('a unit at work is not moved from a second tab: unitBusy, and nothing is saved or sent', async () => {
+    const server = await meadowServer();
+    const { code, clients } = await gameWith(server, ['Ada', 'Ben']);
+    const [ada, ben] = clients;
+
+    // Ada's Worker steps onto the meadow east of Rome, starts a farm and works on it for one turn.
+    const worker = await raiseWorker(ada, clients);
+    const field = worker.tile + 1;
+    await ada.actOk(turnOf(ada), { type: 'moveUnit', unitId: worker.id, path: [field] });
+    await ada.actOk(turnOf(ada), { type: 'startJob', unitId: worker.id, improvement: 'farm' });
+    await endTurn(clients);
+    const turn = turnOf(ada);
+    const atWork = {
+      improvement: 'farm',
+      turnsWorked: 1,
+      turnsTotal: IMPROVEMENTS.farm.turns,
+      turnsLeft: IMPROVEMENTS.farm.turns - 1,
+    };
+    expect(ownUnit(ada.view, 'worker').own?.job).toEqual(atWork);
+    // The Worker has its moves for the new turn: it is the job that holds it, nothing else.
+    expect(ownUnit(ada.view, 'worker').own?.movesLeft).toBeGreaterThan(0);
+
+    const adaTab = await secondTab(server, code, ada);
+    await ben.expectNothingPending();
+    const before = server.saveText(code);
+    const viewBefore = ada.view;
+
+    // Ben cannot give Ada's Worker orders, whatever id he names: the server
+    // asks the rules as Ben, and Ben has no such unit.
+    expect(await ben.actRejected(turn, { type: 'stopJob', unitId: worker.id })).toBe('noSuchUnit');
+    expect(await ben.actRejected(turn, { type: 'startJob', unitId: worker.id, improvement: 'mine' })).toBe('noSuchUnit');
+    const benFrames = ben.frames.length;
+    const adaFrames = ada.frames.length;
+
+    // The second tab sends the Worker one tile on.
+    const requestId = adaTab.sendAction(turn, { type: 'moveUnit', unitId: worker.id, path: [field + 1] });
+    const { reply, before: earlier } = await adaTab.readReply(requestId);
+    expect(reply).toStrictEqual({
+      type: 'actionRejected',
+      requestId,
+      error: { code: 'unitBusy', message: RULE_ERROR_MESSAGES.unitBusy },
+    });
+    expect(earlier).toEqual([]);
+    // The answer is about the unit, wherever a well-formed path leads: the tiles on it are not looked at.
+    expect(await adaTab.actRejected(turn, { type: 'moveUnit', unitId: worker.id, path: [field + 1, field + 2] })).toBe('unitBusy');
+    expect(await adaTab.actRejected(turn, { type: 'moveUnit', unitId: worker.id, path: [worker.tile] })).toBe('unitBusy');
+    // And no other job is started on top of the one it has.
+    expect(await adaTab.actRejected(turn, { type: 'startJob', unitId: worker.id, improvement: 'mine' })).toBe('unitBusy');
+
+    // Nothing was saved and nothing was sent: not to the other tab, not to Ben.
+    expect(server.saveText(code)).toBe(before);
+    await ada.expectNothingPending();
+    await ben.expectNothingPending();
+    expect(onlyPongsSince(ada, adaFrames)).toBe(true);
+    expect(onlyPongsSince(ben, benFrames)).toBe(true);
+    // The job is where it was, with the turn it has worked.
+    adaTab.send({ type: 'resync' });
+    expect((await adaTab.nextOfType('gameSync')).view).toEqual(viewBefore);
+
+    // "Stop work" first, then the same move: both go through, and both tabs are told.
+    await adaTab.actOk(turn, { type: 'stopJob', unitId: worker.id });
+    await ada.nextOfType('gameUpdate');
+    expect(ownUnit(ada.view, 'worker').own?.job).toBeNull();
+    await adaTab.actOk(turn, { type: 'moveUnit', unitId: worker.id, path: [field + 1] });
+    await ada.nextOfType('gameUpdate');
+    expect(ownUnit(ada.view, 'worker').tile).toBe(field + 1);
+    expect(ada.view).toEqual(adaTab.view);
+    // The work that was given up left nothing on the tile.
+    expect(server.save(code).game?.map.tiles[field].improvement).toBeNull();
+    await ben.expectNothingPending();
+    expect(onlyPongsSince(ben, benFrames)).toBe(true);
   });
 });

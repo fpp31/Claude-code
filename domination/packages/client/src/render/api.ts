@@ -13,6 +13,8 @@
  *   renderer.panBy / zoomBy / centerOn   moves its camera, redraws
  *   renderer.tileAt(point)            hit test: which tile is under the pointer
  *   renderer.tileToScreen(tile)       where a tile's centre is on screen
+ *   renderer.tileScreenRect(tile)     where a tile's box is on screen
+ *   renderer.onCameraChange(fn)       tells when tiles have moved on screen
  *   renderer.destroy()                stops drawing and listening
  *
  * TWO RULES ABOUT "NOT READY YET" (both sides rely on them):
@@ -21,7 +23,8 @@
  *     size, when createMapRenderer(canvas) is called (WP4 appends it first).
  *     The renderer measures it right then, synchronously
  *     (getBoundingClientRect), and again at the start of every camera and
- *     hit-test call below (panBy, zoomBy, centerOn, tileAt, tileToScreen).
+ *     hit-test call below (panBy, zoomBy, centerOn, tileAt, tileToScreen,
+ *     tileScreenRect).
  *     So every method works from the first moment, and none is ever behind
  *     a resize: setView followed at once by centerOn puts the tile in the
  *     middle of the real canvas, not of an unmeasured 300 x 150 one, and
@@ -32,7 +35,8 @@
  *
  *  2. NO VIEW. Before the first setView, and after setView(null), the
  *     renderer does not know the map's size. Then panBy, zoomBy and
- *     centerOn do nothing, tileAt returns null and tileToScreen throws.
+ *     centerOn do nothing, tileAt returns null, and tileToScreen and
+ *     tileScreenRect throw.
  *
  * Both sides are written against this file, and the renderer's tests pin
  * it down (test/renderRenderer.test.ts). Change it only together with both.
@@ -49,9 +53,24 @@ export interface ScreenPoint {
   y: number;
 }
 
+/**
+ * A rectangle on screen in CSS pixels, measured like a ScreenPoint from the
+ * top-left corner of the browser viewport. `right` and `bottom` are the
+ * first pixels outside it.
+ */
+export interface ScreenRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 /** Everything the renderer draws on top of the map that is not part of the view. */
 export interface MapOverlay {
-  /** Tile of the selected unit or city: gets the selection ring. */
+  /**
+   * Tile of the selected unit or city, or, when nothing is selected, the
+   * tile whose tile card is open: gets the selection ring.
+   */
   selectedTile: TileIndex | null;
   /** The selected unit, so the renderer can draw it in front when two units share the tile. */
   selectedUnitId: UnitId | null;
@@ -145,6 +164,35 @@ export interface MapRenderer {
    * click to the wrong place without a word.
    */
   tileToScreen(tile: TileIndex): ScreenPoint;
+
+  /**
+   * Where a tile is on screen: the box that holds its hexagon (the tile's
+   * 26 x 28 art pixels at the current zoom). The app shell uses it to put
+   * the hover box BESIDE a tile, never on it, without knowing how big a
+   * tile is drawn. The middle of the box is tileToScreen(tile), and every
+   * point that tileAt gives to this tile lies inside it. Pictures drawn for
+   * the tile may stick out of the box a little: a city's roof and banner
+   * and mountains at the top, a unit standing beside a city hall at the side.
+   * May lie outside the canvas if the tile is scrolled away. Measures the
+   * canvas first, like tileToScreen, and throws in the same two cases (no
+   * view; not a tile of this map).
+   */
+  tileScreenRect(tile: TileIndex): ScreenRect;
+
+  /**
+   * Calls `listener` after every change to where tiles are on screen: a
+   * panBy, zoomBy or centerOn that really moved or zoomed the camera, a
+   * setView that moved it (another map size), and a new size of the canvas
+   * reported by the browser. Not called when nothing moved (a pan against
+   * the edge of the map, a zoom step beyond the limit, a new view of the
+   * same map). The call is made straight away, inside the call that moved
+   * the camera, after the camera has its new place.
+   *
+   * A listener may ask tileAt, tileToScreen and tileScreenRect. It must not
+   * move the camera itself. Returns a function that removes the listener;
+   * destroy() removes them all.
+   */
+  onCameraChange(listener: () => void): () => void;
 
   /** Stops the frame loop and removes every listener and observer the renderer created. */
   destroy(): void;

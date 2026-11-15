@@ -22,6 +22,7 @@ import type {
   AddressedEvent,
   CityPublic,
   GameState,
+  ImprovementId,
   PlayerId,
   PlayerView,
   TileIndex,
@@ -33,12 +34,13 @@ import type {
 interface SeenTile {
   owner: PlayerId | null;
   city: CityPublic | null;
+  improvement: ImprovementId | null;
 }
 
 export interface Oracle {
   /** Per player: has the tile ever been in sight? */
   everSeen: Map<PlayerId, boolean[]>;
-  /** Per player and tile: owner and city as they were when the tile was last in sight. */
+  /** Per player and tile: owner, city and improvement as they were when the tile was last in sight. */
   lastSeen: Map<PlayerId, Map<TileIndex, SeenTile>>;
 }
 
@@ -61,7 +63,7 @@ function spread(state: GameState, sources: TileIndex[], radius: number, into: bo
   }
 }
 
-/** The owner of a tile and the city on it, read straight from the truth. */
+/** The owner of a tile, the city on it and what is built on it, read straight from the truth. */
 function truthOn(state: GameState, tile: TileIndex): SeenTile {
   const cityId = state.map.tiles[tile].cityId;
   const owner = cityId === null ? null : state.cities[cityId].owner;
@@ -70,7 +72,7 @@ function truthOn(state: GameState, tile: TileIndex): SeenTile {
     standing === undefined
       ? null
       : { id: standing.id, owner: standing.owner, name: standing.name, tile: standing.tile, population: standing.population };
-  return { owner, city };
+  return { owner, city, improvement: state.map.tiles[tile].improvement };
 }
 
 /** Which tiles the player has in sight right now, according to the oracle. */
@@ -114,8 +116,8 @@ function note(oracle: Oracle, state: GameState, playerId: PlayerId, visible: boo
  * stands on the server's side).
  *
  * A unit also sees from every tile it passes. Those tiles are in the
- * 'unitMoved' event; owners and cities do not change during a move, so what
- * the unit saw on the way is what `after` shows there.
+ * 'unitMoved' event; owners, cities and improvements do not change during a
+ * move, so what the unit saw on the way is what `after` shows there.
  */
 export function observe(oracle: Oracle, after: GameState, events: AddressedEvent[]): void {
   for (const { event } of events) {
@@ -152,8 +154,15 @@ export function viewProblems(oracle: Oracle, state: GameState, playerId: PlayerI
   state.map.tiles.forEach((tile, index) => {
     let expected: TileView | null = null;
     if (seen[index]) {
-      const owner = visible[index] ? truthOn(state, index).owner : (memory.get(index)?.owner ?? null);
-      expected = { terrain: tile.terrain, feature: tile.feature, owner, visible: visible[index] };
+      // In sight: the truth. Fogged: what the books say was there when the tile was last in sight.
+      const shown = visible[index] ? truthOn(state, index) : memory.get(index);
+      expected = {
+        terrain: tile.terrain,
+        feature: tile.feature,
+        improvement: shown === undefined ? null : shown.improvement,
+        owner: shown === undefined ? null : shown.owner,
+        visible: visible[index],
+      };
     }
     expectEqual(`tile ${index}`, view.tiles[index], expected);
   });
@@ -169,6 +178,13 @@ export function viewProblems(oracle: Oracle, state: GameState, playerId: PlayerI
     if (unit.owner === playerId) {
       expectEqual(`own unit ${unit.id}`, { ...shown, own: null }, { id: unit.id, type: unit.type, owner: unit.owner, tile: unit.tile, own: null });
       expectEqual(`moves of own unit ${unit.id}`, shown.own?.movesLeft, unit.movesLeft);
+      // The owner is told what the unit is building and how far it has got.
+      const job = shown.own === null || shown.own.job === null ? null : shown.own.job;
+      expectEqual(
+        `job of own unit ${unit.id}`,
+        job === null ? null : { improvement: job.improvement, turnsWorked: job.turnsWorked },
+        unit.job,
+      );
     } else {
       expectEqual(`foreign unit ${unit.id}`, shown, { id: unit.id, type: unit.type, owner: unit.owner, tile: unit.tile, own: null });
     }

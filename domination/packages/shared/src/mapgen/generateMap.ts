@@ -29,7 +29,7 @@ import { generateForSize } from './attempts';
 
 /** What generateMap returns: a map and where each player starts on it. */
 export interface GeneratedMap {
-  /** The finished map. Every tile has `cityId: null`. */
+  /** The finished map. Every tile has `cityId: null` and `improvement: null`. */
   map: GameMap;
   /**
    * One start tile per player: starts[i] belongs to the i-th player in seat

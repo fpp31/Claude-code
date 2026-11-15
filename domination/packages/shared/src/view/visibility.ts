@@ -50,9 +50,11 @@ export function computeVisible(state: GameState, playerId: PlayerId): boolean[] 
  *
  * For each player and each tile visible to them (computeVisible):
  *  - knowledge.explored[tile] = 1;
- *  - if the tile has an owner or a city on it, knowledge.remembered[tile] =
+ *  - if the tile has an owner, a city on it or an improvement,
+ *    knowledge.remembered[tile] =
  *    { owner: the tile's current owner (player id, or null),
- *      city: the CityPublic of the city standing on the tile, or null };
+ *      city: the CityPublic of the city standing on the tile, or null,
+ *      improvement: what is built on the tile, or null };
  *  - otherwise delete knowledge.remembered[tile].
  * Tiles that are not visible are left alone: that is exactly "as last seen".
  * Units are never remembered.
@@ -70,8 +72,9 @@ export function updateKnowledge(state: GameState): void {
 
       const owner = tileOwner(state, tile);
       const city = cityOnTile.get(tile);
-      if (owner !== null || city !== undefined) {
-        knowledge.remembered[tile] = { owner, city: city === undefined ? null : cityPublic(city) };
+      const improvement = state.map.tiles[tile].improvement;
+      if (owner !== null || city !== undefined || improvement !== null) {
+        knowledge.remembered[tile] = { owner, city: city === undefined ? null : cityPublic(city), improvement };
       } else {
         delete knowledge.remembered[tile];
       }

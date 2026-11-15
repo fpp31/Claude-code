@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { CIVS, CIV_IDS, FEATURE_IDS, MAP_SIZES, TERRAIN_IDS, UNIT_TYPE_IDS, tileCoord, tileCount } from '@domination/shared';
+import {
+  CIVS, CIV_IDS, FEATURE_IDS, IMPROVEMENT_IDS, MAP_SIZES, TERRAIN_IDS, UNIT_TYPE_IDS, tileCoord, tileCount,
+} from '@domination/shared';
 import type { GridSize } from '@domination/shared';
 import {
   CAMERA_MARGIN,
@@ -14,10 +16,11 @@ import {
   zoomStep,
 } from '../src/render/camera';
 import type { Camera } from '../src/render/camera';
-import { TILE_HEIGHT, TILE_WIDTH, isInsideHex, mapPixelSize, tileCenter, tileOrigin } from '../src/render/geometry';
+import { BORDER_INNER, BORDER_OUTER } from '../src/render/borders';
+import { TILE_HEIGHT, TILE_WIDTH, hexDepth, isInsideHex, mapPixelSize, tileCenter, tileOrigin } from '../src/render/geometry';
 import { tree } from '../src/sprites/art/features';
 import { MARKER_IDS } from '../src/sprites/art/markers';
-import { ALL_SPRITE_IDS, buildCatalog } from '../src/sprites/catalog';
+import { ALL_SPRITE_IDS, buildCatalog, featureOf, improvementOf } from '../src/sprites/catalog';
 import { FONT_HEIGHT, GLYPHS, GLYPH_WIDTH, drawText, measureText } from '../src/sprites/font';
 import type { SpriteSource } from '../src/sprites/format';
 import { getPixel } from '../src/sprites/image';
@@ -26,7 +29,7 @@ import { PALETTE } from '../src/sprites/palette';
 import { ownerRamp, rasterizeSprite } from '../src/sprites/rasterize';
 import { RIM_ROWS_ADDED } from '../src/sprites/rim';
 import { buildSpriteImages, spriteKey } from '../src/sprites/spriteSheet';
-import type { SpriteId } from '../src/sprites/spriteSheet';
+import type { SpriteId, SpriteImage } from '../src/sprites/spriteSheet';
 import { installFakeBrowser } from './renderFakeCanvas';
 
 /**
@@ -204,15 +207,48 @@ describe('the art (WP5)', () => {
   const images = buildSpriteImages();
   const byKey = new Map(images.map((entry) => [entry.key, entry]));
 
-  it('there is a sprite for every SpriteId (every terrain, feature and unit type in the tables, and the city)', () => {
+  /**
+   * A picture laid into a tile box where the map draws it, one text per pixel ('' where nothing is painted), so
+   * that sprites of different sizes can be compared pixel by pixel. `solidOnly` leaves out see-through pixels (shadows).
+   */
+  function inTileBox(sprite: SpriteImage, solidOnly = false): string[] {
+    const box: string[] = new Array(TILE_WIDTH * TILE_HEIGHT).fill('');
+    for (let y = 0; y < sprite.image.height; y++) {
+      for (let x = 0; x < sprite.image.width; x++) {
+        const pixel = getPixel(sprite.image, x, y);
+        if (pixel[3] === 0 || (solidOnly && pixel[3] !== 255)) continue;
+        box[(y + sprite.offsetY) * TILE_WIDTH + x + sprite.offsetX] = pixel.join();
+      }
+    }
+    return box;
+  }
+
+  /** In how many pixels of the tile box two pictures differ. */
+  function pixelsApart(first: string[], second: string[]): number {
+    return first.filter((pixel, index) => pixel !== second[index]).length;
+  }
+
+  function spriteImage(id: SpriteId, version = '', owner: 'rome' | '' = '', look: 'normal' | 'fogged' | 'spent' = 'normal'): SpriteImage {
+    const found = byKey.get(spriteKey(id, version, owner, look));
+    if (found === undefined) throw new Error(`no picture ${id} ${version} ${owner} ${look}`);
+    return found;
+  }
+
+  it('there is a sprite for every SpriteId (every terrain, feature, improvement and unit type in the tables, and the city)', () => {
     const wanted: SpriteId[] = [
       ...TERRAIN_IDS.map((terrain): SpriteId => `ground.${terrain}`),
       ...FEATURE_IDS.map((feature): SpriteId => `feature.${feature}`),
+      ...IMPROVEMENT_IDS.map((improvement): SpriteId => `improvement.${improvement}`),
       ...UNIT_TYPE_IDS.map((unitType): SpriteId => `unit.${unitType}`),
       'city',
       ...MARKER_IDS.map((marker): SpriteId => `marker.${marker}`),
     ];
-    expect([...ALL_SPRITE_IDS].sort()).toEqual([...wanted].sort());
+    // The same ids in the same order: grounds, features, improvements, units, the city, markers.
+    expect([...ALL_SPRITE_IDS]).toEqual(wanted);
+    expect(MARKER_IDS).toEqual(['selection', 'reachable', 'hover', 'worked', 'pathStep', 'pathEnd', 'working', 'idle']);
+    expect(IMPROVEMENT_IDS.map((improvement) => improvementOf(`improvement.${improvement}`))).toEqual([...IMPROVEMENT_IDS]);
+    expect(improvementOf('feature.hills')).toBeNull();
+    expect(featureOf('improvement.mine')).toBeNull();
 
     const catalog = buildCatalog();
     for (const id of wanted) {
@@ -268,11 +304,14 @@ describe('the art (WP5)', () => {
     }
   });
 
-  it('ground and feature sprites stay inside their own 26 x 28 tile box (repainting a few tiles relies on it)', () => {
+  it('ground, feature and improvement sprites stay inside their own 26 x 28 tile box (repainting a few tiles relies on it)', () => {
     // render/terrainLayer.ts repaints a changed tile together with its neighbors only. That is enough exactly
     // because nothing on the terrain picture reaches beyond its own tile box. (Cities and units may stick out.)
-    const terrainArt = buildCatalog().filter((entry) => entry.id.startsWith('ground.') || entry.id.startsWith('feature.'));
-    expect(terrainArt.length).toBeGreaterThan(20);
+    const terrainArt = buildCatalog().filter(
+      (entry) => entry.id.startsWith('ground.') || entry.id.startsWith('feature.') || entry.id.startsWith('improvement.'),
+    );
+    expect(terrainArt.length).toBeGreaterThan(30);
+    expect(terrainArt.filter((entry) => entry.id.startsWith('improvement.')).length).toBe(IMPROVEMENT_IDS.length * TERRAIN_IDS.length);
     for (const entry of terrainArt) {
       const top = entry.source.offsetY ?? 0;
       expect(top, `${entry.id} ${entry.version}`).toBeGreaterThanOrEqual(0);
@@ -320,26 +359,144 @@ describe('the art (WP5)', () => {
     expect(countPixels(mayaCity, rgba(BLUE.primary))).toBe(countPixels(romeCity, rgba(RED.primary)));
   });
 
-  it('the three unit types have clearly different pictures (told apart by more than a few pixels)', () => {
-    const picture = (id: SpriteId) => {
-      const sprite = byKey.get(spriteKey(id, '', 'rome', 'normal'))!;
-      // Lay the sprite into a tile box, so sprites of different sizes can be compared pixel by pixel.
-      const box: string[] = new Array(TILE_WIDTH * TILE_HEIGHT).fill('');
-      for (let y = 0; y < sprite.image.height; y++) {
-        for (let x = 0; x < sprite.image.width; x++) {
-          box[(y + sprite.offsetY) * TILE_WIDTH + x + sprite.offsetX] = getPixel(sprite.image, x, y).join();
-        }
-      }
-      return box;
-    };
+  it('the four unit types have clearly different pictures (told apart by more than a few pixels)', () => {
     const ids = UNIT_TYPE_IDS.map((unitType): SpriteId => `unit.${unitType}`);
+    expect(ids.length).toBe(4);
     for (let a = 0; a < ids.length; a++) {
       for (let b = a + 1; b < ids.length; b++) {
-        const first = picture(ids[a]);
-        const second = picture(ids[b]);
-        const different = first.filter((pixel, index) => pixel !== second[index]).length;
+        const different = pixelsApart(inTileBox(spriteImage(ids[a], '', 'rome')), inTileBox(spriteImage(ids[b], '', 'rome')));
         expect(different, `${ids[a]} against ${ids[b]}`).toBeGreaterThan(40);
       }
+    }
+  });
+
+  it('the Worker is told apart from each of the other three units by more than 80 pixels, and from the Settler by more than 200', () => {
+    const worker = inTileBox(spriteImage('unit.worker', '', 'rome'));
+    for (const other of ['unit.warrior', 'unit.scout', 'unit.settler'] as const) {
+      expect(pixelsApart(worker, inTileBox(spriteImage(other, '', 'rome'))), other).toBeGreaterThan(80);
+    }
+    // The two civilians must never be mixed up: one founds a city (and is gone), the other builds.
+    expect(pixelsApart(worker, inTileBox(spriteImage('unit.settler', '', 'rome')))).toBeGreaterThan(200);
+  });
+
+  it('every improvement has one picture per terrain, in every look, and none is in owner colours', () => {
+    const catalog = buildCatalog();
+    for (const improvement of IMPROVEMENT_IDS) {
+      const entries = catalog.filter((entry) => entry.id === `improvement.${improvement}`);
+      expect(entries.map((entry) => entry.version).sort()).toEqual([...TERRAIN_IDS].sort());
+      for (const entry of entries) {
+        expect(entry.owned, `${entry.id} ${entry.version}`).toBe(false);
+        expect(entry.rim).toBe(false);
+        // No owner characters in the art: it rasterises without an owner (once, under the owner name '').
+        expect(() => rasterizeSprite(entry.source)).not.toThrow();
+        for (const look of SPRITE_LOOKS) {
+          expect(byKey.has(spriteKey(entry.id, entry.version, '', look)), `${entry.id} ${entry.version} ${look}`).toBe(true);
+          expect(byKey.has(spriteKey(entry.id, entry.version, 'rome', look))).toBe(false);
+        }
+        // The fogged twin is another picture of the same shape.
+        const bright = spriteImage(entry.id, entry.version);
+        const fogged = spriteImage(entry.id, entry.version, '', 'fogged');
+        expect(fogged.image.pixels.join()).not.toBe(bright.image.pixels.join());
+        expect([fogged.image.width, fogged.image.height, fogged.offsetX, fogged.offsetY]).toEqual(
+          [bright.image.width, bright.image.height, bright.offsetX, bright.offsetY],
+        );
+      }
+    }
+  });
+
+  it('improvement sprites stay inside their tile box and at least 3 pixels inside the hexagon, clear of the border strip', () => {
+    // A territory's border strip is this deep (render/borders.ts); an improvement is painted over it.
+    const strip = BORDER_OUTER + BORDER_INNER;
+    expect(strip).toBe(3);
+    for (const improvement of IMPROVEMENT_IDS) {
+      for (const terrain of TERRAIN_IDS) {
+        const sprite = spriteImage(`improvement.${improvement}`, terrain);
+        let painted = 0;
+        for (let y = 0; y < sprite.image.height; y++) {
+          for (let x = 0; x < sprite.image.width; x++) {
+            if (getPixel(sprite.image, x, y)[3] === 0) continue; // shadows count: they would darken the strip
+            painted += 1;
+            const [px, py] = [x + sprite.offsetX, y + sprite.offsetY];
+            expect(px >= 0 && px < TILE_WIDTH && py >= 0 && py < TILE_HEIGHT, `${improvement} on ${terrain} at (${px}, ${py})`).toBe(true);
+            expect(hexDepth(px, py), `${improvement} on ${terrain} at (${px}, ${py})`).toBeGreaterThanOrEqual(strip);
+          }
+        }
+        expect(painted).toBeGreaterThan(40);
+      }
+    }
+  });
+
+  it('the farm\'s three colourings are three different pictures, and a farm paints more than 150 pixels of its tile', () => {
+    const land = ['grassland', 'plains', 'desert'] as const;
+    const pictures = land.map((terrain) => inTileBox(spriteImage('improvement.farm', terrain)));
+    expect(new Set(pictures.map((picture) => picture.join('|'))).size).toBe(3);
+    for (const picture of pictures) {
+      // A farm must be seen at the smallest zoom: it fills the middle of the tile, not a corner of it.
+      expect(picture.filter((pixel) => pixel !== '').length).toBeGreaterThan(150);
+    }
+    // The three differ in colour only: the same pixels are painted.
+    const shapes = new Set(pictures.map((picture) => picture.map((pixel) => (pixel === '' ? '.' : '#')).join('')));
+    expect(shapes.size).toBe(1);
+    // The mine is one picture on every ground.
+    expect(new Set(land.map((terrain) => inTileBox(spriteImage('improvement.mine', terrain)).join('|'))).size).toBe(1);
+    // And nobody can take a farm for a mine.
+    expect(pixelsApart(pictures[0], inTileBox(spriteImage('improvement.mine', 'grassland')))).toBeGreaterThan(150);
+  });
+
+  it('the mine\'s timber frame shares no pixel with the worked-tile token (marker.worked)', () => {
+    // With a city selected every worked tile carries the gold token. The frame around the mouth of the mine is
+    // what tells a mined hill from a plain one, so the token must never lie on it.
+    const timber = [PALETTE.strawLight, PALETTE.bow, PALETTE.plankShade].map((color) => rgba(color).join());
+    const token = inTileBox(spriteImage('marker.worked'), true);
+    expect(token.filter((pixel) => pixel !== '').length).toBeGreaterThan(30);
+    for (const terrain of TERRAIN_IDS) {
+      const mine = inTileBox(spriteImage('improvement.mine', terrain));
+      const frame = mine.map((pixel, index) => (timber.includes(pixel) ? index : -1)).filter((index) => index >= 0);
+      expect(frame.length, terrain).toBeGreaterThanOrEqual(12); // a beam and two posts
+      // The frame and the dark mouth inside it: everything from its first to its last column and row.
+      const columns = frame.map((index) => index % TILE_WIDTH);
+      const rows = frame.map((index) => Math.floor(index / TILE_WIDTH));
+      const [left, right, top, bottom] = [Math.min(...columns), Math.max(...columns), Math.min(...rows), Math.max(...rows)];
+      expect(right - left).toBeGreaterThanOrEqual(4);
+      expect(bottom - top).toBeGreaterThanOrEqual(4);
+      for (let y = top; y <= bottom; y++) {
+        for (let x = left; x <= right; x++) {
+          expect(mine[y * TILE_WIDTH + x], `the frame at (${x}, ${y})`).not.toBe('');
+          expect(token[y * TILE_WIDTH + x], `the token at (${x}, ${y})`).toBe('');
+        }
+      }
+    }
+  });
+
+  it('the "at work" sign is 7 x 7 and the "builds nothing" sign 7 x 9; they differ from each other and from the path dot in more than 12 pixels', () => {
+    const working = spriteImage('marker.working');
+    const idle = spriteImage('marker.idle');
+    expect([working.image.width, working.image.height]).toEqual([7, 7]);
+    expect([idle.image.width, idle.image.height]).toEqual([7, 9]);
+    // Where they sit in the tile box: left of the figure; at the upper left of a city's hall, right under the banner.
+    expect([working.offsetX, working.offsetY]).toEqual([1, 7]);
+    expect([idle.offsetX, idle.offsetY]).toEqual([0, 2]);
+
+    // Compared as shapes, each with its top-left corner in the same place: where a sign lies on the tile must not
+    // be what tells it from another one.
+    const shape = (sprite: SpriteImage): string[] => inTileBox({ ...sprite, offsetX: 0, offsetY: 0 });
+    const dot = spriteImage('marker.pathStep');
+    const token = spriteImage('marker.worked');
+    expect(pixelsApart(shape(working), shape(idle))).toBeGreaterThan(12);
+    expect(pixelsApart(shape(working), shape(dot))).toBeGreaterThan(12);
+    expect(pixelsApart(shape(idle), shape(dot))).toBeGreaterThan(12);
+    // The gold sign over a city is not the gold token of a worked tile either.
+    expect(pixelsApart(shape(idle), shape(token))).toBeGreaterThan(12);
+
+    // The "at work" sign is a square (the path dot is round): all four corners are painted. One colour besides the outline.
+    for (const [x, y] of [[0, 0], [6, 0], [0, 6], [6, 6]]) expect(getPixel(working.image, x, y)).toEqual(OUTLINE);
+    expect(getPixel(dot.image, 0, 0)).toEqual(NOTHING);
+    expect(countPixels(working.image, rgba(PALETTE.markerWhite)) + countPixels(working.image, OUTLINE)).toBe(49);
+    expect(countPixels(idle.image, rgba(PALETTE.gold)) + countPixels(idle.image, OUTLINE)).toBe(63);
+    // The exclamation mark has gold all around it: it touches the frame nowhere.
+    for (let x = 1; x <= 5; x++) {
+      expect(getPixel(idle.image, x, 1)).toEqual(rgba(PALETTE.gold));
+      expect(getPixel(idle.image, x, 7)).toEqual(rgba(PALETTE.gold));
     }
   });
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  RULES,
   RULE_ERROR_MESSAGES,
   UNITS,
   applyAction,
@@ -20,8 +21,10 @@ import {
   at,
   codeOf,
   foundCityAt,
+  improve,
   newGame,
   placeUnit,
+  queueOf,
   send,
   setupFor,
   stepFrom,
@@ -48,12 +51,14 @@ interface GameLog {
   codes: Map<RuleErrorCode, number>;
   /** How often each kind of event happened. */
   events: Map<string, number>;
+  /** How often each type of action was accepted and changed something. */
+  kinds: Map<string, number>;
   /** One line per attempt: who, what, and the complete answer. Two games are the same game if these match. */
   record: string[];
 }
 
 function newLog(): GameLog {
-  return { steps: 0, accepted: 0, rejected: 0, codes: new Map(), events: new Map(), record: [] };
+  return { steps: 0, accepted: 0, rejected: 0, codes: new Map(), events: new Map(), kinds: new Map(), record: [] };
 }
 
 function count<K>(counts: Map<K, number>, key: K): void {
@@ -65,6 +70,7 @@ function logStep(log: GameLog, step: Step): void {
   log.steps += 1;
   if (step.result.ok) {
     log.accepted += 1;
+    if (step.result.changed) count(log.kinds, step.action.type);
     for (const addressed of step.result.events) count(log.events, addressed.event.type);
   } else {
     log.rejected += 1;
@@ -78,7 +84,8 @@ function logStep(log: GameLog, step: Step): void {
  *  - the engine did not touch the state it was given;
  *  - a rejected action changed nothing, an accepted no-op handed back the same object;
  *  - the new state is healthy;
- *  - the answer is the one a referee predicts who sees only the player's own view.
+ *  - the answer is the one a referee predicts who sees only the player's own view;
+ *  - a finished improvement is news for its owner only, and names one of the owner's own cities.
  */
 function checkStep(step: Step, jsonBefore: string): string {
   expect(JSON.stringify(step.before), `step ${step.index}: the input state was modified`).toBe(jsonBefore);
@@ -99,6 +106,15 @@ function checkStep(step: Step, jsonBefore: string): string {
   }
   expect(step.result.state).not.toBe(step.before);
   expect(checkInvariants(step.after), `step ${step.index}`).toEqual([]);
+  // News of a finished improvement goes to the unit's owner alone and names one of that player's own cities.
+  for (const addressed of step.result.events) {
+    if (addressed.event.type !== 'improvementBuilt') continue;
+    const { playerId, cityName, tile, improvement } = addressed.event;
+    expect(addressed.to, `step ${step.index}`).toEqual([playerId]);
+    const ownCityNames = Object.values(step.after.cities).filter((city) => city.owner === playerId).map((city) => city.name);
+    expect(ownCityNames, `step ${step.index}: "${cityName}"`).toContain(cityName);
+    expect(step.after.map.tiles[tile].improvement, `step ${step.index}`).toBe(improvement);
+  }
   return JSON.stringify(step.after);
 }
 
@@ -171,6 +187,11 @@ describe('whole-game properties (WP2)', () => {
     expect(log.events.get('cityGrew') ?? 0).toBeGreaterThan(3);
     expect(log.events.get('unitBuilt') ?? 0).toBeGreaterThan(3);
     expect(log.events.get('turnStarted')).toBe(30);
+    // Queues were edited, Workers were built and set to work, and some of that work was finished.
+    expect(log.kinds.get('setBuildQueue') ?? 0).toBeGreaterThan(100);
+    expect(log.kinds.get('startJob') ?? 0).toBeGreaterThan(3);
+    expect(log.events.get('improvementBuilt') ?? 0).toBeGreaterThan(3);
+    expect(end.map.tiles.filter((tile) => tile.improvement !== null).length).toBeGreaterThan(3);
   });
 
   it('random legal and illegal play for 40 turns: every answer is the one the player\'s own view predicts, and the state stays healthy', LONG_TEST, () => {
@@ -197,12 +218,15 @@ describe('whole-game properties (WP2)', () => {
       expect(checkInvariants(end)).toEqual([]);
       // Blind walks did run into water, mountains and other units with moves to spare.
       expect(earlyStops).toBeGreaterThan(4);
+      // Workers were at work in this game too, and finished some of it.
+      expect(log.events.get('improvementBuilt') ?? 0).toBeGreaterThan(0);
       // Both kinds of answer came up, in numbers, and the wild attempts met many different refusals.
       expect(log.accepted).toBeGreaterThan(500);
       expect(log.rejected).toBeGreaterThan(300);
       for (const code of [
         'staleTurn', 'turnAlreadyEnded', 'noSuchUnit', 'noSuchCity', 'badPath', 'noMovesLeft',
         'impassable', 'blocked', 'cannotFoundCity', 'cannotBuild', 'badAction',
+        'queueFull', 'cannotImprove', 'unitBusy',
       ] as const) {
         expect(log.codes.get(code) ?? 0, `${seed}: ${code}`).toBeGreaterThan(0);
       }
@@ -295,6 +319,10 @@ describe('whole-game properties (WP2)', () => {
     const rome = Object.values(state.cities)[0];
     let tiredId = '';
     let forestId = '';
+    let cityWorkerId = '';
+    let farmWorkerId = '';
+    let busyWorkerId = '';
+    let strayWorkerId = '';
     state = arrange(state, (draft) => {
       draft.map.tiles[at(map, 3, 8)].feature = 'forest';
       draft.map.tiles[stepFrom(map, warrior.tile, NORTH_WEST)].feature = 'mountains';
@@ -303,6 +331,14 @@ describe('whole-game properties (WP2)', () => {
       placeUnit(draft, 'p1', 'settler', at(map, 5, 5)); // on Rome's land, next to p2's
       placeUnit(draft, 'p1', 'settler', at(map, 6, 5)); // on p2's land
       placeUnit(draft, 'p2', 'scout', at(map, 4, 5)); // east of Rome
+      // Four Workers of p1: in Rome itself; on a farm on Rome's land; at work on Rome's land; outside every border.
+      cityWorkerId = placeUnit(draft, 'p1', 'worker', rome.tile).id;
+      improve(draft, at(map, 2, 5), 'farm');
+      farmWorkerId = placeUnit(draft, 'p1', 'worker', at(map, 2, 5)).id;
+      const busy = placeUnit(draft, 'p1', 'worker', at(map, 1, 5));
+      busy.job = { improvement: 'farm', turnsWorked: 1 };
+      busyWorkerId = busy.id;
+      strayWorkerId = placeUnit(draft, 'p1', 'worker', at(map, 9, 9)).id;
     });
     const onRomesLand = Object.values(state.units).find((u) => u.tile === at(map, 5, 5)) as { id: string };
     const onTheirLand = Object.values(state.units).find((u) => u.tile === at(map, 6, 5)) as { id: string };
@@ -314,7 +350,7 @@ describe('whole-game properties (WP2)', () => {
       ['staleTurn', state, 'p1', { type: 'endTurn' }, state.turn + 1],
       ['turnAlreadyEnded', ended, 'p1', { type: 'foundCity', unitId: forestId }],
       ['noSuchUnit', state, 'p2', { type: 'moveUnit', unitId: warrior.id, path: [east] }],
-      ['noSuchCity', state, 'p2', { type: 'setProduction', cityId: rome.id, item: { kind: 'unit', unitType: 'scout' } }],
+      ['noSuchCity', state, 'p2', { type: 'setBuildQueue', cityId: rome.id, queue: queueOf('scout') }],
       ['badPath', state, 'p1', { type: 'moveUnit', unitId: warrior.id, path: [at(map, 9, 9)] }],
       ['noMovesLeft', state, 'p1', { type: 'moveUnit', unitId: tiredId, path: [at(map, 1, 8)] }],
       ['impassable', state, 'p1', { type: 'moveUnit', unitId: warrior.id, path: [stepFrom(map, warrior.tile, NORTH_WEST)] }],
@@ -323,7 +359,16 @@ describe('whole-game properties (WP2)', () => {
       ['badCityTile', state, 'p1', { type: 'foundCity', unitId: forestId }],
       ['tooCloseToCity', state, 'p1', { type: 'foundCity', unitId: onRomesLand.id }],
       ['tileOwned', state, 'p1', { type: 'foundCity', unitId: onTheirLand.id }],
-      ['cannotBuild', state, 'p1', { type: 'setProduction', cityId: rome.id, item: { kind: 'unit', unitType: 'dragon' as 'scout' } }],
+      ['cannotBuild', state, 'p1', { type: 'setBuildQueue', cityId: rome.id, queue: [{ kind: 'unit', unitType: 'dragon' as 'scout' }] }],
+      ['queueFull', state, 'p1', {
+        type: 'setBuildQueue', cityId: rome.id, queue: Array.from({ length: RULES.maxQueueLength + 1 }, () => queueOf('scout')[0]),
+      }],
+      ['cannotImprove', state, 'p1', { type: 'startJob', unitId: warrior.id, improvement: 'farm' }],
+      ['unitBusy', state, 'p1', { type: 'moveUnit', unitId: busyWorkerId, path: [at(map, 1, 6)] }],
+      ['notYourLand', state, 'p1', { type: 'startJob', unitId: strayWorkerId, improvement: 'farm' }],
+      ['cityOnTile', state, 'p1', { type: 'startJob', unitId: cityWorkerId, improvement: 'farm' }],
+      ['badImprovementTile', state, 'p1', { type: 'startJob', unitId: farmWorkerId, improvement: 'mine' }],
+      ['alreadyImproved', state, 'p1', { type: 'startJob', unitId: farmWorkerId, improvement: 'farm' }],
     ];
 
     for (const [code, situation, playerId, action, turn] of attempts) {

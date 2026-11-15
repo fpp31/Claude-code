@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  IMPROVEMENTS,
   UNITS,
   buildCost,
+  buildPlan,
   buildPlayerView,
   checkInvariants,
   cityEconomy,
   foodToGrow,
   isTurnComplete,
-  productionBlocked,
   resolveTurn,
 } from '../src/index';
 import type { AddressedEvent, BuildItem, City, GameState, PlayerId, UnitTypeId } from '../src/index';
@@ -29,6 +30,7 @@ import {
   stepFrom,
   unitOf,
   unitsOf,
+  workerOn,
 } from './rulesKit';
 
 /**
@@ -199,42 +201,49 @@ describe('turn resolution (WP2)', () => {
     expect(endTurnForAll(stocked).state.cities[city.id]).toMatchObject({ population: 3, foodStored: 20 + shortage });
   });
 
-  it('adds production only while an item is selected, completes the unit, carries the rest over and keeps the item selected', () => {
+  it('adds production only while the queue has an entry, completes the unit, carries the rest over, and the entry leaves the queue', () => {
     const { state, rome } = romeGame();
     const perTurn = cityEconomy(state, rome).production;
     const cost = buildCost(unit('scout'));
     expect(perTurn).toBeGreaterThan(1);
 
-    // Nothing chosen: the production of those turns is lost.
+    // An empty queue: the production of those turns is lost.
     let idle = state;
     for (let i = 0; i < 3; i++) idle = endTurnForAll(idle).state;
     expect(idle.cities[rome.id].productionStored).toBe(0);
     expect(unitsOf(idle, 'p1')).toHaveLength(1);
 
     // Chosen, and one short of the cost after this turn: stored, not built.
-    const building = act(state, 'p1', { type: 'setProduction', cityId: rome.id, item: unit('scout') });
+    const building = act(state, 'p1', { type: 'setBuildQueue', cityId: rome.id, queue: [unit('scout')] });
     const almost = endTurnForAll(withCity(building, rome.id, { productionStored: cost - perTurn - 1 }));
     expect(almost.state.cities[rome.id].productionStored).toBe(cost - 1);
     expect(unitsOf(almost.state, 'p1', 'scout')).toHaveLength(0);
 
-    // The next turn completes it: a new scout with full moves, the rest
-    // carried over, the same item still selected.
+    // The next turn completes it: a new scout with full moves and no job,
+    // the rest carried over, and the entry gone from the queue.
     const done = endTurnForAll(almost.state);
     const scouts = unitsOf(done.state, 'p1', 'scout');
     expect(scouts).toHaveLength(1);
-    expect(scouts[0]).toMatchObject({ owner: 'p1', type: 'scout', movesLeft: UNITS.scout.moves });
+    expect(scouts[0]).toMatchObject({ owner: 'p1', type: 'scout', movesLeft: UNITS.scout.moves, job: null });
     expect(scouts[0].id.startsWith('u1_')).toBe(true);
     expect(done.state.map.tiles[scouts[0].tile].cityId).toBe(rome.id);
-    expect(done.state.cities[rome.id]).toMatchObject({ productionStored: perTurn - 1, production: unit('scout'), population: 1 });
+    expect(done.state.cities[rome.id]).toMatchObject({ productionStored: perTurn - 1, buildQueue: [], population: 1 });
     expect(done.events[0]).toEqual({
       to: ['p1'],
-      event: { type: 'unitBuilt', playerId: 'p1', cityId: rome.id, cityName: rome.name, unitId: scouts[0].id, unitType: 'scout' },
+      event: {
+        type: 'unitBuilt', playerId: 'p1', cityId: rome.id, cityName: rome.name, unitId: scouts[0].id, unitType: 'scout',
+        queueEmpty: true,
+      },
     });
+    // The queue is empty now: the next turn adds nothing to what is left over.
+    expect(endTurnForAll(done.state).state.cities[rome.id].productionStored).toBe(perTurn - 1);
 
     // At most one unit per city per turn, however much is stored.
-    const rich = endTurnForAll(withCity(building, rome.id, { productionStored: 10 * cost }));
+    const three = withCity(building, rome.id, { buildQueue: [unit('scout'), unit('scout'), unit('scout')], productionStored: 10 * cost });
+    const rich = endTurnForAll(three);
     expect(unitsOf(rich.state, 'p1', 'scout')).toHaveLength(1);
     expect(rich.state.cities[rome.id].productionStored).toBe(10 * cost + perTurn - cost);
+    expect(rich.state.cities[rome.id].buildQueue).toEqual([unit('scout'), unit('scout')]);
   });
 
   it('makes a Settler wait until the city has population 2, then removes one population', () => {
@@ -242,14 +251,18 @@ describe('turn resolution (WP2)', () => {
     const perTurn = cityEconomy(state, rome).production;
     const surplus = cityEconomy(state, rome).foodSurplus;
     const cost = buildCost(unit('settler'));
-    const paidFor = withCity(act(state, 'p1', { type: 'setProduction', cityId: rome.id, item: unit('settler') }), rome.id, {
+    const paidFor = withCity(act(state, 'p1', { type: 'setBuildQueue', cityId: rome.id, queue: [unit('settler')] }), rome.id, {
       productionStored: cost,
     });
 
     // Population 1: the settler is paid for but does not appear; the production keeps piling up.
     const waiting = endTurnForAll(paidFor);
     expect(unitsOf(waiting.state, 'p1', 'settler')).toHaveLength(0);
-    expect(waiting.state.cities[rome.id]).toMatchObject({ population: 1, productionStored: cost + perTurn });
+    expect(waiting.state.cities[rome.id]).toMatchObject({
+      population: 1,
+      productionStored: cost + perTurn,
+      buildQueue: [unit('settler')],
+    });
     expect(eventTypes(waiting.events)).toEqual(['turnStarted']);
 
     // The city grows to 2 this turn (food first), and the settler leaves in
@@ -257,11 +270,14 @@ describe('turn resolution (WP2)', () => {
     const aboutToGrow = withCity(waiting.state, rome.id, { foodStored: foodToGrow(1) - surplus });
     const released = endTurnForAll(aboutToGrow);
     expect(eventTypes(released.events)).toEqual(['cityGrew', 'unitBuilt', 'turnStarted']);
+    // The news of the growth names the size the city grew TO, although the
+    // Settler has taken one citizen away again by the time the turn is over.
+    expect(released.events[0].event).toEqual({ type: 'cityGrew', playerId: 'p1', cityId: rome.id, name: rome.name, population: 2 });
     expect(unitsOf(released.state, 'p1', 'settler')).toHaveLength(1);
     expect(released.state.cities[rome.id]).toMatchObject({
       population: 1,
       productionStored: cost + 2 * perTurn - cost,
-      production: unit('settler'),
+      buildQueue: [],
     });
 
     // A city that already has 2 citizens releases the settler at once.
@@ -270,7 +286,7 @@ describe('turn resolution (WP2)', () => {
     expect(big.state.cities[rome.id].population).toBe(1);
 
     // A Warrior takes no citizen.
-    const warriorCity = withCity(act(state, 'p1', { type: 'setProduction', cityId: rome.id, item: unit('warrior') }), rome.id, {
+    const warriorCity = withCity(act(state, 'p1', { type: 'setBuildQueue', cityId: rome.id, queue: [unit('warrior')] }), rome.id, {
       productionStored: buildCost(unit('warrior')),
     });
     const built = endTurnForAll(warriorCity);
@@ -289,7 +305,7 @@ describe('turn resolution (WP2)', () => {
 
     // The starting warrior stands in the city, a scout on the only other tile.
     let scoutId = '';
-    const full = arrange(act(founded, 'p1', { type: 'setProduction', cityId: city.id, item: unit('warrior') }), (draft) => {
+    const full = arrange(act(founded, 'p1', { type: 'setBuildQueue', cityId: city.id, queue: [unit('warrior')] }), (draft) => {
       scoutId = placeUnit(draft, 'p1', 'scout', east).id;
       draft.cities[city.id].productionStored = cost;
     });
@@ -311,17 +327,22 @@ describe('turn resolution (WP2)', () => {
     expect(eventTypes(built.events)).toEqual(['unitBuilt', 'turnStarted']);
   });
 
-  it('productionBlocked says needsPopulation / noRoom exactly when resolveTurn would make the city wait, and null otherwise', () => {
+  it('held says needsPopulation / noRoom exactly when resolveTurn would make a paid-for first entry wait, and null otherwise', () => {
     const founded = withCapital(newGame(peak(true), [[3, 3]]));
     const map = founded.map;
     const cityId = Object.keys(founded.cities)[0];
     const east = at(map, 4, 3);
 
-    /** The city with the given item and population; `crowd` fills both tiles with military or civilian units. */
+    /**
+     * The city with the given item first in its queue (null: an empty queue),
+     * the given population and a full store; `crowd` fills both tiles with
+     * military or civilian units.
+     */
     function situation(item: BuildItem | null, population: number, crowd: 'none' | 'military' | 'civilian'): GameState {
       return arrange(founded, (draft) => {
-        draft.cities[cityId].production = item;
+        draft.cities[cityId].buildQueue = item === null ? [] : [item];
         draft.cities[cityId].population = population;
+        draft.cities[cityId].productionStored = 1000;
         // The starting warrior already stands in the city.
         if (crowd === 'military') placeUnit(draft, 'p1', 'scout', east);
         if (crowd === 'civilian') {
@@ -332,7 +353,7 @@ describe('turn resolution (WP2)', () => {
     }
 
     const cases: [string, GameState, 'needsPopulation' | 'noRoom' | null][] = [
-      ['nothing chosen', situation(null, 1, 'military'), null],
+      ['an empty queue', situation(null, 1, 'military'), null],
       ['warrior, room next door', situation(unit('warrior'), 1, 'none'), null],
       ['warrior, both tiles hold military units', situation(unit('warrior'), 1, 'military'), 'noRoom'],
       ['warrior, both tiles hold civilians (no matter)', situation(unit('warrior'), 1, 'civilian'), null],
@@ -341,26 +362,34 @@ describe('turn resolution (WP2)', () => {
       ['settler, two citizens', situation(unit('settler'), 2, 'none'), null],
       ['settler, two citizens, both tiles hold civilians', situation(unit('settler'), 2, 'civilian'), 'noRoom'],
       ['settler, two citizens, both tiles hold military units (no matter)', situation(unit('settler'), 2, 'military'), null],
+      ['worker, both tiles hold civilians', situation(unit('worker'), 1, 'civilian'), 'noRoom'],
+      ['worker, one citizen (it takes none)', situation(unit('worker'), 1, 'none'), null],
     ];
 
     for (const [what, state, expected] of cases) {
       const city = state.cities[cityId];
-      expect(productionBlocked(state, city), what).toBe(expected);
+      expect(buildPlan(state, city).held, what).toBe(expected);
       // The view tells the owner the same thing.
-      expect(buildPlayerView(state, 'p1').cities[0].own?.productionBlocked, what).toBe(expected);
+      expect(buildPlayerView(state, 'p1').cities[0].own?.held, what).toBe(expected);
 
-      // It does not look at what is stored: the answer is the same for a full store...
-      const paidFor = arrange(state, (draft) => {
-        draft.cities[cityId].productionStored = 1000;
+      // "Held" is only ever said of an entry that is paid for: with an empty
+      // store nothing waits yet, whatever stands in the way.
+      const unpaid = arrange(state, (draft) => {
+        draft.cities[cityId].productionStored = 0;
       });
-      expect(productionBlocked(paidFor, paidFor.cities[cityId]), what).toBe(expected);
+      expect(buildPlan(unpaid, unpaid.cities[cityId]).held, what).toBeNull();
 
-      // ...and with a full store, the turn completes the item exactly when nothing blocks it.
-      const before = unitsOf(paidFor, 'p1').length;
-      const after = endTurnForAll(paidFor);
+      // With the full store, the turn completes the entry exactly when nothing holds it.
+      const before = unitsOf(state, 'p1').length;
+      const after = endTurnForAll(state);
       const builtSomething = unitsOf(after.state, 'p1').length > before;
-      expect(builtSomething, what).toBe(city.production !== null && expected === null);
+      expect(builtSomething, what).toBe(city.buildQueue.length > 0 && expected === null);
       expect(eventTypes(after.events).includes('unitBuilt'), what).toBe(builtSomething);
+      // A held entry stays first, and the store is not spent.
+      if (expected !== null) {
+        expect(after.state.cities[cityId].buildQueue, what).toEqual(city.buildQueue);
+        expect(after.state.cities[cityId].productionStored, what).toBeGreaterThanOrEqual(1000);
+      }
     }
   });
 
@@ -402,7 +431,7 @@ describe('turn resolution (WP2)', () => {
     const thebes = cityOn(state, at(map, 12, 5));
     state = arrange(state, (draft) => {
       for (const city of Object.values(draft.cities)) {
-        city.production = unit('scout');
+        city.buildQueue = [unit('scout')];
         city.productionStored = UNITS.scout.cost;
         city.foodStored = foodToGrow(1);
       }
@@ -429,7 +458,7 @@ describe('turn resolution (WP2)', () => {
     // The production added in the turn a city grows is that of the smaller city.
     const { state, rome } = romeGame();
     const before = cityEconomy(state, rome);
-    const growing = withCity(act(state, 'p1', { type: 'setProduction', cityId: rome.id, item: unit('settler') }), rome.id, {
+    const growing = withCity(act(state, 'p1', { type: 'setBuildQueue', cityId: rome.id, queue: [unit('settler')] }), rome.id, {
       foodStored: foodToGrow(1),
     });
     const after = endTurnForAll(growing).state;
@@ -439,11 +468,16 @@ describe('turn resolution (WP2)', () => {
   });
 
   it('resolveTurn does not modify its input', () => {
+    // A city about to grow and to complete the first of two entries, and a
+    // Worker one turn away from finishing a farm: every step has work to do.
     const { state, rome } = romeGame();
+    const worker = workerOn(state, 'p1', at(state.map, 2, 5));
+    const working = act(worker.state, 'p1', { type: 'startJob', unitId: worker.workerId, improvement: 'farm' });
     const busy = deepFreeze(
-      withCity(act(state, 'p1', { type: 'setProduction', cityId: rome.id, item: unit('scout') }), rome.id, {
-        productionStored: UNITS.scout.cost,
-        foodStored: foodToGrow(1),
+      arrange(act(working, 'p1', { type: 'setBuildQueue', cityId: rome.id, queue: [unit('scout'), unit('warrior')] }), (draft) => {
+        draft.cities[rome.id].productionStored = UNITS.scout.cost;
+        draft.cities[rome.id].foodStored = foodToGrow(1);
+        draft.units[worker.workerId].job = { improvement: 'farm', turnsWorked: IMPROVEMENTS.farm.turns - 1 };
       }),
     );
     const before = JSON.stringify(busy);
@@ -455,7 +489,14 @@ describe('turn resolution (WP2)', () => {
     expect(JSON.stringify(busy)).toBe(before);
     expect(resolved.state).not.toBe(busy);
     expect(resolved.state.turn).toBe(busy.turn + 1);
-    expect(eventTypes(resolved.events)).toEqual(['cityGrew', 'unitBuilt', 'turnStarted']);
+    expect(eventTypes(resolved.events)).toEqual(['cityGrew', 'unitBuilt', 'improvementBuilt', 'turnStarted']);
+    expect(resolved.state.cities[rome.id].buildQueue).toEqual([unit('warrior')]);
+    expect(resolved.state.map.tiles[at(state.map, 2, 5)].improvement).toBe('farm');
+    expect(resolved.state.units[worker.workerId].job).toBeNull();
+    // Nothing of the result is an object of the input.
+    expect(resolved.state.cities[rome.id]).not.toBe(busy.cities[rome.id]);
+    expect(resolved.state.units[worker.workerId]).not.toBe(busy.units[worker.workerId]);
+    expect(resolved.state.map.tiles[at(state.map, 2, 5)]).not.toBe(busy.map.tiles[at(state.map, 2, 5)]);
     expect(checkInvariants(resolved.state)).toEqual([]);
     // The same input gives the same output, every time.
     expect(JSON.stringify(resolveTurn(busy))).toBe(JSON.stringify(resolved));
@@ -464,7 +505,7 @@ describe('turn resolution (WP2)', () => {
   it('lets the new unit see: tiles in its sight are explored when the turn has resolved', () => {
     // The warrior holds the city, so the new scout appears next door and sees one tile further than the city did.
     const { state, rome } = romeGame();
-    const ready = withCity(act(state, 'p1', { type: 'setProduction', cityId: rome.id, item: unit('scout') }), rome.id, {
+    const ready = withCity(act(state, 'p1', { type: 'setBuildQueue', cityId: rome.id, queue: [unit('scout')] }), rome.id, {
       productionStored: UNITS.scout.cost,
     });
     const resolved = endTurnForAll(ready).state;

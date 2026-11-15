@@ -217,7 +217,7 @@ describe('hostile input (WP3)', () => {
       expect(message.events).toEqual([]);
     }
     expect(bystander.view?.units).toEqual([
-      { id: fakeUnitId('p2'), type: 'warrior', owner: 'p2', tile: 0, own: { movesLeft: 2, foundCityError: 'cannotFoundCity' } },
+      { id: fakeUnitId('p2'), type: 'warrior', owner: 'p2', tile: 0, own: { movesLeft: 2, foundCityError: 'cannotFoundCity', job: null, jobOptions: [] } },
     ]);
     // And the bystander can still play.
     expect(await bystander.actOk(1, { type: 'moveUnit', unitId: fakeUnitId('p2'), path: [7] })).toHaveLength(1);

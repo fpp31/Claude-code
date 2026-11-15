@@ -45,8 +45,8 @@ export const ASCII_LEGEND: Record<string, { terrain: TerrainId; feature: Feature
 
 /**
  * Builds a GameMap from rows of characters (see ASCII_LEGEND). Every tile
- * gets `cityId: null`. Throws on an unknown character, on an empty map, or
- * if the rows do not all have the same number of tiles.
+ * has `cityId: null` and `improvement: null`. Throws on an unknown character,
+ * on an empty map, or if the rows do not all have the same number of tiles.
  */
 export function mapFromAscii(rows: readonly string[]): GameMap {
   if (rows.length === 0) throw new Error('mapFromAscii: no rows');
@@ -61,7 +61,7 @@ export function mapFromAscii(rows: readonly string[]): GameMap {
     for (const character of characters) {
       const entry = ASCII_LEGEND[character];
       if (entry === undefined) throw new Error(`mapFromAscii: unknown character '${character}' in row ${y}`);
-      tiles.push({ terrain: entry.terrain, feature: entry.feature, cityId: null });
+      tiles.push({ terrain: entry.terrain, feature: entry.feature, improvement: null, cityId: null });
     }
   });
   return { width, height: rows.length, tiles };

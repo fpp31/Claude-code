@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
-import { STATE_SCHEMA } from '@domination/shared';
+import { STATE_SCHEMA, checkInvariants, createGame, migrateGameState } from '@domination/shared';
 import type { GameState } from '@domination/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ROOM_FILE_FORMAT } from '../src/roomFile';
@@ -11,6 +11,14 @@ import type { WriteCall } from '../src/storage';
 import { hashToken } from '../src/tokens';
 import { createFakeRules } from './fakeRules';
 import { cleanUp, startTestServer, temporaryFolder } from './harness';
+import {
+  PHASE_ONE_CODE,
+  phaseOneCities,
+  phaseOneSave,
+  phaseOneSaveText,
+  phaseOneSaveTextWith,
+  putPhaseOneSave,
+} from './phaseOneSave';
 
 /**
  * Saving and loading games on disk, tested on a real temporary folder.
@@ -44,6 +52,9 @@ function lobbyFile(code: string, hostName = 'Ada'): RoomFile {
     game: null,
   };
 }
+
+/** A layout number no version of the game ever wrote, and so one that nobody can convert. */
+const NO_SUCH_LAYOUT = 0;
 
 /** A room file with a started game in it (made by the fake rules; storage does not care what is inside). */
 function startedFile(code: string): RoomFile {
@@ -322,17 +333,20 @@ describe('storage (WP3)', () => {
     expect(logs.some((line) => line.includes('TOOLONG.json'))).toBe(true);
   });
 
-  it('loadAll leaves a file with a newer format, or a game with another state schema, byte-identical on disk, reports it, and does not return it', () => {
+  it('loadAll leaves a file with a newer format, or a game with another state schema that nobody can convert, byte-identical on disk, reports it, and does not return it', () => {
     const { storage, logs, roomsDir } = newStorage();
     const good = lobbyFile('AAAAA');
     storage.save(good);
 
     const newerFormat = serializeRoomFile({ ...lobbyFile('BBBBB'), format: ROOM_FILE_FORMAT + 1 }).replace('"mapSize"', '"somethingNew": 1,\n  "mapSize"');
     const newerSchema = serializeRoomFile(startedFile('CCCCC')).replace(`"schema":${STATE_SCHEMA}`, `"schema":${STATE_SCHEMA + 1}`);
-    const olderSchema = serializeRoomFile(startedFile('DDDDD')).replace(`"schema":${STATE_SCHEMA}`, `"schema":${STATE_SCHEMA - 1}`);
+    // Older than the oldest layout anybody can convert. (STATE_SCHEMA - 1 would
+    // not do: that layout is brought up to date, see the tests further down.)
+    const olderSchema = serializeRoomFile(startedFile('DDDDD')).replace(`"schema":${STATE_SCHEMA}`, `"schema":${NO_SUCH_LAYOUT}`);
     // Each replacement really happened.
     expect(newerSchema).toContain(`"schema":${STATE_SCHEMA + 1}`);
-    expect(olderSchema).toContain(`"schema":${STATE_SCHEMA - 1}`);
+    expect(olderSchema).toContain(`"schema":${NO_SUCH_LAYOUT}`);
+    expect(migrateGameState({ schema: NO_SUCH_LAYOUT })).toBeNull();
     // A game from a newer version that also has things this version does not know (a new civilization).
     const newerEverything = newerSchema.replace('"code": "CCCCC"', '"code": "EEEEE"').replace('"civ": "rome"', '"civ": "atlantis"');
     expect(newerEverything).toContain('atlantis');
@@ -358,8 +372,13 @@ describe('storage (WP3)', () => {
     const aboutSchema = logs.find((line) => line.includes('CCCCC.json'));
     expect(aboutSchema).toContain(String(STATE_SCHEMA + 1));
     expect(aboutSchema).toContain(String(STATE_SCHEMA));
-    expect(logs.some((line) => line.includes('DDDDD.json'))).toBe(true);
+    const aboutOlder = logs.find((line) => line.includes('DDDDD.json'));
+    expect(aboutOlder).toContain(`layout ${NO_SUCH_LAYOUT}`);
+    expect(aboutOlder).toContain(`layout ${STATE_SCHEMA}`);
     expect(logs.some((line) => line.includes('EEEEE.json'))).toBe(true);
+    // One line each, and none of them was called damaged.
+    expect(logs).toHaveLength(4);
+    expect(logs.every((line) => line.includes('left alone and NOT loaded'))).toBe(true);
   });
 
   it('has is true for loaded and for skipped files, false for unknown codes; a new game never gets the code of a skipped file', async () => {
@@ -401,5 +420,290 @@ describe('storage (WP3)', () => {
     expect(() => storage.remove('AAAAA')).not.toThrow();
     expect(() => storage.remove('CCCCC')).not.toThrow();
     expect(readdirSync(roomsDir)).toEqual(['BBBBB.json']);
+  });
+});
+
+/**
+ * A game that an older version of the game saved. The save is a real one:
+ * the room file the phase 1 server wrote (see phaseOneSave.ts). Its game
+ * state has layout 1; this version plays layout STATE_SCHEMA.
+ */
+describe('storage: a game saved by an older version (WP3, the phase 1 save)', () => {
+  /** A storage on a fresh data folder that holds the phase 1 save (or `text` in its place) as PHASE.json. */
+  function storageWithPhaseOneSave(text: string = phaseOneSaveText()) {
+    const made = newStorage();
+    const path = putPhaseOneSave(made.dataDir, text);
+    return { ...made, path, text };
+  }
+
+  /** The one game `loaded` holds, which must be a started one. */
+  function onlyGameOf(loaded: RoomFile[]): GameState {
+    expect(loaded).toHaveLength(1);
+    const game = loaded[0].game;
+    if (game === null) throw new Error('the loaded room has no game');
+    return game;
+  }
+
+  it('the phase 1 save is what these tests take it for: layout 1, four players, turn 29, seats p1 and p3 have ended the turn', () => {
+    const save = phaseOneSave();
+    expect(save.code).toBe(PHASE_ONE_CODE);
+    expect(save.format).toBe(ROOM_FILE_FORMAT);
+    expect(save.game.schema).toBe(1);
+    expect(save.game.schema).toBeLessThan(STATE_SCHEMA);
+    expect(save.game.turn).toBe(29);
+    expect(save.game.players.map((player) => [player.id, player.endedTurn])).toEqual([
+      ['p1', true],
+      ['p2', false],
+      ['p3', true],
+      ['p4', false],
+    ]);
+
+    // Layout 1: a city has one `production` and no queue; at least one city
+    // was building something and had production stored for it.
+    const cities = phaseOneCities();
+    expect(cities.length).toBeGreaterThan(0);
+    for (const city of cities) {
+      expect(city).toHaveProperty('production');
+      expect(city).not.toHaveProperty('buildQueue');
+    }
+    expect(cities.some((city) => city.production !== null && city.productionStored > 0)).toBe(true);
+
+    // The envelope around the game did not change with the layout of the
+    // game: today's writer gives the phase 1 file back byte for byte.
+    expect(serializeRoomFile(save as unknown as RoomFile)).toBe(phaseOneSaveText());
+  });
+
+  it('a game of an older layout is brought up to date when it is loaded; the file itself stays byte-identical until the first save', () => {
+    const { storage, logs, roomsDir, path, text } = storageWithPhaseOneSave();
+    const before = phaseOneSave();
+
+    const loaded = storage.loadAll();
+    const game = onlyGameOf(loaded);
+    expect(game.schema).toBe(STATE_SCHEMA);
+
+    // Everything around the game is as it was: code, seats, host, map size.
+    expect({ ...loaded[0], game: null }).toEqual({ ...before, game: null });
+
+    // The game is what the shared package's migration makes of the old one, and it is healthy.
+    expect(game).toEqual(migrateGameState(before.game));
+    expect(checkInvariants(game)).toEqual([]);
+
+    // In the save's own words: every city builds what it was building, with
+    // the production it had stored, and has no `production` any more.
+    const cities = phaseOneCities();
+    expect(Object.keys(game.cities)).toEqual(cities.map((city) => city.id));
+    for (const old of cities) {
+      const city = game.cities[old.id];
+      expect(city.buildQueue, old.name).toEqual(old.production === null ? [] : [old.production]);
+      expect(city.productionStored, old.name).toBe(old.productionStored);
+      expect(city, old.name).not.toHaveProperty('production');
+    }
+    // Nothing is built anywhere, nobody is at work, nobody remembers an improvement.
+    expect(game.map.tiles).toHaveLength(before.game.map.tiles.length);
+    expect(game.map.tiles.every((tile) => tile.improvement === null)).toBe(true);
+    expect(Object.keys(game.units)).toEqual(Object.keys(before.game.units));
+    expect(Object.values(game.units).every((unit) => unit.job === null)).toBe(true);
+    for (const player of game.players) {
+      const remembered = Object.values(player.knowledge.remembered);
+      expect(remembered.length).toBeGreaterThan(0);
+      expect(remembered.every((seen) => seen.improvement === null)).toBe(true);
+    }
+    // And the game goes on in the middle of the turn it was saved in.
+    expect(game.turn).toBe(before.game.turn);
+    expect(game.players.map((player) => player.endedTurn)).toEqual(before.game.players.map((player) => player.endedTurn));
+
+    // The file was not rewritten, not moved, and no copy of it was made.
+    expect(readFileSync(path).equals(Buffer.from(text, 'utf8'))).toBe(true);
+    expect(readdirSync(roomsDir)).toEqual([`${PHASE_ONE_CODE}.json`]);
+
+    // One log line, naming the file and both layout numbers.
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain(`${PHASE_ONE_CODE}.json`);
+    expect(logs[0]).toContain(`layout ${before.game.schema}`);
+    expect(logs[0]).toContain(`layout ${STATE_SCHEMA}`);
+    expect(logs[0]).not.toContain('NOT loaded');
+  });
+
+  it('the first save after that writes the new layout', () => {
+    const { storage, dataDir, roomsDir, path, text } = storageWithPhaseOneSave();
+    const loaded = storage.loadAll();
+    onlyGameOf(loaded);
+
+    storage.save(loaded[0]);
+
+    const written = readFileSync(path, 'utf8');
+    expect(written).not.toBe(text);
+    expect(written).toContain(`"schema":${STATE_SCHEMA}`);
+    expect(written).not.toMatch(new RegExp(`"schema":${phaseOneSave().game.schema}\\b`));
+    expect(written).toContain('"buildQueue":');
+    expect(written).not.toContain('"production":');
+    expect(text).toContain('"production":');
+    expect(JSON.parse(written)).toEqual(loaded[0]);
+    // The lines a person edits by hand (the seats above all) are as phase 1 wrote them.
+    const upToTheGame = (save: string): string => save.slice(0, save.indexOf('  "game"'));
+    expect(upToTheGame(written)).toBe(upToTheGame(text));
+    // The old file was replaced; nothing is kept of it.
+    expect(readdirSync(roomsDir)).toEqual([`${PHASE_ONE_CODE}.json`]);
+
+    // A restart now finds an ordinary save of today: the same game, and nothing to report.
+    const afterRestart = newStorage(dataDir);
+    expect(afterRestart.storage.loadAll()).toEqual(loaded);
+    expect(afterRestart.logs).toEqual([]);
+    expect(readFileSync(path, 'utf8')).toBe(written);
+  });
+
+  it('loading twice before any save gives the same game', () => {
+    const { storage, logs, dataDir, path, text } = storageWithPhaseOneSave();
+
+    const first = storage.loadAll();
+    const second = storage.loadAll();
+    const afterRestart = newStorage(dataDir).storage.loadAll();
+    onlyGameOf(first);
+
+    expect(second).toEqual(first);
+    expect(afterRestart).toEqual(first);
+    // As text too: not even the order of the fields differs.
+    expect(serializeRoomFile(second[0])).toBe(serializeRoomFile(first[0]));
+    expect(serializeRoomFile(afterRestart[0])).toBe(serializeRoomFile(first[0]));
+    // Each load makes a game of its own: changing one cannot reach another.
+    expect(second[0].game).not.toBe(first[0].game);
+
+    // Still the file phase 1 wrote, and each load said that it converted it.
+    expect(readFileSync(path, 'utf8')).toBe(text);
+    expect(logs).toHaveLength(2);
+    expect(logs[1]).toBe(logs[0]);
+  });
+
+  it('a game whose older layout cannot be converted is left exactly as it is, reported, and not loaded', () => {
+    const damaged: [what: string, text: string, says: string][] = [
+      // The phase 1 save with its game's cities taken out.
+      ['no cities', phaseOneSaveTextWith((game) => void delete game.cities), 'cities is not an object'],
+      ['a tile that is no tile', phaseOneSaveTextWith((game) => void (game.map.tiles[3] = null as never)), 'tile 3 is not an object'],
+      ['players that are no list', phaseOneSaveTextWith((game) => void (game.players = {} as never)), 'is not a list'],
+    ];
+    for (const [what, text, says] of damaged) {
+      // The damage really is in the file, which is still good JSON and still says layout 1.
+      expect(text, what).not.toBe(phaseOneSaveText());
+      expect(JSON.parse(text).game.schema, what).toBe(phaseOneSave().game.schema);
+      const { storage, logs, roomsDir, path } = storageWithPhaseOneSave(text);
+
+      expect(storage.loadAll(), what).toEqual([]);
+
+      // Neither changed nor moved aside as damaged: the right version of the game may still read it.
+      expect(readFileSync(path, 'utf8'), what).toBe(text);
+      expect(readdirSync(roomsDir), what).toEqual([`${PHASE_ONE_CODE}.json`]);
+      expect(storage.has(PHASE_ONE_CODE), what).toBe(true);
+
+      // Reported once: the file, both layout numbers, and what was wrong.
+      expect(logs, what).toHaveLength(1);
+      expect(logs[0]).toContain(`${PHASE_ONE_CODE}.json`);
+      expect(logs[0]).toContain('left alone and NOT loaded');
+      expect(logs[0]).toContain(`layout ${phaseOneSave().game.schema}`);
+      expect(logs[0]).toContain(`layout ${STATE_SCHEMA}`);
+      expect(logs[0], what).toContain(says);
+    }
+  });
+
+  it('a game that converts into an unhealthy state is left exactly as it is, reported with its first problem, and not loaded; its code stays reserved', async () => {
+    const unhealthy: [what: string, text: string][] = [
+      // The phase 1 save with one unit put on a tile that is not on the map.
+      [
+        'a unit off the map',
+        phaseOneSaveTextWith((game) => {
+          const unit = Object.values(game.units)[0];
+          unit.tile = game.map.tiles.length + 5;
+        }),
+      ],
+      // A city that was building something this version does not know.
+      [
+        'a city building a dragon',
+        phaseOneSaveTextWith((game) => {
+          const city = Object.values(game.cities ?? {})[0];
+          city.production = { kind: 'unit', unitType: 'dragon' as never };
+        }),
+      ],
+    ];
+    for (const [what, text] of unhealthy) {
+      // The conversion itself goes through; it is the game that comes out of it that is not well.
+      const converted = migrateGameState(JSON.parse(text).game);
+      if (converted === null) throw new Error(`${what}: the save was not converted`);
+      const problems = checkInvariants(converted);
+      expect(problems.length, what).toBeGreaterThan(0);
+
+      const { storage, logs, dataDir, roomsDir, path } = storageWithPhaseOneSave(text);
+      expect(storage.loadAll(), what).toEqual([]);
+
+      // Not rewritten (the first save would put the unhealthy game over what
+      // phase 1 wrote), and not moved aside either.
+      expect(readFileSync(path, 'utf8'), what).toBe(text);
+      expect(readdirSync(roomsDir), what).toEqual([`${PHASE_ONE_CODE}.json`]);
+
+      expect(logs, what).toHaveLength(1);
+      expect(logs[0]).toContain(`${PHASE_ONE_CODE}.json`);
+      expect(logs[0]).toContain('left alone and NOT loaded');
+      expect(logs[0]).toContain(`layout ${phaseOneSave().game.schema}`);
+      expect(logs[0]).toContain(`layout ${STATE_SCHEMA}`);
+      expect(logs[0], what).toContain(`${problems.length} problem(s)`);
+      expect(logs[0], what).toContain(problems[0]);
+
+      // Its code stays reserved: no new game is ever saved over the file.
+      expect(storage.has(PHASE_ONE_CODE), what).toBe(true);
+
+      // A server on that folder starts without the game, and still does not touch the file.
+      const server = await startTestServer({ dataDir });
+      expect(server.logs).toContain('Saved games loaded: 0.');
+      const ada = await server.connect('a'.repeat(32));
+      ada.send({ type: 'joinGame', code: PHASE_ONE_CODE, name: null });
+      await ada.expectError('noSuchGame');
+      await ada.createGame('Ada');
+      expect(readFileSync(path, 'utf8'), what).toBe(text);
+      expect(readdirSync(roomsDir).sort(), what).toHaveLength(2);
+      await cleanUp();
+    }
+  });
+
+  it('an older save that was edited by hand: a tokenHash set to null loads and is converted; a seat renamed by mistake is moved aside as damaged, byte for byte', () => {
+    // The one edit the README describes, made in a save of the older version.
+    const hash = hashToken('a'.repeat(32));
+    const freed = phaseOneSaveText().replace(`"tokenHash": "${hash}"`, '"tokenHash": null');
+    expect(freed).not.toBe(phaseOneSaveText());
+    const good = storageWithPhaseOneSave(freed);
+    const loaded = good.storage.loadAll();
+    expect(onlyGameOf(loaded).schema).toBe(STATE_SCHEMA);
+    expect(loaded[0].seats.map((seat) => seat.tokenHash)).toEqual([null, ...phaseOneSave().seats.slice(1).map((seat) => seat.tokenHash)]);
+    expect(good.logs).toHaveLength(1);
+    expect(readFileSync(good.path, 'utf8')).toBe(freed);
+
+    // A slip of the keyboard in the seats: the game inside converts and is
+    // healthy, but nobody could ever be seat p5. Like every damaged save it
+    // is moved aside, with the text the older version wrote plus the slip.
+    const slipped = phaseOneSaveText().replace('"playerId": "p4"', '"playerId": "p5"');
+    expect(slipped).not.toBe(phaseOneSaveText());
+    const bad = storageWithPhaseOneSave(slipped);
+    expect(bad.storage.loadAll()).toEqual([]);
+    expect(readdirSync(bad.roomsDir)).toEqual([`${PHASE_ONE_CODE}.json.corrupt`]);
+    expect(readFileSync(`${bad.path}.corrupt`, 'utf8')).toBe(slipped);
+    expect(bad.logs.find((line) => line.includes('is damaged'))).toContain('seat p5');
+    expect(bad.storage.has(PHASE_ONE_CODE)).toBe(true);
+  });
+
+  it('only a converted game must pass the health check: a game of the current layout is loaded as it is, well or not', () => {
+    // A real game of today with a unit on a tile that is not on the map.
+    const file = lobbyFile('AAAAA');
+    const game = createGame({
+      seed: 'storage-test',
+      settings: { mapSize: 'small', turnMode: 'simultaneous' },
+      players: file.seats.map((seat) => ({ id: seat.playerId, name: seat.name, civ: seat.civ })),
+    });
+    Object.values(game.units)[0].tile = game.map.tiles.length + 5;
+    expect(game.schema).toBe(STATE_SCHEMA);
+    expect(checkInvariants(game).length).toBeGreaterThan(0);
+
+    const { storage, logs } = newStorage();
+    storage.save({ ...file, game });
+
+    // Storage hands it over without a word; the room manager is the one that warns about it.
+    expect(storage.loadAll()).toEqual([{ ...file, game }]);
+    expect(logs).toEqual([]);
   });
 });

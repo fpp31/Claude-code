@@ -12,6 +12,7 @@
  */
 
 import type { CivId } from './data/civs';
+import type { ImprovementId } from './data/improvements';
 import type { MapSizeId } from './data/rules';
 import type { FeatureId, TerrainId } from './data/terrain';
 import type { UnitTypeId } from './data/units';
@@ -48,6 +49,13 @@ export interface Tile {
   /** The raised object on the ground, if any. Only on grounds listed in FEATURES[feature].allowedOn. */
   feature: FeatureId | null;
   /**
+   * What a Worker has built on the tile (a farm, a mine), or null. At most
+   * one per tile, only where improvementFits allows it, and never on the
+   * tile a city stands on. It changes only when a job is finished
+   * (resolveTurn, step runJobs) and when a city is founded on the tile.
+   */
+  improvement: ImprovementId | null;
+  /**
    * The city whose territory this tile belongs to, or null if nobody owns it.
    * This is the single source of truth for territory; the tile's owner is the
    * owner of that city.
@@ -66,6 +74,18 @@ export interface GameMap {
 // Units and cities
 // ---------------------------------------------------------------------------
 
+/** The work a unit is doing on the tile it stands on. */
+export interface UnitJob {
+  /** What is being built. */
+  improvement: ImprovementId;
+  /**
+   * Turn resolutions spent on it so far: 0 from the moment the job is
+   * started until that turn resolves. The job is finished when this reaches
+   * IMPROVEMENTS[improvement].turns.
+   */
+  turnsWorked: number;
+}
+
 export interface Unit {
   id: UnitId;
   type: UnitTypeId;
@@ -73,6 +93,14 @@ export interface Unit {
   tile: TileIndex;
   /** Movement points left this turn; reset to UNITS[type].moves when a turn resolves. */
   movesLeft: number;
+  /**
+   * The work this unit is doing on its tile, or null. Only units whose type
+   * has `canImprove` ever have one. A unit with a job does not move
+   * (moveUnit answers 'unitBusy') until the job is finished or stopped; its
+   * `movesLeft` is counted as for any unit and simply cannot be used
+   * meanwhile. See rules/improvements.ts.
+   */
+  job: UnitJob | null;
   // Phase 2 adds: hit points, multi-turn orders.
 }
 
@@ -89,9 +117,23 @@ export interface City {
   population: number;
   /** Food saved towards the next population point (never negative). */
   foodStored: number;
-  /** What the city is building. Stays selected after a unit is completed. null = nothing chosen yet. */
-  production: BuildItem | null;
-  /** Production saved towards the current item. Kept when the item is changed. */
+  /**
+   * What the city builds, in order. The first entry is what it is building
+   * now; when that is completed it leaves the list and the next entry takes
+   * its place. The same item may be listed more than once. An empty list
+   * means the city builds nothing, and each turn's production is then lost.
+   * Never longer than RULES.maxQueueLength. Every entry is an object the
+   * engine made itself, with exactly the fields of BuildItem (see
+   * rules/setBuildQueue.ts).
+   */
+  buildQueue: BuildItem[];
+  /**
+   * Production the city has saved: ONE store, whatever is in the queue. It
+   * pays for the first entry of the queue. It is kept when entries are
+   * added, removed or moved, and while the queue is empty. It can be larger
+   * than the cost of the first entry while that entry is waiting (see
+   * runCityTurn in rules/city.ts and OwnCityDetail.held).
+   */
   productionStored: number;
   // Territory is NOT stored here: a city owns the tiles whose `cityId` is its id.
   // Worked tiles and yields are NOT stored either: they are derived by cityEconomy().
@@ -112,7 +154,8 @@ export interface CityPublic {
 
 /**
  * What a player last saw on a tile that can change over time. Stored only for
- * tiles where there is something to remember (an owner or a city).
+ * tiles where there is something to remember (an owner, a city or an
+ * improvement).
  *
  * Rule for later phases: every per-tile fact that can change (improvements,
  * roads, ...) gets a last-seen twin here, so fogged tiles never show the truth.
@@ -122,13 +165,15 @@ export interface RememberedTile {
   owner: PlayerId | null;
   /** The city standing on the tile when last seen. */
   city: CityPublic | null;
+  /** The improvement on the tile when last seen. */
+  improvement: ImprovementId | null;
 }
 
 /** A player's fog-of-war memory. Lives on the server so it survives reconnects and new devices. */
 export interface PlayerKnowledge {
   /** One entry per tile: 1 = the player has seen this tile at some point, 0 = never. Never goes back to 0. */
   explored: number[];
-  /** Last-seen owner/city, keyed by tile index. Only tiles that had an owner or a city when last seen. */
+  /** Last-seen owner/city/improvement, keyed by tile index. Only tiles that had an owner, a city or an improvement when last seen. */
   remembered: Record<TileIndex, RememberedTile>;
 }
 
@@ -169,8 +214,14 @@ export interface GameSettings {
  * The server refuses to load a game whose `schema` it cannot bring to this
  * number (see server/src/storage.ts), so an old or newer save is never
  * played, and then overwritten, with the wrong layout.
+ *
+ * Layouts so far:
+ *   1  phase 1.
+ *   2  City.production (one item or null) became City.buildQueue (a list);
+ *      Tile.improvement, Unit.job and RememberedTile.improvement were added.
+ * The migrations live in stateMigrations.ts.
  */
-export const STATE_SCHEMA = 1;
+export const STATE_SCHEMA = 2;
 
 export interface GameState {
   /** Always STATE_SCHEMA for states made by this code. */

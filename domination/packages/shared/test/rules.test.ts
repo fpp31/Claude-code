@@ -10,7 +10,7 @@ import {
   newUnitId,
   seedRng,
 } from '../src/index';
-import type { Action, GameSetup, GameState, MapGenerator } from '../src/index';
+import type { Action, BuildItem, GameSetup, GameState, MapGenerator } from '../src/index';
 import { mapFromAscii } from '../src/testing';
 import {
   MEADOW,
@@ -22,11 +22,13 @@ import {
   fixedMapGenerator,
   foundCityAt,
   newGame,
+  queueOf,
   refusal,
   send,
   setupFor,
   unitOf,
   unitsOf,
+  workerOn,
 } from './rulesKit';
 
 /**
@@ -35,7 +37,9 @@ import {
  *
  * The other parts live next to this file, one per subject:
  *   rulesMove.test.ts        moving units, reachable tiles, the two boards
- *   rulesCity.test.ts        founding cities, the city economy, production
+ *   rulesCity.test.ts        founding cities, the city economy, citizens
+ *   rulesQueue.test.ts       the build queue: the action, the turn, the forecast
+ *   rulesJobs.test.ts        Workers: starting and stopping a job, the turn
  *   rulesTurn.test.ts        ending and resolving a turn
  *   rulesInvariants.test.ts  the health check for game states
  *   rulesWholeGame.test.ts   long random games (robustness and determinism)
@@ -219,7 +223,10 @@ describe('applyAction: common checks (WP2)', () => {
   }
 
   it('never modifies the state it is given (accepted, rejected and no-op actions)', () => {
-    const state = deepFreeze(gameWithCity());
+    // A Worker stands on Rome's land, one tile west of the city, ready to work.
+    const withCity = gameWithCity();
+    const { state: withWorker, workerId } = workerOn(withCity, 'p1', at(withCity.map, 2, 5));
+    const state = deepFreeze(withWorker);
     const before = JSON.stringify(state);
     const warrior = unitOf(state, 'p1', 'warrior');
     const foreignWarrior = unitOf(state, 'p2', 'warrior');
@@ -229,7 +236,8 @@ describe('applyAction: common checks (WP2)', () => {
     const accepted: [string, Action][] = [
       ['p1', { type: 'moveUnit', unitId: warrior.id, path: [east] }],
       ['p2', { type: 'foundCity', unitId: unitOf(state, 'p2', 'settler').id }],
-      ['p1', { type: 'setProduction', cityId: city.id, item: { kind: 'unit', unitType: 'warrior' } }],
+      ['p1', { type: 'setBuildQueue', cityId: city.id, queue: queueOf('warrior', 'worker') }],
+      ['p1', { type: 'startJob', unitId: workerId, improvement: 'farm' }],
       ['p1', { type: 'endTurn' }],
     ];
     for (const [playerId, action] of accepted) {
@@ -249,16 +257,39 @@ describe('applyAction: common checks (WP2)', () => {
       ['p1', { type: 'moveUnit', unitId: foreignWarrior.id, path: [east] }],
       ['p1', { type: 'moveUnit', unitId: warrior.id, path: [] }],
       ['p1', { type: 'foundCity', unitId: warrior.id }],
-      ['p2', { type: 'setProduction', cityId: city.id, item: { kind: 'unit', unitType: 'warrior' } }],
+      ['p2', { type: 'setBuildQueue', cityId: city.id, queue: queueOf('warrior') }],
+      ['p1', { type: 'setBuildQueue', cityId: city.id, queue: [{ kind: 'unit', unitType: 'dragon' } as unknown as BuildItem] }],
+      ['p1', { type: 'startJob', unitId: workerId, improvement: 'mine' }],
+      ['p2', { type: 'stopJob', unitId: workerId }],
     ];
     for (const [playerId, action] of rejected) {
       expect(send(state, playerId, action).ok, action.type).toBe(false);
       expect(JSON.stringify(state)).toBe(before);
     }
 
-    const noOp = send(state, 'p1', { type: 'cancelEndTurn' });
-    expect(noOp.ok && !noOp.changed).toBe(true);
-    expect(JSON.stringify(state)).toBe(before);
+    const noOps: Action[] = [
+      { type: 'cancelEndTurn' },
+      { type: 'setBuildQueue', cityId: city.id, queue: [] },
+      { type: 'stopJob', unitId: workerId },
+    ];
+    for (const action of noOps) {
+      const noOp = send(state, 'p1', action);
+      expect(noOp.ok && !noOp.changed, action.type).toBe(true);
+      expect(JSON.stringify(state)).toBe(before);
+    }
+
+    // The same for a state with a queue and a job in it (stopJob is a real change there).
+    const busy = deepFreeze(
+      act(act(state, 'p1', { type: 'setBuildQueue', cityId: city.id, queue: queueOf('scout') }), 'p1', {
+        type: 'startJob', unitId: workerId, improvement: 'farm',
+      }),
+    );
+    const busyBefore = JSON.stringify(busy);
+    const stopped = send(busy, 'p1', { type: 'stopJob', unitId: workerId });
+    expect(stopped.ok && stopped.changed).toBe(true);
+    if (stopped.ok) expect(stopped.state.units[workerId]).not.toBe(busy.units[workerId]);
+    expect(codeOf(send(busy, 'p1', { type: 'moveUnit', unitId: workerId, path: [at(busy.map, 1, 5)] }))).toBe('unitBusy');
+    expect(JSON.stringify(busy)).toBe(busyBefore);
   });
 
   it('rejects an unknown player or an unknown action type with badAction', () => {
@@ -281,8 +312,23 @@ describe('applyAction: common checks (WP2)', () => {
       { type: 'moveUnit', unitId: warrior.id, path: 'east' },
       { type: 'moveUnit', unitId: 7, path: [] },
       { type: 'foundCity' },
-      { type: 'setProduction', cityId: 'c1_x', item: null },
-      { type: 'setProduction', cityId: 'c1_x', item: 'warrior' },
+      { type: 'setBuildQueue', cityId: 'c1_x' },
+      { type: 'setBuildQueue', cityId: 'c1_x', queue: null },
+      { type: 'setBuildQueue', cityId: 'c1_x', queue: 'warrior' },
+      { type: 'setBuildQueue', cityId: 'c1_x', queue: {} },
+      { type: 'setBuildQueue', cityId: 7, queue: [] },
+      { type: 'setBuildQueue', queue: [] },
+      { type: 'startJob', unitId: warrior.id },
+      { type: 'startJob', unitId: warrior.id, improvement: 5 },
+      { type: 'startJob', unitId: warrior.id, improvement: null },
+      { type: 'startJob', unitId: warrior.id, improvement: ['farm'] },
+      { type: 'startJob', unitId: 7, improvement: 'farm' },
+      { type: 'startJob', improvement: 'farm' },
+      { type: 'stopJob' },
+      { type: 'stopJob', unitId: 7 },
+      { type: 'stopJob', unitId: null },
+      // The action phase 1 had is not an action any more.
+      { type: 'setProduction', cityId: 'c1_x', item: { kind: 'unit', unitType: 'warrior' } },
     ];
     for (const action of nonsense) {
       expect(refusal(state, 'p1', action as Action), JSON.stringify(action)).toBe('badAction');
@@ -324,10 +370,14 @@ describe('applyAction: common checks (WP2)', () => {
     const actions: Action[] = [
       { type: 'moveUnit', unitId: warrior.id, path: [at(start.map, 4, 5)] },
       { type: 'foundCity', unitId: warrior.id },
-      { type: 'setProduction', cityId: city.id, item: { kind: 'unit', unitType: 'scout' } },
+      { type: 'setBuildQueue', cityId: city.id, queue: queueOf('scout') },
+      { type: 'startJob', unitId: warrior.id, improvement: 'farm' },
+      { type: 'stopJob', unitId: warrior.id },
       // The turn check comes before the action's own checks, whatever is wrong with the action.
       { type: 'moveUnit', unitId: 'u9_nobody', path: [] },
-      { type: 'setProduction', cityId: 'c9_nowhere', item: { kind: 'unit', unitType: 'scout' } },
+      { type: 'setBuildQueue', cityId: 'c9_nowhere', queue: queueOf('scout') },
+      { type: 'startJob', unitId: 'u9_nobody', improvement: 'farm' },
+      { type: 'stopJob', unitId: 'u9_nobody' },
     ];
     for (const action of actions) expect(refusal(ended, 'p1', action), action.type).toBe('turnAlreadyEnded');
 
@@ -340,16 +390,22 @@ describe('applyAction: common checks (WP2)', () => {
     expect(refusal(back, 'p1', actions[0])).toBeNull();
   });
 
-  it('treats a second endTurn, a needless cancelEndTurn and an unchanged setProduction as no-ops (changed false, same state object)', () => {
+  it('treats a second endTurn, a needless cancelEndTurn, an unchanged setBuildQueue, the same startJob again and a needless stopJob as no-ops (changed false, same state object)', () => {
     const start = gameWithCity();
     const city = Object.values(start.cities)[0];
-    const building = act(start, 'p1', { type: 'setProduction', cityId: city.id, item: { kind: 'unit', unitType: 'scout' } });
+    const warrior = unitOf(start, 'p1', 'warrior');
+    const { state: withWorker, workerId } = workerOn(start, 'p1', at(start.map, 2, 5));
+    const queued = act(withWorker, 'p1', { type: 'setBuildQueue', cityId: city.id, queue: queueOf('scout', 'warrior') });
+    const building = act(queued, 'p1', { type: 'startJob', unitId: workerId, improvement: 'farm' });
     const ended = act(building, 'p1', { type: 'endTurn' });
 
     const cases: [GameState, Action][] = [
       [ended, { type: 'endTurn' }],
       [building, { type: 'cancelEndTurn' }],
-      [building, { type: 'setProduction', cityId: city.id, item: { kind: 'unit', unitType: 'scout' } }],
+      [building, { type: 'setBuildQueue', cityId: city.id, queue: queueOf('scout', 'warrior') }],
+      [start, { type: 'setBuildQueue', cityId: city.id, queue: [] }],
+      [building, { type: 'startJob', unitId: workerId, improvement: 'farm' }],
+      [building, { type: 'stopJob', unitId: warrior.id }],
     ];
     for (const [state, action] of cases) {
       const result = send(state, 'p1', action);
@@ -364,11 +420,11 @@ describe('applyAction: common checks (WP2)', () => {
   it('answers a real change with changed true and a new state object', () => {
     const start = gameWithCity();
     const city = Object.values(start.cities)[0];
-    const step = actWithEvents(start, 'p1', { type: 'setProduction', cityId: city.id, item: { kind: 'unit', unitType: 'scout' } });
+    const step = actWithEvents(start, 'p1', { type: 'setBuildQueue', cityId: city.id, queue: queueOf('scout') });
     expect(step.changed).toBe(true);
     expect(step.state).not.toBe(start);
-    expect(step.events).toEqual([]); // choosing production is not news
-    expect(step.state.cities[city.id].production).toEqual({ kind: 'unit', unitType: 'scout' });
+    expect(step.events).toEqual([]); // changing a queue is not news
+    expect(step.state.cities[city.id].buildQueue).toEqual([{ kind: 'unit', unitType: 'scout' }]);
   });
 
   it('keeps cities founded by the back-door helper honest (they go through the real action)', () => {

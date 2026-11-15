@@ -7,16 +7,18 @@
  *  - keyboard commands for the controller.
  * It contains no game logic and no drawing.
  *
- * The decisions themselves live in two files without any browser in them,
- * which is what lets them be unit-tested: input/gestures.ts (tap, drag,
- * pinch, hover, wheel steps) and input/keys.ts (which key does what). This
- * file only listens and passes things on.
+ * The decisions themselves live in three files without any browser in
+ * them, which is what lets them be unit-tested: input/gestures.ts (tap,
+ * drag, pinch, hover, wheel steps), input/keys.ts (which key does what) and
+ * input/hoverInfo.ts (when the hover box appears and goes away). This file
+ * only listens and passes things on.
  */
 
 import type { Controller } from '../game/controller';
 import type { MapRenderer, ScreenPoint } from '../render/api';
 import { createPointerTracker, createWheelStepper } from './gestures';
 import type { PointerKind, PointerSample } from './gestures';
+import { createHoverInfoTimer } from './hoverInfo';
 import { focusKind, keyCommand, panDirectionOfKey } from './keys';
 import type { PanDirection } from './keys';
 
@@ -44,6 +46,19 @@ const LONGEST_FRAME_SECONDS = 0.05;
  *    the pointer leaves the canvas. Touch never hovers.
  *  - Use setPointerCapture so a drag keeps working outside the canvas.
  *
+ * THE HOVER BOX (the timer in input/hoverInfo.ts decides; this file tells it
+ * what happened, and passes its answer on as controller.onHoverInfo)
+ *  - every hover goes to the timer too, with controller.isAiming(): the box
+ *    comes when the mouse has rested on a tile, sooner right after another
+ *    box, never sooner while a unit is waiting to be sent somewhere;
+ *  - a press of any pointer on the map, Escape and the window losing the
+ *    focus take the box away until the mouse is on another tile; the end of
+ *    a mouse drag lets it come back for the tile under the mouse;
+ *  - every camera move (renderer.onCameraChange) takes the box away, works
+ *    out the tile under a resting mouse again and tells the timer whether
+ *    the pointer caused the move (the wheel, a drag, a pinch) or not (the
+ *    keys, centring, the map stepping aside, a new window size).
+ *
  * WHEEL
  *  - The first wheel event after a pause is one step: renderer.zoomBy(-1 or
  *    +1, pointer position) (wheel up zooms in). So one notch of a mouse
@@ -70,7 +85,9 @@ const LONGEST_FRAME_SECONDS = 0.05;
  *  - Arrow keys and W A S D: pan while held (about 600 CSS px per second,
  *    driven by requestAnimationFrame only while a key is down).
  *  - + and - (also = and _): zoomBy(+1 / -1).
- *  - Enter: controller.toggleEndTurn().  Escape: controller.deselect().
+ *  - Enter: controller.toggleEndTurn().
+ *  - Escape: closes the hover box if one is showing, otherwise
+ *    controller.deselect().
  *  - F: controller.foundCity().
  *  - N: tile = controller.selectNextIdleUnit(); if not null, renderer.centerOn(tile).
  *
@@ -78,24 +95,54 @@ const LONGEST_FRAME_SECONDS = 0.05;
  *                browser does not scroll or zoom the page on touch)
  */
 export function attachMapInput(canvas: HTMLCanvasElement, renderer: MapRenderer, controller: Controller): () => void {
-  /** Where the mouse last was over the map, so the hover can be refreshed when the keyboard moves the map under it. */
+  /** Where the mouse last was over the map, so the tile under it can be worked out again when the map moves under it. */
   let mousePoint: ScreenPoint | null = null;
+  /** True exactly while a camera call below is made for the pointer (a drag, a pinch, the wheel). */
+  let byPointer = false;
+  /** The press that is going on has dragged the map. */
+  let dragged = false;
+
+  const hoverInfo = createHoverInfoTimer({ show: (tile) => controller.onHoverInfo(tile) });
 
   function hover(point: ScreenPoint | null): void {
     mousePoint = point;
-    controller.onTileHover(point === null ? null : renderer.tileAt(point));
+    const tile = point === null ? null : renderer.tileAt(point);
+    controller.onTileHover(tile);
+    hoverInfo.pointerOver(tile, controller.isAiming());
+  }
+
+  /** Makes a camera call that the pointer asked for, so that the camera listener below can tell it from all others. */
+  function moveCameraByPointer(move: () => void): void {
+    byPointer = true;
+    try {
+      move();
+    } finally {
+      byPointer = false;
+    }
   }
 
   const tracker = createPointerTracker({
-    pan: (dx, dy) => renderer.panBy(dx, dy),
+    pan(dx, dy) {
+      dragged = true;
+      moveCameraByPointer(() => renderer.panBy(dx, dy));
+    },
     tap(point) {
       const tile = renderer.tileAt(point);
       if (tile !== null) controller.onTileTap(tile);
     },
-    zoom: (steps, anchor) => renderer.zoomBy(steps, anchor),
+    zoom: (steps, anchor) => moveCameraByPointer(() => renderer.zoomBy(steps, anchor)),
     hover,
   });
   const wheel = createWheelStepper();
+
+  // Whenever tiles have moved on screen, whoever moved them: the tile under
+  // a resting mouse is another one now (for the outline and the path
+  // preview), and a hover box would sit at an old place.
+  const stopCameraWatch = renderer.onCameraChange(() => {
+    const tile = mousePoint === null ? null : renderer.tileAt(mousePoint);
+    controller.onTileHover(tile);
+    hoverInfo.mapMoved(tile, byPointer);
+  });
 
   // ---- Pointer ----------------------------------------------------------------
 
@@ -107,18 +154,39 @@ export function attachMapInput(canvas: HTMLCanvasElement, renderer: MapRenderer,
     return { id: event.pointerId, kind: kindOf(event), x: event.clientX, y: event.clientY };
   }
 
+  /** The tracker reports a mouse's place only while no button is down; the camera listener needs it during a drag too. */
+  function rememberMouse(event: PointerEvent): void {
+    if (kindOf(event) === 'mouse') mousePoint = { x: event.clientX, y: event.clientY };
+  }
+
   function onPointerDown(event: PointerEvent): void {
+    // Any press on the map, also a finger on a laptop's touch screen, takes the hover box away.
+    hoverInfo.dismiss();
+    dragged = false;
     try {
       // Keeps the moves coming to the canvas when a drag leaves it.
       canvas.setPointerCapture(event.pointerId);
     } catch {
       // A pointer that cannot be captured still works while it stays over the canvas.
     }
+    rememberMouse(event);
     tracker.down(sampleOf(event));
   }
 
-  const onPointerMove = (event: PointerEvent): void => tracker.move(sampleOf(event));
-  const onPointerUp = (event: PointerEvent): void => tracker.up(sampleOf(event));
+  function onPointerMove(event: PointerEvent): void {
+    rememberMouse(event);
+    tracker.move(sampleOf(event));
+  }
+
+  function onPointerUp(event: PointerEvent): void {
+    tracker.up(sampleOf(event));
+    if (dragged && kindOf(event) === 'mouse') {
+      // The map has come to rest under the mouse: its tile may have a box again.
+      dragged = false;
+      hoverInfo.dragEnded();
+    }
+  }
+
   const onPointerCancel = (event: PointerEvent): void => tracker.cancel(event.pointerId);
   const onPointerLeave = (event: PointerEvent): void => tracker.leave(kindOf(event));
   const onContextMenu = (event: Event): void => event.preventDefault();
@@ -135,7 +203,7 @@ export function attachMapInput(canvas: HTMLCanvasElement, renderer: MapRenderer,
   function onWheel(event: WheelEvent): void {
     event.preventDefault();
     const steps = wheel.add(event.deltaY, event.deltaMode, event.timeStamp);
-    if (steps !== 0) renderer.zoomBy(steps, { x: event.clientX, y: event.clientY });
+    if (steps !== 0) moveCameraByPointer(() => renderer.zoomBy(steps, { x: event.clientX, y: event.clientY }));
   }
 
   // ---- Keyboard ---------------------------------------------------------------
@@ -144,11 +212,6 @@ export function attachMapInput(canvas: HTMLCanvasElement, renderer: MapRenderer,
   const heldPanKeys = new Map<string, PanDirection>();
   let panFrame: number | null = null;
   let lastFrameTime = 0;
-
-  /** After the keyboard has moved the map, the tile under a resting mouse is another one. */
-  function refreshHover(): void {
-    if (mousePoint !== null) hover(mousePoint);
-  }
 
   function panStep(time: number): void {
     panFrame = null;
@@ -165,10 +228,7 @@ export function attachMapInput(canvas: HTMLCanvasElement, renderer: MapRenderer,
       if (direction === 'up') dy += 1;
       if (direction === 'down') dy -= 1;
     }
-    if (dx !== 0 || dy !== 0) {
-      renderer.panBy(dx * KEY_PAN_SPEED * seconds, dy * KEY_PAN_SPEED * seconds);
-      refreshHover();
-    }
+    if (dx !== 0 || dy !== 0) renderer.panBy(dx * KEY_PAN_SPEED * seconds, dy * KEY_PAN_SPEED * seconds);
     panFrame = requestAnimationFrame(panStep);
   }
 
@@ -207,23 +267,20 @@ export function attachMapInput(canvas: HTMLCanvasElement, renderer: MapRenderer,
         break;
       case 'zoom':
         renderer.zoomBy(command.steps);
-        refreshHover();
         break;
       case 'endTurn':
         controller.toggleEndTurn();
         break;
       case 'deselect':
-        controller.deselect();
+        // Escape closes the hover box if one is showing, and only that.
+        if (!hoverInfo.dismiss()) controller.deselect();
         break;
       case 'foundCity':
         controller.foundCity();
         break;
       case 'nextUnit': {
         const tile = controller.selectNextIdleUnit();
-        if (tile !== null) {
-          renderer.centerOn(tile);
-          refreshHover();
-        }
+        if (tile !== null) renderer.centerOn(tile);
         break;
       }
     }
@@ -234,8 +291,11 @@ export function attachMapInput(canvas: HTMLCanvasElement, renderer: MapRenderer,
     if (panDirectionOfKey(event.code) !== null) heldPanKeys.delete(event.code);
   }
 
-  /** When the window loses the focus the keyup never arrives: stop scrolling. */
-  const onWindowBlur = (): void => heldPanKeys.clear();
+  /** When the window loses the focus the keyup never arrives: stop scrolling. A hover box goes away with the focus. */
+  function onWindowBlur(): void {
+    heldPanKeys.clear();
+    hoverInfo.dismiss();
+  }
 
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointermove', onPointerMove);
@@ -261,6 +321,8 @@ export function attachMapInput(canvas: HTMLCanvasElement, renderer: MapRenderer,
     window.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('keyup', onKeyUp);
     window.removeEventListener('blur', onWindowBlur);
+    stopCameraWatch();
+    hoverInfo.destroy();
     heldPanKeys.clear();
     if (panFrame !== null) cancelAnimationFrame(panFrame);
     panFrame = null;

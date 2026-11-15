@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  IMPROVEMENTS,
+  RULES,
   applyViewPatch,
   buildPlayerView,
   diffViews,
@@ -8,7 +10,7 @@ import {
   tileMoveCost,
 } from '../src/index';
 import type { Action, GameState, PlayerId, PlayerView, TileIndex } from '../src/index';
-import { arrange, at, deepFreeze, newGame, placeUnit, send, tamper, unitOf } from './rulesKit';
+import { arrange, at, deepFreeze, improve, newGame, placeUnit, queueOf, send, tamper, unitOf } from './rulesKit';
 import { LONG_TEST, WILDS, WILDS_STARTS, playRandomGame } from './rulesRandomPlay';
 import { inSight, observe, startOracle, viewProblems } from './visibilityOracle';
 import { borderScene, fogScene, scoutSteps } from './visibilityScenes';
@@ -117,7 +119,9 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
       expectSameView(changed, baseline, `terrain of never-seen tile ${tile}`);
     }
     const allChanged = tamper(state, (draft) => {
-      for (const tile of neverSeen) draft.map.tiles[tile] = { terrain: 'ocean', feature: null, cityId: draft.map.tiles[tile].cityId };
+      for (const tile of neverSeen) {
+        draft.map.tiles[tile] = { terrain: 'ocean', feature: null, improvement: null, cityId: draft.map.tiles[tile].cityId };
+      }
     });
     expectSameView(allChanged, baseline, 'every never-seen tile is ocean');
 
@@ -127,7 +131,7 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
     expectChangedView(tamper(state, (draft) => { draft.map.tiles[foggedTile].terrain = 'desert'; }), baseline, 'terrain of a seen tile');
   });
 
-  it('non-interference: changing a foreign city\'s food, production or stored production does not change the view', () => {
+  it('non-interference: changing a foreign city\'s build queue or stored production does not change the view', () => {
     // Once with Thebes in sight, once with Thebes remembered.
     const inSightScene = borderScene();
     const near = scoutSteps(inSightScene.state, inSightScene.scoutId, 0, 1);
@@ -142,14 +146,32 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
 
       const changed = tamper(state, (draft) => {
         draft.cities[thebesId].foodStored = 777123;
-        draft.cities[thebesId].production = { kind: 'unit', unitType: 'settler' };
+        draft.cities[thebesId].buildQueue = queueOf('settler', 'worker', 'worker');
         draft.cities[thebesId].productionStored = 888456;
       });
       expectSameView(changed, baseline, what);
       expect(JSON.stringify(buildPlayerView(changed, 'p1'))).not.toContain('777123');
       expect(JSON.stringify(buildPlayerView(changed, 'p1'))).not.toContain('888456');
-      // The owner does see those numbers.
+      // The owner does see those numbers, and the queue.
       expect(JSON.stringify(buildPlayerView(changed, 'p2'))).toContain('888456');
+      expect(buildPlayerView(changed, 'p2').cities.find((city) => city.id === thebesId)?.own?.buildQueue).toHaveLength(3);
+
+      // Not the items, not the length, not even whether there is a queue:
+      // every queue from empty to full gives p1 the same view.
+      for (let length = 0; length <= RULES.maxQueueLength; length++) {
+        const queued = tamper(state, (draft) => {
+          draft.cities[thebesId].buildQueue = Array.from({ length }, (_, index) => queueOf(index % 2 === 0 ? 'scout' : 'settler')[0]);
+          draft.cities[thebesId].productionStored = 1000 * length;
+        });
+        expectSameView(queued, baseline, `${what}, a queue of ${length}`);
+      }
+      // A queue that waits (a paid-for Settler in a city of one) is as private as any.
+      const held = tamper(state, (draft) => {
+        draft.cities[thebesId].buildQueue = queueOf('settler');
+        draft.cities[thebesId].productionStored = 30;
+      });
+      expect(buildPlayerView(held, 'p2').cities.find((city) => city.id === thebesId)?.own?.held).toBe('needsPopulation');
+      expectSameView(held, baseline, `${what}, a held queue`);
     }
 
     // Population is public while the city is in sight: there the view follows the truth.
@@ -157,6 +179,104 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
       draft.cities[inSightScene.thebes.id].population = 5;
     });
     expectChangedView(grown, buildPlayerView(near, 'p1'), 'population of a city in sight');
+    // And the viewer's own queue is in the viewer's own view.
+    const ownQueue = tamper(near, (draft) => {
+      draft.cities[inSightScene.rome.id].buildQueue = queueOf('scout');
+    });
+    expectChangedView(ownQueue, buildPlayerView(near, 'p1'), 'the queue of an own city');
+  });
+
+  it('non-interference: changing improvements on fogged and never-seen tiles does not change the view', () => {
+    const { state } = fogScene();
+    const map = state.map;
+    const baseline = buildPlayerView(state, 'p1');
+    const fogged = baseline.tiles.map((tile, index) => (tile !== null && !tile.visible ? index : -1)).filter((index) => index >= 0);
+    const neverSeen = baseline.tiles.map((tile, index) => (tile === null ? index : -1)).filter((index) => index >= 0);
+    const openGround = (tile: TileIndex): boolean => tileMoveCost(map.tiles[tile]) !== null && map.tiles[tile].feature === null;
+    expect(fogged.filter(openGround).length).toBeGreaterThan(10);
+    expect(neverSeen.filter(openGround).length).toBeGreaterThan(20);
+    // Nothing is built anywhere yet, as far as p1 knows.
+    expect(baseline.tiles.every((tile) => tile === null || tile.improvement === null)).toBe(true);
+
+    // A farm on each such tile, one at a time; then farms on all of them; then mines (on new hills) on the never-seen ones.
+    for (const tile of [...fogged, ...neverSeen].filter(openGround)) {
+      expectSameView(tamper(state, (draft) => improve(draft, tile, 'farm')), baseline, `a farm on hidden tile ${tile}`);
+    }
+    expectSameView(tamper(state, (draft) => {
+      for (const tile of [...fogged, ...neverSeen].filter(openGround)) improve(draft, tile, 'farm');
+    }), baseline, 'farms on every hidden tile');
+    expectSameView(tamper(state, (draft) => {
+      for (const tile of neverSeen.filter(openGround)) {
+        draft.map.tiles[tile].feature = 'hills';
+        improve(draft, tile, 'mine');
+      }
+    }), baseline, 'mined hills on every never-seen tile');
+
+    // A farm p1 HAS seen stays on p1's map when it is torn down out of sight,
+    // and a farm p1 saw being replaced out of sight still shows as it was.
+    const seenFarm = fogged.filter(openGround)[0];
+    const withMemory = tamper(state, (draft) => {
+      improve(draft, seenFarm, 'farm');
+      const memory = draft.players[0].knowledge.remembered;
+      memory[seenFarm] = { owner: memory[seenFarm]?.owner ?? null, city: null, improvement: 'farm' };
+    });
+    const remembering = buildPlayerView(withMemory, 'p1');
+    expect(remembering.tiles[seenFarm]).toMatchObject({ improvement: 'farm', visible: false });
+    expectSameView(tamper(withMemory, (draft) => improve(draft, seenFarm, null)), remembering, 'a remembered farm removed out of sight');
+
+    // The same on a tile in sight is noticed.
+    const inSightTile = at(map, 8, 4);
+    expect(baseline.tiles[inSightTile]).toMatchObject({ visible: true, improvement: null });
+    expectChangedView(tamper(state, (draft) => improve(draft, inSightTile, 'farm')), baseline, 'a farm on a tile in sight');
+  });
+
+  it('non-interference: giving a foreign Worker a job, in sight or hidden, or changing its turnsWorked, does not change the view', () => {
+    const scene = borderScene();
+    const map = scene.state.map;
+    // Two Workers of p2 on Theban land: one on the western edge, in sight of
+    // p1's scout, one east of Thebes, where p1 has never looked.
+    const inSightTile = at(map, 10, 5);
+    const hiddenTile = at(map, 14, 5);
+    let seenWorkerId = '';
+    let hiddenWorkerId = '';
+    const state = arrange(scene.state, (draft) => {
+      seenWorkerId = placeUnit(draft, 'p2', 'worker', inSightTile).id;
+      hiddenWorkerId = placeUnit(draft, 'p2', 'worker', hiddenTile).id;
+    });
+    const baseline = buildPlayerView(state, 'p1');
+    expect(inSight(state, 'p1')[inSightTile]).toBe(true);
+    expect(baseline.tiles[hiddenTile]).toBeNull();
+    expect(baseline.units.find((unit) => unit.id === seenWorkerId)).toEqual({
+      id: seenWorkerId, type: 'worker', owner: 'p2', tile: inSightTile, own: null,
+    });
+    expect(baseline.units.some((unit) => unit.id === hiddenWorkerId)).toBe(false);
+
+    for (const [what, workerId] of [['the Worker in sight', seenWorkerId], ['the hidden Worker', hiddenWorkerId]] as const) {
+      // Through the real action...
+      const started = send(state, 'p2', { type: 'startJob', unitId: workerId, improvement: 'farm' });
+      expect(started.ok && started.changed, what).toBe(true);
+      if (!started.ok) continue;
+      expectSameView(started.state, baseline, `${what} starts a farm`);
+      expect(filterEvents(started.events, 'p1')).toEqual([]);
+      expect(diffViews(baseline, buildPlayerView(started.state, 'p1'))).toBeNull(); // nothing at all is sent to p1
+      // ...and by hand, every count of turns the job can have, and then some.
+      for (const turnsWorked of [0, 1, IMPROVEMENTS.farm.turns - 1, IMPROVEMENTS.farm.turns, 40]) {
+        expectSameView(tamper(state, (draft) => {
+          draft.units[workerId].job = { improvement: 'farm', turnsWorked };
+        }), baseline, `${what} has worked ${turnsWorked} turns`);
+      }
+      // Stopping is as private as starting.
+      const stopped = send(started.state, 'p2', { type: 'stopJob', unitId: workerId });
+      expect(stopped.ok && stopped.changed, what).toBe(true);
+      if (stopped.ok) expectSameView(stopped.state, baseline, `${what} stops again`);
+      // The owner does see the job.
+      expect(buildPlayerView(started.state, 'p2').units.find((unit) => unit.id === workerId)?.own?.job).toEqual({
+        improvement: 'farm', turnsWorked: 0, turnsTotal: IMPROVEMENTS.farm.turns, turnsLeft: IMPROVEMENTS.farm.turns,
+      });
+    }
+
+    // What IS public about a foreign Worker in sight does show: where it stands.
+    expectChangedView(tamper(state, (draft) => { draft.units[seenWorkerId].tile = at(map, 9, 5); }), baseline, 'a foreign Worker in sight moves');
   });
 
   it('non-interference: changing ownership or cities on fogged tiles does not change the view', () => {
@@ -190,7 +310,9 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
     const foggedFreeTile = at(map, 10, 3);
     expect(baseline.tiles[foggedFreeTile]).toMatchObject({ visible: false, owner: null });
     expectSameView(tamper(state, (draft) => {
-      draft.cities.c2_secret = { id: 'c2_secret', owner: 'p2', name: 'Secret', tile: foggedFreeTile, population: 3, foodStored: 0, production: null, productionStored: 0 };
+      draft.cities.c2_secret = {
+        id: 'c2_secret', owner: 'p2', name: 'Secret', tile: foggedFreeTile, population: 3, foodStored: 0, buildQueue: [], productionStored: 0,
+      };
       draft.map.tiles[foggedFreeTile].cityId = 'c2_secret';
       for (const tile of remembered) if (tile !== thebes.tile) draft.map.tiles[tile].cityId = 'c2_secret';
     }), baseline, 'a new city on a fogged tile');
@@ -210,7 +332,7 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
     expectSameView(tamper(state, (draft) => { draft.players[1].idRng = [5, 6, 7, 8]; }), baseline, 'idRng of p2');
     expectSameView(tamper(state, (draft) => {
       draft.players[1].knowledge.explored = draft.players[1].knowledge.explored.map((flag) => 1 - flag);
-      draft.players[1].knowledge.remembered = { 5: { owner: 'p1', city: null } };
+      draft.players[1].knowledge.remembered = { 5: { owner: 'p1', city: null, improvement: 'farm' } };
     }), baseline, 'knowledge of p2');
     expectSameView(tamper(state, (draft) => { draft.players[1].citiesFounded = 40; }), baseline, 'cities founded by p2');
     // The viewer's own id stream is not in the view either (it would predict future ids).
@@ -228,6 +350,10 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
     let foreignUnitsSeen = 0;
     let rememberedCitiesSeen = 0;
     let foggedTilesSeen = 0;
+    let improvementsInSight = 0;
+    let improvementsRemembered = 0;
+    let ownJobsSeen = 0;
+    let foreignWorkersSeen = 0;
 
     const checkAllViews = (state: GameState, when: string): void => {
       for (const player of state.players) {
@@ -237,6 +363,10 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
         foreignUnitsSeen += view.units.filter((unit) => unit.owner !== player.id).length;
         rememberedCitiesSeen += view.cities.filter((city) => !city.visible).length;
         foggedTilesSeen += view.tiles.filter((tile) => tile !== null && !tile.visible).length;
+        improvementsInSight += view.tiles.filter((tile) => tile !== null && tile.visible && tile.improvement !== null).length;
+        improvementsRemembered += view.tiles.filter((tile) => tile !== null && !tile.visible && tile.improvement !== null).length;
+        ownJobsSeen += view.units.filter((unit) => unit.own !== null && unit.own.job !== null).length;
+        foreignWorkersSeen += view.units.filter((unit) => unit.owner !== player.id && unit.type === 'worker').length;
       }
     };
     checkAllViews(start, 'at the start');
@@ -258,26 +388,46 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
     expect(foreignUnitsSeen).toBeGreaterThan(100);
     expect(rememberedCitiesSeen).toBeGreaterThan(100);
     expect(foggedTilesSeen).toBeGreaterThan(10000);
+    // Workers were built and put to work, and what they built was seen, in sight and as a memory.
+    expect(ownJobsSeen).toBeGreaterThan(50);
+    expect(improvementsInSight).toBeGreaterThan(50);
+    expect(improvementsRemembered).toBeGreaterThan(20);
+    expect(foreignWorkersSeen).toBeGreaterThan(20);
   });
 
-  it('allow-list: foreign units and cities in a view have exactly the documented keys, with own === null', LONG_TEST, () => {
+  it('allow-list: every object of a view has exactly the documented keys, and foreign units and cities have own === null', LONG_TEST, () => {
     const keys = (value: object): string[] => Object.keys(value).sort();
     let foreignUnits = 0;
     let foreignCities = 0;
     let ownCities = 0;
+    let improvedTiles = 0;
+    let jobs = 0;
+    let jobOptions = 0;
+    let queueRows = 0;
 
     const checkView = (state: GameState, playerId: PlayerId): void => {
       const view = buildPlayerView(state, playerId);
       expect(keys(view)).toEqual(['cities', 'height', 'players', 'tiles', 'turn', 'units', 'width', 'you']);
       for (const tile of view.tiles) {
-        if (tile !== null) expect(keys(tile)).toEqual(['feature', 'owner', 'terrain', 'visible']);
+        if (tile === null) continue;
+        expect(keys(tile)).toEqual(['feature', 'improvement', 'owner', 'terrain', 'visible']);
+        if (tile.improvement !== null) improvedTiles += 1;
       }
       for (const player of view.players) expect(keys(player)).toEqual(['civ', 'endedTurn', 'id', 'name']);
 
       for (const unit of view.units) {
         expect(keys(unit)).toEqual(['id', 'own', 'owner', 'tile', 'type']);
         if (unit.owner === playerId) {
-          expect(keys(unit.own as object)).toEqual(['foundCityError', 'movesLeft']);
+          const own = unit.own as NonNullable<typeof unit.own>;
+          expect(keys(own)).toEqual(['foundCityError', 'job', 'jobOptions', 'movesLeft']);
+          if (own.job !== null) {
+            expect(keys(own.job)).toEqual(['improvement', 'turnsLeft', 'turnsTotal', 'turnsWorked']);
+            jobs += 1;
+          }
+          for (const option of own.jobOptions) {
+            expect(keys(option)).toEqual(['error', 'improvement', 'turns']);
+            jobOptions += 1;
+          }
         } else {
           expect(unit.own).toBeNull();
           foreignUnits += 1;
@@ -289,12 +439,16 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
           ownCities += 1;
           const own = city.own as NonNullable<typeof city.own>;
           expect(keys(own)).toEqual([
-            'buildOptions', 'foodPerTurn', 'foodStored', 'foodToGrow', 'production', 'productionBlocked',
-            'productionCost', 'productionPerTurn', 'productionStored', 'turnsLeft', 'worked',
+            'buildOptions', 'buildQueue', 'foodPerTurn', 'foodStored', 'foodToGrow', 'held',
+            'productionPerTurn', 'productionStored', 'worked',
           ]);
-          if (own.production !== null) expect(keys(own.production)).toEqual(['kind', 'unitType']);
+          for (const row of own.buildQueue) {
+            expect(keys(row)).toEqual(['cost', 'item', 'turns', 'wait']);
+            expect(keys(row.item)).toEqual(['kind', 'unitType']);
+            queueRows += 1;
+          }
           for (const option of own.buildOptions) {
-            expect(keys(option)).toEqual(['cost', 'item', 'turns']);
+            expect(keys(option)).toEqual(['addError', 'cost', 'item', 'turns', 'wait']);
             expect(keys(option.item)).toEqual(['kind', 'unitType']);
           }
         } else {
@@ -321,6 +475,11 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
     expect(foreignUnits).toBeGreaterThan(20);
     expect(foreignCities).toBeGreaterThan(20);
     expect(ownCities).toBeGreaterThan(20);
+    // The new objects were there to be looked at.
+    expect(queueRows).toBeGreaterThan(100);
+    expect(jobOptions).toBeGreaterThan(20);
+    expect(jobs).toBeGreaterThan(5);
+    expect(improvedTiles).toBeGreaterThan(5);
   });
 
   it('canary: unique marker strings placed in hidden cities, hidden unit ids and the seed never appear in JSON.stringify(view) or in filtered events', () => {
@@ -332,6 +491,15 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
     // random numbers, p2's city (id, name, private numbers) and p2's units
     // (ids). p1's scout is moved back west, so that all of Thebes' land is
     // out of its sight; p1 has never seen the city itself.
+    //
+    // Two more secrets have no number to carry a marker, so their marker is
+    // the word itself: a farm on Theban land p1 has never seen, and a hidden
+    // Worker of p2 who is building a second one (and finishes it while the
+    // test runs). p1 has no Worker and sees no improvement, so the words
+    // "farm" and "mine", and the fields of a job, have no honest reason to
+    // be in anything p1 is sent.
+    const hiddenFarm = at(map, 13, 5);
+    const hiddenSite = at(map, 14, 5);
     const marked = tamper(scene.state, (draft) => {
       draft.seed = 'CANARYSEED';
       draft.rng = [31415926, 31415927, 31415928, 31415929];
@@ -344,13 +512,18 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
         name: 'CANARYCITYNAME',
         foodStored: 16180339,
         productionStored: 14142135,
-        production: { kind: 'unit', unitType: 'scout' },
+        // A full queue of scouts: the city turns its hoard into one of them every turn of this test.
+        buildQueue: Array.from({ length: RULES.maxQueueLength }, () => queueOf('scout')[0]),
       });
       draft.cities[thebes.id] = thebes;
       for (const tile of draft.map.tiles) if (tile.cityId === oldThebesId) tile.cityId = thebes.id;
 
+      improve(draft, hiddenFarm, 'farm');
       const theirUnits = Object.values(draft.units).filter((unit) => unit.owner === 'p2');
       theirUnits.push(placeUnit(draft, 'p2', 'settler', at(map, 13, 8)));
+      const hiddenWorker = placeUnit(draft, 'p2', 'worker', hiddenSite);
+      hiddenWorker.job = { improvement: 'farm', turnsWorked: 1 };
+      theirUnits.push(hiddenWorker);
       theirUnits.forEach((unit, number) => {
         delete draft.units[unit.id];
         unit.id = `u2_CANARYUNIT${number}`;
@@ -381,11 +554,19 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
       // Short numbers could turn up by coincidence (as a tile number, say); long ones cannot.
       return secrets.filter((secret) => secret.length >= 7);
     };
+    /** The words that would give away the hidden farm, the hidden job or its completion. */
+    const jobWords = ['"farm"', '"mine"', 'turnsWorked', 'turnsLeft', 'improvementBuilt'];
     const expectClean = (game: GameState, text: string, when: string): void => {
-      for (const secret of secretsOf(game)) expect(text.includes(secret), `${secret} ${when}`).toBe(false);
+      for (const secret of [...secretsOf(game), ...jobWords]) expect(text.includes(secret), `${secret} ${when}`).toBe(false);
     };
     expect(secretsOf(state).length).toBeGreaterThan(15);
+    expect(state.map.tiles[hiddenFarm]).toMatchObject({ improvement: 'farm', cityId: 'c2_CANARYCITYID' });
+    expect(state.units.u2_CANARYUNIT1.type).toBe('settler');
+    expect(state.units.u2_CANARYUNIT2).toMatchObject({ type: 'worker', tile: hiddenSite, job: { improvement: 'farm', turnsWorked: 1 } });
+    expect(buildPlayerView(state, 'p1').tiles[hiddenFarm]).toBeNull();
+    expect(buildPlayerView(state, 'p1').tiles[hiddenSite]).toBeNull();
     expectClean(state, JSON.stringify(buildPlayerView(state, 'p1')), 'in the first view');
+    let improvementsFinished = 0;
 
     // p1 plays on for eight turns and probes with the secret ids, while
     // p2's city turns its hoard into new scouts, one per turn, out of sight.
@@ -393,9 +574,14 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
     for (let turn = 0; turn < 8; turn++) {
       const attempts: [PlayerId, Action][] = [
         ['p1', { type: 'moveUnit', unitId: 'u2_CANARYUNIT0', path: [at(map, 11, 5)] }],
-        ['p1', { type: 'foundCity', unitId: 'u2_CANARYUNIT2' }],
-        ['p1', { type: 'setProduction', cityId: 'c2_CANARYCITYID', item: { kind: 'unit', unitType: 'warrior' } }],
-        ['p1', { type: 'setProduction', cityId: scene.rome.id, item: { kind: 'unit', unitType: turn % 2 === 0 ? 'warrior' : 'scout' } }],
+        ['p1', { type: 'foundCity', unitId: 'u2_CANARYUNIT1' }],
+        ['p1', { type: 'foundCity', unitId: 'u2_CANARYUNIT9' }],
+        ['p1', { type: 'setBuildQueue', cityId: 'c2_CANARYCITYID', queue: queueOf('warrior') }],
+        ['p1', { type: 'setBuildQueue', cityId: 'c2_CANARYCITYID', queue: [] }],
+        ['p1', { type: 'setBuildQueue', cityId: scene.rome.id, queue: queueOf(turn % 2 === 0 ? 'warrior' : 'scout') }],
+        ['p1', { type: 'startJob', unitId: 'u2_CANARYUNIT2', improvement: 'farm' }],
+        ['p1', { type: 'stopJob', unitId: 'u2_CANARYUNIT2' }],
+        ['p1', { type: 'moveUnit', unitId: 'u2_CANARYUNIT2', path: [at(map, 13, 5)] }],
         ['p1', { type: 'moveUnit', unitId: warrior.id, path: [turn % 2 === 0 ? at(map, 2, 5) : at(map, 3, 5)] }],
         ['p1', { type: 'endTurn' }],
         ['p2', { type: 'endTurn' }],
@@ -404,6 +590,7 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
         const result = send(state, playerId, action);
         const when = `after ${action.type} of ${playerId} in turn ${state.turn}`;
         if (result.ok) state = result.state;
+        if (result.ok) improvementsFinished += result.events.filter((addressed) => addressed.event.type === 'improvementBuilt').length;
         // What p1 is sent: the answer to its own action, its events, its view.
         if (playerId === 'p1' && !result.ok) expectClean(state, JSON.stringify(result.error), `in the refusal ${when}`);
         if (result.ok) expectClean(state, JSON.stringify(filterEvents(result.events, 'p1')), `in p1's events ${when}`);
@@ -414,6 +601,11 @@ describe('NO LEAK: a view never contains hidden information (WP2)', () => {
 
     // The secrets were real all along: p2 has built scouts in hiding...
     expect(Object.values(state.units).filter((unit) => unit.owner === 'p2').length).toBeGreaterThan(8);
+    // ...and its Worker has finished the second farm, which p2 was told and p1 was not.
+    expect(improvementsFinished).toBe(1);
+    expect(state.map.tiles[hiddenSite].improvement).toBe('farm');
+    expect(state.units.u2_CANARYUNIT2).toMatchObject({ type: 'worker', job: null });
+    expect(buildPlayerView(state, 'p2').tiles[hiddenSite]).toMatchObject({ improvement: 'farm', visible: true });
     // ...and p2 is shown the ones that are p2's to see: its city, its units, its numbers.
     const theirs = JSON.stringify(buildPlayerView(state, 'p2'));
     for (const secret of ['CANARYCITYNAME', 'c2_CANARYCITYID', 'u2_CANARYUNIT0', String(state.cities.c2_CANARYCITYID.productionStored)]) {

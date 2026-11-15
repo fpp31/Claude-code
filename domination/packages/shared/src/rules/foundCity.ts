@@ -42,13 +42,15 @@ export function foundCity(state: GameState, playerId: PlayerId, action: FoundCit
     tile,
     population: 1,
     foodStored: 0,
-    production: null,
+    buildQueue: [],
     productionStored: 0,
   };
 
   // Its land: the centre always (even if another of the player's own cities
-  // owned it), and around it only what nobody owns yet.
+  // owned it), and around it only what nobody owns yet. Whatever was built
+  // on the centre is gone: the tile under a city never carries an improvement.
   draft.map.tiles[tile].cityId = cityId;
+  draft.map.tiles[tile].improvement = null;
   for (const near of tilesInRange(tile, RULES.cityClaimRadius, draft.map)) {
     if (draft.map.tiles[near].cityId === null) draft.map.tiles[near].cityId = cityId;
   }

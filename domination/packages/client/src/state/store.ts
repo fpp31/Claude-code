@@ -99,8 +99,24 @@ export interface AppState {
   /** Set while attached to a running game. */
   game: GameSession | null;
   selection: MapSelection | null;
+  /**
+   * The tile whose TILE CARD is open (ui/tileCard.ts), or null. Set by a tap
+   * or click on a tile that holds nothing of the player's (controller,
+   * onTileTap rule 3). Never set together with `selection`: selecting
+   * something clears it, inspecting a tile clears the selection.
+   * It is only a tile number; what the card says is worked out from the
+   * newest view every time (game/tileInfo.ts), so it can never show
+   * something the server has not sent.
+   */
+  inspectedTile: TileIndex | null;
   /** Tile under the mouse pointer, for the path preview. */
   hoverTile: TileIndex | null;
+  /**
+   * The tile the HOVER BOX describes right now (ui/hoverBox.ts), or null
+   * when no hover box is shown. It is `hoverTile` after the mouse has
+   * rested (input/hoverInfo.ts decides when). Always null on touch screens.
+   */
+  hoverInfoTile: TileIndex | null;
   /**
    * True while a game action is waiting for the server's answer. Only one
    * action is in flight at a time, so the client never has to reorder
@@ -136,7 +152,8 @@ export interface Store {
 
 /**
  * The state of a freshly opened page: connection 'connecting', no lobby, no
- * game, no join problem, nothing selected, not busy, no toasts.
+ * game, no join problem, nothing selected, no tile card, no hover box, not
+ * busy, no toasts.
  *
  * @param playerName  the remembered name (loadPlayerName())
  * @param joining     the game code in the address bar (gameCodeFromUrl()),
@@ -152,7 +169,9 @@ export function initialState(playerName: string, joining: GameCode | null = null
     lobby: null,
     game: null,
     selection: null,
+    inspectedTile: null,
     hoverTile: null,
+    hoverInfoTile: null,
     busy: false,
     toasts: [],
     fatalMessage: null,

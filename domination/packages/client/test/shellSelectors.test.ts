@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { boardFromView, reachableTiles } from '@domination/shared';
-import type { PlayerView, ReachStep, TileIndex, UnitView } from '@domination/shared';
+import { boardFromView, cloneJson, reachableTiles } from '@domination/shared';
+import type { CityView, PlayerView, ReachStep, TileIndex, UnitView } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import {
   canActNow,
+  citiesWaiting,
   citiesWithoutProduction,
   idleUnits,
+  markedTile,
   myPlayer,
+  ordersClosed,
   overlayFor,
   ownThingsAt,
   reachableFor,
@@ -17,7 +20,7 @@ import {
 import type { ReachFunction } from '../src/game/selectors';
 import { EMPTY_OVERLAY } from '../src/render/api';
 import { createStore, initialState } from '../src/state/store';
-import { SAMPLE, setView, storeInGame, viewOf } from './shellKit';
+import { SAMPLE, cityIn, ownOf, romeOf, setView, storeInGame, viewOf } from './shellKit';
 
 /**
  * A hand-made answer to "where can this unit go": two tiles east of the
@@ -40,6 +43,24 @@ function unitOf(view: PlayerView, id: string): UnitView {
   const unit = view.units.find((candidate) => candidate.id === id);
   if (unit === undefined) throw new Error(`the view has no unit ${id}`);
   return unit;
+}
+
+/** Adds a second city of the player's to a view: a copy of Rome under another id, with a change applied. */
+function addOwnCity(view: PlayerView, id: string, name: string, change: (own: NonNullable<CityView['own']>) => void): void {
+  const city = { ...cloneJson(cityIn(view, SAMPLE.romeId)), id, name, tile: SAMPLE.romeTile + 28 };
+  if (city.own === null) throw new Error('unexpected sample view');
+  change(city.own);
+  view.cities.push(city);
+}
+
+/** What a view says about a first entry that is paid for and cannot be completed, with no end in sight. */
+function holdFirstEntry(own: NonNullable<CityView['own']>): void {
+  own.buildQueue = [
+    { item: { kind: 'unit', unitType: 'settler' }, cost: 30, turns: null, wait: 'needsPopulation' },
+    { item: { kind: 'unit', unitType: 'warrior' }, cost: 18, turns: null, wait: 'earlier' },
+  ];
+  own.productionStored = 30;
+  own.held = 'needsPopulation';
 }
 
 describe('selectors (WP4)', () => {
@@ -77,11 +98,11 @@ describe('selectors (WP4)', () => {
   });
 
   it('ownThingsAt lists military unit, civilian unit, city, in that order, own things only', () => {
-    // Put everything on Rome's tile: the own Settler first in the list, then
-    // the own Warrior, and a foreign Warrior too (which cannot really share
-    // a tile, but the selector must not care).
+    // Put the Settler, the Warrior and the foreign Warrior on Rome's tile, the
+    // own Settler first in the list, then the own Warrior. (A foreign unit
+    // cannot really share a tile, but the selector must not care.)
     const view = sampleView();
-    for (const unit of view.units) unit.tile = SAMPLE.romeTile;
+    for (const unit of view.units) if (unit.id !== SAMPLE.workerId) unit.tile = SAMPLE.romeTile;
     view.units.reverse();
 
     const things = ownThingsAt(view, SAMPLE.romeTile);
@@ -118,6 +139,115 @@ describe('selectors (WP4)', () => {
       view.players[1].endedTurn = true;
     });
     expect(canActNow(otherEnded.get())).toBe(true);
+  });
+
+  it('ordersClosed: \'offline\' without a connection (also after End Turn), \'turnEnded\' after End Turn, null otherwise and while busy; canActNow is false in all three cases and while busy', () => {
+    const open = storeInGame();
+    expect(ordersClosed(open.get())).toBeNull();
+    expect(canActNow(open.get())).toBe(true);
+
+    // A round trip is over in a blink: it closes nothing, but nothing can be sent in it.
+    const busy = storeInGame({ busy: true });
+    expect(ordersClosed(busy.get())).toBeNull();
+    expect(canActNow(busy.get())).toBe(false);
+
+    for (const connection of ['reconnecting', 'connecting'] as const) {
+      const offline = storeInGame({ connection });
+      expect(ordersClosed(offline.get()), connection).toBe('offline');
+      expect(canActNow(offline.get()), connection).toBe(false);
+    }
+
+    const ended = storeInGame();
+    setView(ended, (view) => {
+      view.players[0].endedTurn = true;
+    });
+    expect(ordersClosed(ended.get())).toBe('turnEnded');
+    expect(canActNow(ended.get())).toBe(false);
+
+    // Both at once: the connection is named, it is the first thing to be cured.
+    ended.set({ connection: 'reconnecting' });
+    expect(ordersClosed(ended.get())).toBe('offline');
+    expect(canActNow(ended.get())).toBe(false);
+
+    // Another player having ended closes nothing for this one.
+    const otherEnded = storeInGame();
+    setView(otherEnded, (view) => {
+      view.players[0].endedTurn = false;
+      view.players[1].endedTurn = true;
+    });
+    expect(ordersClosed(otherEnded.get())).toBeNull();
+
+    // Without a game: nothing lasting stands in the way once the page is online, yet there is nothing to act on.
+    const home = createStore(initialState(''));
+    expect(ordersClosed(home.get())).toBe('offline'); // a fresh page is still connecting
+    home.set({ connection: 'online' });
+    expect(ordersClosed(home.get())).toBeNull();
+    expect(canActNow(home.get())).toBe(false);
+  });
+
+  it('markedTile is the selected unit\'s tile, the selected city\'s tile, or the inspected tile when nothing is selected', () => {
+    const store = storeInGame();
+    expect(markedTile(store.get())).toBeNull();
+
+    store.set({ selection: { kind: 'unit', unitId: SAMPLE.warriorId } });
+    expect(markedTile(store.get())).toBe(SAMPLE.warriorTile);
+    store.set({ selection: { kind: 'city', cityId: SAMPLE.romeId } });
+    expect(markedTile(store.get())).toBe(SAMPLE.romeTile);
+
+    store.set({ selection: null, inspectedTile: SAMPLE.emptyTile });
+    expect(markedTile(store.get())).toBe(SAMPLE.emptyTile);
+    // A tile the player has never seen can be inspected, and marked, too.
+    store.set({ inspectedTile: 0 });
+    expect(markedTile(store.get())).toBe(0);
+
+    // The controller never sets both. Should a state hold both all the same, the selection counts,
+    // also when the selected thing is no longer in the view (then nothing is marked).
+    store.set({ selection: { kind: 'unit', unitId: SAMPLE.settlerId }, inspectedTile: SAMPLE.emptyTile });
+    expect(markedTile(store.get())).toBe(SAMPLE.settlerTile);
+    store.set({ selection: { kind: 'unit', unitId: 'u1_gone' } });
+    expect(markedTile(store.get())).toBeNull();
+
+    // No game, no map, nothing to mark.
+    const home = createStore(initialState(''));
+    home.set({ inspectedTile: 5 });
+    expect(markedTile(home.get())).toBeNull();
+  });
+
+  it('overlayFor puts the ring on the inspected tile and lists no reachable or worked tiles for it', () => {
+    // The inspected tile is one the Warrior could reach (by the stub) and one Rome works: neither is drawn for a card.
+    const store = storeInGame({ inspectedTile: SAMPLE.warriorTile + 1 });
+    expect(overlayFor(store.get(), stubReach)).toEqual({
+      selectedTile: SAMPLE.warriorTile + 1,
+      selectedUnitId: null,
+      reachable: [],
+      path: [],
+      workedTiles: [],
+      hoverTile: null,
+    });
+
+    const worked = romeOf(viewOf(store)).worked[0];
+    store.set({ inspectedTile: worked, hoverTile: SAMPLE.warriorTile + 2 });
+    expect(overlayFor(store.get(), stubReach)).toEqual({
+      selectedTile: worked,
+      selectedUnitId: null,
+      reachable: [],
+      path: [],
+      workedTiles: [],
+      hoverTile: SAMPLE.warriorTile + 2,
+    });
+
+    // The tile of one of the player's own units, inspected by a state the controller never makes: still only the ring.
+    store.set({ inspectedTile: SAMPLE.warriorTile, hoverTile: null });
+    expect(overlayFor(store.get(), stubReach).selectedUnitId).toBeNull();
+    expect(overlayFor(store.get(), stubReach).reachable).toEqual([]);
+
+    // The card closed: no ring.
+    store.set({ inspectedTile: null });
+    expect(overlayFor(store.get(), stubReach).selectedTile).toBeNull();
+    // The ring moving from one inspected tile to another is a change the renderer must hear of.
+    const first = overlayFor(storeInGame({ inspectedTile: 3 }).get(), stubReach);
+    const second = overlayFor(storeInGame({ inspectedTile: 4 }).get(), stubReach);
+    expect(sameOverlay(first, second)).toBe(false);
   });
 
   it('overlayFor returns EMPTY_OVERLAY without a game and no reachable tiles when canActNow is false (busy, offline, turn ended)', () => {
@@ -203,18 +333,86 @@ describe('selectors (WP4)', () => {
 
   it('idleUnits and citiesWithoutProduction count only the player\'s own', () => {
     const view = sampleView();
-    // Both own units have moves left; the foreign Warrior is not counted.
+    // The Warrior and the Settler have moves left; the foreign Warrior is not counted (nor the Worker, which is at work).
     expect(idleUnits(view).map((unit) => unit.id)).toEqual([SAMPLE.warriorId, SAMPLE.settlerId]);
-    // Rome is building a Warrior; Thebes is foreign (and tells us nothing about its production).
+    // Rome is building a Warrior; Thebes is foreign (and tells us nothing about its queue).
     expect(citiesWithoutProduction(view)).toEqual([]);
 
     const later = sampleView();
-    const warrior = unitOf(later, SAMPLE.warriorId);
-    if (warrior.own !== null) warrior.own.movesLeft = 0;
-    const rome = later.cities.find((city) => city.id === SAMPLE.romeId);
-    if (rome?.own != null) rome.own.production = null;
+    ownOf(later, SAMPLE.warriorId).movesLeft = 0;
+    romeOf(later).buildQueue = [];
     expect(idleUnits(later).map((unit) => unit.id)).toEqual([SAMPLE.settlerId]);
     expect(citiesWithoutProduction(later).map((city) => city.id)).toEqual([SAMPLE.romeId]);
+  });
+
+  it('idleUnits leaves out a unit at work, and has it again when the job is over', () => {
+    const view = sampleView();
+    const worker = ownOf(view, SAMPLE.workerId);
+    // The sample Worker has all its moves and a job: it is not waiting for an order.
+    expect(worker.movesLeft).toBeGreaterThan(0);
+    expect(worker.job).not.toBeNull();
+    expect(idleUnits(view).map((unit) => unit.id)).not.toContain(SAMPLE.workerId);
+
+    worker.job = null; // finished, or stopped
+    expect(idleUnits(view).map((unit) => unit.id)).toEqual([SAMPLE.warriorId, SAMPLE.workerId, SAMPLE.settlerId]);
+
+    // Without moves it is not idle either way.
+    worker.movesLeft = 0;
+    expect(idleUnits(view).map((unit) => unit.id)).toEqual([SAMPLE.warriorId, SAMPLE.settlerId]);
+  });
+
+  it('citiesWithoutProduction lists own cities with an empty queue, by id', () => {
+    const view = sampleView();
+    addOwnCity(view, 'c1_zzzzzz', 'Capua', (own) => {
+      own.buildQueue = [];
+    });
+    addOwnCity(view, 'c1_aaaaaa', 'Ostia', (own) => {
+      own.buildQueue = [];
+      own.productionStored = 7; // savings do not make a city less idle
+    });
+    addOwnCity(view, 'c1_mmmmmm', 'Antium', () => {}); // building, like Rome
+    // A foreign city never says anything about its queue, and would not be ours to mind if it did.
+    view.cities.push({ ...cloneJson(cityIn(view, 'c1_zzzzzz')), id: 'c2_liar', owner: SAMPLE.other, name: 'Memphis' });
+
+    expect(citiesWithoutProduction(view).map((city) => city.id)).toEqual(['c1_aaaaaa', 'c1_zzzzzz']);
+
+    romeOf(view).buildQueue = [];
+    view.cities.reverse();
+    expect(citiesWithoutProduction(view).map((city) => city.id)).toEqual(['c1_aaaaaa', SAMPLE.romeId, 'c1_zzzzzz']);
+  });
+
+  it('citiesWaiting lists own cities whose first entry is held and has no number; a held entry with a number is not listed', () => {
+    const view = sampleView();
+    expect(citiesWaiting(view)).toEqual([]);
+
+    // Held, and the forecast sees no end: listed.
+    addOwnCity(view, 'c1_zzzzzz', 'Capua', holdFirstEntry);
+    addOwnCity(view, 'c1_aaaaaa', 'Ostia', (own) => {
+      holdFirstEntry(own);
+      own.held = 'noRoom';
+      own.buildQueue[0].wait = 'noRoom';
+    });
+    // Held, but the city will have grown in three turns: the panel says so, nobody has to be told.
+    addOwnCity(view, 'c1_bbbbbb', 'Antium', (own) => {
+      holdFirstEntry(own);
+      own.buildQueue[0].turns = 3;
+      own.buildQueue[0].wait = null;
+    });
+    // No number, but not paid for yet (the city makes no production): slow, not waiting.
+    addOwnCity(view, 'c1_cccccc', 'Cumae', (own) => {
+      own.buildQueue[0].turns = null;
+      own.buildQueue[0].wait = 'noProduction';
+    });
+    // An empty queue is idle, not waiting.
+    addOwnCity(view, 'c1_dddddd', 'Veii', (own) => {
+      own.buildQueue = [];
+    });
+    // A foreign city with the same fields (the server never sends them) is not ours to mind.
+    view.cities.push({ ...cloneJson(cityIn(view, 'c1_zzzzzz')), id: 'c2_liar', owner: SAMPLE.other, name: 'Memphis' });
+
+    expect(citiesWaiting(view).map((city) => city.id)).toEqual(['c1_aaaaaa', 'c1_zzzzzz']);
+    // The two lists never share a city.
+    expect(citiesWithoutProduction(view).map((city) => city.id)).toEqual(['c1_dddddd']);
   });
 
   it('idleUnits come sorted by id, whatever order the view lists them in', () => {
@@ -252,6 +450,36 @@ describe('reachableFor with the real movement rules (WP4 with WP2)', () => {
     const warrior = unitOf(view, SAMPLE.warriorId);
     if (warrior.own !== null) warrior.own.movesLeft = 0;
     expect(reachableFor(view, warrior).size).toBe(0);
+  });
+
+  it('reachableFor is empty for a unit at work, so overlayFor highlights nothing for it', () => {
+    const view = sampleView();
+    const worker = unitOf(view, SAMPLE.workerId);
+    expect(worker.own?.movesLeft).toBeGreaterThan(0);
+    expect(worker.own?.job).not.toBeNull();
+    expect(reachableFor(view, worker).size).toBe(0);
+
+    // The player may act and the Worker is selected: the ring, and nothing to go to.
+    const store = storeInGame({ selection: { kind: 'unit', unitId: SAMPLE.workerId }, hoverTile: SAMPLE.workerTile + 1 }, view);
+    expect(canActNow(store.get())).toBe(true);
+    expect(overlayFor(store.get())).toEqual({
+      selectedTile: SAMPLE.workerTile,
+      selectedUnitId: SAMPLE.workerId,
+      reachable: [],
+      path: [],
+      workedTiles: [],
+      hoverTile: SAMPLE.workerTile + 1,
+    });
+
+    // The job is over (a new view from the server): the same Worker can walk again.
+    setView(store, (changed) => {
+      ownOf(changed, SAMPLE.workerId).job = null;
+    });
+    const after = viewOf(store);
+    const reach = reachableFor(after, unitOf(after, SAMPLE.workerId));
+    expect(reach.has(SAMPLE.workerTile + 1)).toBe(true);
+    expect(overlayFor(store.get()).reachable).toEqual([...reach.keys()].sort((a, b) => a - b));
+    expect(overlayFor(store.get()).path).toEqual([SAMPLE.workerTile + 1]);
   });
 
   it('overlayFor uses it by default: the selected Warrior\'s reachable tiles are highlighted', () => {

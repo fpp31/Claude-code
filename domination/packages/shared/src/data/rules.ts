@@ -71,6 +71,31 @@ export interface RulesTable {
   growthBase: number;
   /** Extra stored food needed for each further population point. */
   growthPerPopulation: number;
+  /**
+   * The most entries a city's build queue may hold. An action that asks for
+   * more is refused ('queueFull').
+   *
+   * NEVER LOWER THIS NUMBER while games are running without writing a save
+   * migration that shortens the queues: a queue longer than the limit could
+   * not be shortened one entry at a time (every such edit would itself be
+   * too long and be refused); only "Empty the queue" would still work.
+   * Raising it is always safe, up to the 64 entries the server's message
+   * check lets through (server/src/parseMessage.ts).
+   */
+  maxQueueLength: number;
+  /**
+   * How many turns ahead a city's forecast looks (buildPlan in
+   * rules/city.ts): the "in N turns" of the city panel is never larger than
+   * this, and an entry that would take longer says so in words. It also
+   * bounds the work of building a view.
+   */
+  forecastTurns: number;
+  /**
+   * Citizens give up production for food until the city's food surplus per
+   * turn is at least this much, as far as its land allows (cityEconomy,
+   * step 2). 1 = a city that could grow does grow.
+   */
+  minFoodSurplus: number;
 }
 
 export const RULES: RulesTable = {
@@ -87,6 +112,9 @@ export const RULES: RulesTable = {
   foodPerCitizen: 2,
   growthBase: 10,
   growthPerPopulation: 6,
+  maxQueueLength: 8,
+  forecastTurns: 50,
+  minFoodSurplus: 1,
 };
 
 /**

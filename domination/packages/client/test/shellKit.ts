@@ -6,7 +6,7 @@
  */
 
 import { cloneJson } from '@domination/shared';
-import type { ClientMessage, PlayerView } from '@domination/shared';
+import type { CityView, ClientMessage, OwnCityDetail, OwnUnitDetail, PlayerView, UnitView } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import type { Connection } from '../src/net/connection';
 import { createStore, initialState } from '../src/state/store';
@@ -21,15 +21,27 @@ export const SAMPLE = {
   warriorTile: 3 * 14 + 5,
   settlerId: 'u1_x3fp9a',
   settlerTile: 6 * 14 + 8,
+  /** The player's Worker, at work: it is building a farm on plains and has three turns to go. */
+  workerId: 'u1_m4wq7e',
+  workerTile: 5 * 14 + 3,
+  /** Own grassland with a finished farm; a citizen of Rome works it. */
+  farmTile: 3 * 14 + 3,
+  /** Desert hills on Egypt's land, out of sight: a mine the player remembers. */
+  rememberedMineTile: 2 * 14 + 10,
   foreignWarriorId: 'u2_b8nq4t',
   foreignWarriorTile: 4 * 14 + 7,
   romeId: 'c1_r6wz2e',
   romeTile: 4 * 14 + 3,
   thebesId: 'c2_h5yd7m',
   thebesTile: 3 * 14 + 10,
-  /** A land tile with nothing on it. */
+  /** A land tile with nothing on it (own grassland that no citizen works). */
   emptyTile: 5 * 14 + 4,
 } as const;
+
+/** The tile at column x, row y of the sample map (14 tiles wide). */
+export function at(x: number, y: number): number {
+  return y * 14 + x;
+}
 
 /**
  * A store attached to the sample game: online, not busy, nothing selected,
@@ -59,6 +71,34 @@ export function setView(store: Store, change: (view: PlayerView) => void): void 
   const view = cloneJson(game.view);
   change(view);
   store.set({ game: { ...game, view } });
+}
+
+/** The unit with this id in a view; throws if the view has none (the fixture changed). */
+export function unitIn(view: PlayerView, id: string): UnitView {
+  const unit = view.units.find((candidate) => candidate.id === id);
+  if (unit === undefined) throw new Error(`the view has no unit ${id}`);
+  return unit;
+}
+
+/** What only its owner knows about one of the viewer's own units; throws for anybody else's. */
+export function ownOf(view: PlayerView, id: string): OwnUnitDetail {
+  const own = unitIn(view, id).own;
+  if (own === null) throw new Error(`unit ${id} is not the viewer's own`);
+  return own;
+}
+
+/** The city with this id in a view; throws if the view has none. */
+export function cityIn(view: PlayerView, id: string): CityView {
+  const city = view.cities.find((candidate) => candidate.id === id);
+  if (city === undefined) throw new Error(`the view has no city ${id}`);
+  return city;
+}
+
+/** Rome's own details in a view (food, queue, menu); throws if they are missing. */
+export function romeOf(view: PlayerView): OwnCityDetail {
+  const own = cityIn(view, SAMPLE.romeId).own;
+  if (own === null) throw new Error('Rome is not the viewer\'s own city in this view');
+  return own;
 }
 
 /** A Connection that goes nowhere but remembers every message it was given. */

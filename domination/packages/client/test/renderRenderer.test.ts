@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MAP_SIZES, tileCoord, tileCount, tileIndex } from '@domination/shared';
-import type { PlayerView, TileIndex, TileView } from '@domination/shared';
+import { MAP_SIZES, neighbors, tileCoord, tileCount, tileIndex } from '@domination/shared';
+import type { PlayerView, TileIndex, TileView, UnitView } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import { EMPTY_OVERLAY } from '../src/render/api';
 import type { MapRenderer } from '../src/render/api';
@@ -8,6 +8,7 @@ import { backingStoreSize } from '../src/render/backingStore';
 import { CAMERA_MARGIN } from '../src/render/camera';
 import { TILE_HEIGHT, TILE_WIDTH, tileOrigin } from '../src/render/geometry';
 import { createMapRenderer } from '../src/render/renderer';
+import { unitDrawings, workingSignOffset } from '../src/render/scene';
 import { SLIDE_MS } from '../src/render/slide';
 import { LAYER_PADDING } from '../src/render/terrainLayer';
 import { PALETTE } from '../src/sprites/palette';
@@ -29,11 +30,17 @@ const BOX = { left: 100, top: 50, width: 800, height: 600 };
 /** A fully explored, fully visible map of grassland: nothing but the camera matters. */
 function grassView(width: number, height: number): PlayerView {
   const tiles: (TileView | null)[] = [];
-  for (let tile = 0; tile < width * height; tile++) tiles.push({ terrain: 'grassland', feature: null, owner: null, visible: true });
+  for (let tile = 0; tile < width * height; tile++) {
+    tiles.push({ terrain: 'grassland', feature: null, improvement: null, owner: null, visible: true });
+  }
   return { you: 'p1', turn: 1, width, height, tiles, units: [], cities: [], players: [{ id: 'p1', name: 'Ada', civ: 'rome', endedTurn: false }] };
 }
 const LARGE = grassView(MAP_SIZES.large.width, MAP_SIZES.large.height);
 const MIDDLE: TileIndex = tileIndex({ x: 28, y: 18 }, LARGE);
+const ELSEWHERE: TileIndex = tileIndex({ x: 20, y: 11 }, LARGE);
+
+/** The map area of a phone held sideways (844 x 390 with the top bar taken off): the window of the end-to-end test's step 10. */
+const LOW = { left: 0, top: 44, width: 844, height: 346 };
 
 let browser: FakeBrowser;
 let canvas: FakeCanvas;
@@ -71,7 +78,7 @@ function nextFrame(): DrawCall[] {
 describe('createMapRenderer: before there is a view (api.ts, rule 2)', () => {
   beforeEach(() => start());
 
-  it('panBy, zoomBy and centerOn do nothing, tileAt returns null and tileToScreen throws', () => {
+  it('panBy, zoomBy and centerOn do nothing, tileAt returns null and tileToScreen and tileScreenRect throw', () => {
     expect(() => {
       renderer.panBy(10, 10);
       renderer.zoomBy(1);
@@ -81,6 +88,7 @@ describe('createMapRenderer: before there is a view (api.ts, rule 2)', () => {
     }).not.toThrow();
     expect(renderer.tileAt({ x: 300, y: 300 })).toBeNull();
     expect(() => renderer.tileToScreen(0)).toThrow();
+    expect(() => renderer.tileScreenRect(0)).toThrow();
 
     // ... and they left no trace: the first view is shown as if they had never been called.
     renderer.setView(LARGE);
@@ -98,6 +106,7 @@ describe('createMapRenderer: before there is a view (api.ts, rule 2)', () => {
     renderer.setView(null);
     expect(renderer.tileAt({ x: 300, y: 300 })).toBeNull();
     expect(() => renderer.tileToScreen(0)).toThrow();
+    expect(() => renderer.tileScreenRect(0)).toThrow();
     expect(() => renderer.panBy(5, 5)).not.toThrow();
     // An empty map is drawn: just the dark background.
     const frame = nextFrame();
@@ -224,10 +233,7 @@ describe('createMapRenderer: size (api.ts, rule 1)', () => {
  * on the size measures the canvas first.
  */
 describe('createMapRenderer: a resize is taken in at once, not a frame later', () => {
-  /** The map area of a phone held sideways (844 x 390 with the top bar taken off): the window of the end-to-end test's step 10. */
-  const LOW = { left: 0, top: 44, width: 844, height: 346 };
-
-  /** Where a few tiles are and which tiles are under a few points: enough to tell two cameras apart. */
+  /** Where a few tiles are, their boxes, and which tiles are under a few points: enough to tell two cameras apart. */
   function answersOf(map: MapRenderer): unknown {
     const tiles = [MIDDLE, MIDDLE + 1, MIDDLE - 3, MIDDLE + LARGE.width, MIDDLE - 2 * LARGE.width];
     const points = [
@@ -236,7 +242,11 @@ describe('createMapRenderer: a resize is taken in at once, not a frame later', (
       { x: LOW.left + LOW.width - 2, y: LOW.top + LOW.height - 2 },
       { x: LOW.left + 300.5, y: LOW.top + 77.25 },
     ];
-    return { places: tiles.map((tile) => map.tileToScreen(tile)), hits: points.map((point) => map.tileAt(point)) };
+    return {
+      places: tiles.map((tile) => map.tileToScreen(tile)),
+      boxes: tiles.map((tile) => map.tileScreenRect(tile)),
+      hits: points.map((point) => map.tileAt(point)),
+    };
   }
 
   it('centerOn straight after the window changed puts the tile in the middle of the NEW canvas, and it stays there', () => {
@@ -275,6 +285,7 @@ describe('createMapRenderer: a resize is taken in at once, not a frame later', (
   const firstCalls: [string, (map: MapRenderer) => void][] = [
     ['tileAt', (map) => void map.tileAt({ x: 200, y: 200 })],
     ['tileToScreen', (map) => void map.tileToScreen(MIDDLE)],
+    ['tileScreenRect', (map) => void map.tileScreenRect(MIDDLE)],
     ['centerOn', (map) => map.centerOn(MIDDLE + 5)],
     ['panBy', (map) => map.panBy(31, -12)],
     ['panBy as far as the map goes (it stops where the new size says)', (map) => map.panBy(1e6, 1e6)],
@@ -620,6 +631,294 @@ describe('createMapRenderer: camera and hit testing', () => {
   });
 });
 
+/** Compares numbers that went through the camera's arithmetic: equal to a millionth of a pixel. */
+function expectSamePlace(actual: Record<string, number>, expected: Record<string, number>): void {
+  expect(Object.keys(actual).sort()).toEqual(Object.keys(expected).sort());
+  for (const key of Object.keys(expected)) expect(actual[key], key).toBeCloseTo(expected[key], 6);
+}
+
+describe('createMapRenderer: tileScreenRect', () => {
+  it.each([1, 1.5, 2])(
+    'tileScreenRect: its middle is tileToScreen(tile); it is 26 x 28 art pixels at the current zoom, at device pixel ratios 1, 1.5 and 2; and every point that tileAt gives to a tile lies inside that tile\'s tileScreenRect (ratio %s)',
+    (ratio) => {
+      start(ratio);
+      renderer.setView(LARGE);
+      renderer.centerOn(MIDDLE);
+      renderer.panBy(-7.3, 5.6);
+
+      for (const zoomSteps of [0, 1, -3, 4]) {
+        renderer.zoomBy(zoomSteps);
+        // CSS pixels per art pixel right now, read off the distance between two tile centres.
+        const scale = (renderer.tileToScreen(MIDDLE + 1).x - renderer.tileToScreen(MIDDLE).x) / TILE_WIDTH;
+        for (const tile of [MIDDLE, MIDDLE + 1, MIDDLE - LARGE.width, MIDDLE + LARGE.width, ELSEWHERE, 0, tileCount(LARGE) - 1]) {
+          const rect = renderer.tileScreenRect(tile);
+          const middle = renderer.tileToScreen(tile);
+          expect((rect.left + rect.right) / 2).toBeCloseTo(middle.x, 6);
+          expect((rect.top + rect.bottom) / 2).toBeCloseTo(middle.y, 6);
+          expect(rect.right - rect.left).toBeCloseTo(TILE_WIDTH * scale, 6);
+          expect(rect.bottom - rect.top).toBeCloseTo(TILE_HEIGHT * scale, 6);
+        }
+        // The boxes of two tiles side by side meet; the next row starts 22 art pixels further down, half a tile across.
+        const here = renderer.tileScreenRect(MIDDLE);
+        expect(renderer.tileScreenRect(MIDDLE + 1).left).toBeCloseTo(here.right, 6);
+        const below = renderer.tileScreenRect(MIDDLE + LARGE.width);
+        expect(below.top - here.top).toBeCloseTo(22 * scale, 6);
+        expect(Math.abs(below.left - here.left)).toBeCloseTo(13 * scale, 6);
+
+        // Every point of the canvas that belongs to a tile lies in that tile's box (points on a grid of fractions).
+        let asked = 0;
+        const hit = new Set<TileIndex>();
+        for (let y = BOX.top + 0.4; y < BOX.top + BOX.height; y += 23.7) {
+          for (let x = BOX.left + 0.6; x < BOX.left + BOX.width; x += 17.3) {
+            const tile = renderer.tileAt({ x, y });
+            if (tile === null) continue;
+            asked += 1;
+            hit.add(tile);
+            const rect = renderer.tileScreenRect(tile);
+            const inside = x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+            expect(inside, `(${x}, ${y}) is given to tile ${tile}, whose box is ${JSON.stringify(rect)}`).toBe(true);
+          }
+        }
+        expect(asked).toBeGreaterThan(500);
+        expect(hit.size).toBeGreaterThan(4);
+
+        // Just outside the box it is another tile; just inside its four sides (in the middle of each) it is this one.
+        const middle = renderer.tileToScreen(MIDDLE);
+        expect(renderer.tileAt(middle)).toBe(MIDDLE);
+        for (const point of [
+          { x: here.left - 0.5, y: middle.y }, { x: here.right + 0.5, y: middle.y },
+          { x: middle.x, y: here.top - 0.5 }, { x: middle.x, y: here.bottom + 0.5 },
+        ]) expect(renderer.tileAt(point)).not.toBe(MIDDLE);
+        for (const point of [
+          { x: here.left + 0.5, y: middle.y }, { x: here.right - 0.5, y: middle.y },
+          { x: middle.x, y: here.top + 0.5 }, { x: middle.x, y: here.bottom - 0.5 },
+        ]) expect(renderer.tileAt(point)).toBe(MIDDLE);
+      }
+    },
+  );
+
+  it('tileScreenRect throws without a view and for a tile that is not on the map, and answers for the new size straight after a resize', () => {
+    start();
+    expect(() => renderer.tileScreenRect(0)).toThrow(/tileScreenRect/);
+    renderer.setView(LARGE);
+    for (const tile of [-1, tileCount(LARGE), 1.5, Number.NaN]) expect(() => renderer.tileScreenRect(tile)).toThrow(/tileScreenRect/);
+    expect(() => renderer.tileScreenRect(tileCount(LARGE) - 1)).not.toThrow();
+    renderer.setView(null);
+    expect(() => renderer.tileScreenRect(0)).toThrow(/tileScreenRect/);
+
+    renderer.setView(LARGE);
+    renderer.centerOn(MIDDLE); // 400 to the right of and 300 below the corner of the 800 x 600 canvas
+    browser.runFrames();
+    // The window changes, and the very next thing is the question. Nobody has told the ResizeObserver yet.
+    canvas.setBox(LOW);
+    const rect = renderer.tileScreenRect(MIDDLE);
+    expect([canvas.element.width, canvas.element.height]).toEqual([LOW.width, LOW.height]); // it measured first
+    expect(Math.abs((rect.left + rect.right) / 2 - (LOW.left + 400))).toBeLessThanOrEqual(0.5);
+    expect(Math.abs((rect.top + rect.bottom) / 2 - (LOW.top + 300))).toBeLessThanOrEqual(0.5);
+    expect(renderer.tileAt({ x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 })).toBe(MIDDLE);
+    // The late report changes nothing.
+    browser.fireResize({ width: LOW.width, height: LOW.height });
+    expect(renderer.tileScreenRect(MIDDLE)).toEqual(rect);
+  });
+
+  it('tileScreenRect follows the camera, answers for a tile that is scrolled away, and for a canvas that moved on the page', () => {
+    start();
+    renderer.setView(LARGE);
+    renderer.centerOn(MIDDLE);
+    const before = renderer.tileScreenRect(MIDDLE);
+    renderer.panBy(12, 34);
+    const after = renderer.tileScreenRect(MIDDLE);
+    expectSamePlace({ ...after }, { left: before.left + 12, top: before.top + 34, right: before.right + 12, bottom: before.bottom + 34 });
+
+    // The far corner of the map is not on the canvas, and still has a box.
+    const far = renderer.tileScreenRect(0);
+    expect(far.right).toBeLessThan(BOX.left);
+    expect(far.bottom).toBeLessThan(BOX.top);
+
+    // The canvas moved on the page: the answer is for where it is now.
+    canvas.setBox({ left: 300, top: 250, width: 800, height: 600 });
+    const moved = renderer.tileScreenRect(MIDDLE);
+    expectSamePlace({ ...moved }, { left: after.left + 200, top: after.top + 200, right: after.right + 200, bottom: after.bottom + 200 });
+  });
+});
+
+describe('createMapRenderer: onCameraChange', () => {
+  it('onCameraChange: called once for a pan, a zoom step, centerOn, and a new canvas size; not for panBy(0, 0), a pan against the map\'s edge, a zoom step beyond the limit, setOverlay, or a new view of the same map', () => {
+    start();
+    renderer.setView(LARGE);
+    renderer.centerOn(MIDDLE);
+
+    let calls = 0;
+    const stop = renderer.onCameraChange(() => {
+      calls += 1;
+    });
+
+    renderer.panBy(0, 0);
+    expect(calls).toBe(0);
+
+    renderer.panBy(30, -20);
+    expect(calls).toBe(1);
+    renderer.zoomBy(1);
+    expect(calls).toBe(2);
+    renderer.zoomBy(-1, { x: 333, y: 222 });
+    expect(calls).toBe(3);
+    renderer.centerOn(ELSEWHERE);
+    expect(calls).toBe(4);
+
+    // Nothing moved, nothing is said: the same tile centred again, a tile that is not on the map, the overlay,
+    // a new view of the same map, the three questions, and the frames that draw all of it.
+    renderer.centerOn(ELSEWHERE);
+    renderer.centerOn(-1);
+    renderer.setOverlay({ ...EMPTY_OVERLAY, selectedTile: MIDDLE, hoverTile: ELSEWHERE, reachable: [MIDDLE + 1] });
+    renderer.setView(grassView(LARGE.width, LARGE.height));
+    renderer.setView({ ...LARGE, turn: 2 });
+    renderer.tileAt({ x: 300, y: 300 });
+    renderer.tileToScreen(MIDDLE);
+    renderer.tileScreenRect(MIDDLE);
+    browser.runFrames();
+    expect(calls).toBe(4);
+
+    // A zoom step beyond the limit.
+    for (let step = 0; step < 12; step++) renderer.zoomBy(1);
+    const atLimit = calls;
+    expect(atLimit).toBeGreaterThan(4);
+    renderer.zoomBy(1);
+    renderer.zoomBy(5);
+    expect(calls).toBe(atLimit);
+
+    // A pan against the edge of the map.
+    for (let step = 0; step < 40; step++) renderer.panBy(2000, 2000);
+    const atEdge = calls;
+    expect(atEdge).toBeGreaterThan(atLimit);
+    renderer.panBy(2000, 2000);
+    renderer.panBy(1, 0);
+    expect(calls).toBe(atEdge);
+
+    // A new size of the canvas, reported by the browser: once, however often it is reported.
+    canvas.setBox({ left: 100, top: 50, width: 640, height: 480 });
+    browser.fireResize();
+    expect(calls).toBe(atEdge + 1);
+    browser.fireResize();
+    browser.fireResize({ width: 640, height: 480 });
+    expect(calls).toBe(atEdge + 1);
+    // The canvas only moved on the page (a panel opened beside it): tiles are somewhere else on screen too.
+    canvas.setBox({ left: 140, top: 50, width: 640, height: 480 });
+    browser.fireResize();
+    expect(calls).toBe(atEdge + 2);
+
+    // A view of another map size brings the camera back onto the map.
+    renderer.setView(sampleView());
+    expect(calls).toBe(atEdge + 3);
+
+    stop();
+  });
+
+  it('a question that notices a new canvas size fires nothing itself; the browser\'s report in the same frame does', () => {
+    start();
+    renderer.setView(LARGE);
+    renderer.centerOn(MIDDLE);
+    let calls = 0;
+    renderer.onCameraChange(() => {
+      calls += 1;
+    });
+    canvas.setBox(LOW);
+    renderer.tileAt({ x: 200, y: 200 });
+    renderer.tileToScreen(MIDDLE);
+    renderer.tileScreenRect(MIDDLE);
+    expect(calls).toBe(0);
+    browser.fireResize({ width: LOW.width, height: LOW.height });
+    expect(calls).toBe(1);
+  });
+
+  it('a listener may call tileAt and tileScreenRect from inside the call-back and gets the new answers', () => {
+    start();
+    renderer.setView(LARGE);
+    renderer.centerOn(MIDDLE);
+    const point = renderer.tileToScreen(MIDDLE);
+
+    /** What the listener was told when it asked, each time it was called. */
+    const seen: { under: TileIndex | null; rect: Record<string, number>; middle: { x: number; y: number } }[] = [];
+    renderer.onCameraChange(() => {
+      seen.push({ under: renderer.tileAt(point), rect: { ...renderer.tileScreenRect(MIDDLE) }, middle: renderer.tileToScreen(MIDDLE) });
+    });
+
+    // A pan by one tile to the left: the tile east of MIDDLE is now under the point where MIDDLE was.
+    const before = renderer.tileScreenRect(MIDDLE);
+    const tileWidth = before.right - before.left;
+    renderer.panBy(-tileWidth, 0);
+    expect(seen.length).toBe(1);
+    expect(seen[0].under).toBe(MIDDLE + 1);
+    expectSamePlace(seen[0].rect, { left: before.left - tileWidth, top: before.top, right: before.right - tileWidth, bottom: before.bottom });
+    // What it was told inside the call-back is what anybody is told afterwards: the camera had its new place already.
+    expect(seen[0].rect).toEqual({ ...renderer.tileScreenRect(MIDDLE) });
+    expect(seen[0].middle).toEqual(renderer.tileToScreen(MIDDLE));
+    expect(seen[0].under).toBe(renderer.tileAt(point));
+
+    // A zoom step: the box in the call-back has the new size.
+    renderer.zoomBy(1);
+    expect(seen.length).toBe(2);
+    expect(seen[1].rect.right - seen[1].rect.left).toBeCloseTo((tileWidth * 4) / 3, 6);
+    expect(seen[1].rect).toEqual({ ...renderer.tileScreenRect(MIDDLE) });
+
+    // A new canvas size: the listener is answered for the new canvas.
+    canvas.setBox(LOW);
+    browser.fireResize({ width: LOW.width, height: LOW.height });
+    expect(seen.length).toBe(3);
+    expect(seen[2].rect).toEqual({ ...renderer.tileScreenRect(MIDDLE) });
+    expect(seen[2].rect.top).not.toBe(seen[1].rect.top); // the canvas starts 6 pixels higher on the page now
+  });
+
+  it('the function onCameraChange returns removes the listener; after destroy nobody is called', () => {
+    start();
+    const heard: string[] = [];
+    const stopA = renderer.onCameraChange(() => heard.push('a'));
+    const stopB = renderer.onCameraChange(() => heard.push('b'));
+
+    // Without a view the camera calls do nothing, so nothing is reported.
+    renderer.panBy(10, 10);
+    renderer.zoomBy(1);
+    renderer.centerOn(0);
+    expect(heard).toEqual([]);
+
+    // The first view puts tiles on the screen: every listener is told, in the order they came.
+    renderer.setView(LARGE);
+    expect(heard).toEqual(['a', 'b']);
+
+    stopB();
+    renderer.panBy(-40, -40);
+    expect(heard).toEqual(['a', 'b', 'a']);
+    stopB(); // removing twice does no harm, and removes nobody else
+    renderer.panBy(-40, -40);
+    expect(heard).toEqual(['a', 'b', 'a', 'a']);
+
+    // A listener may remove itself while it is being called; the others are still told in that round.
+    const stopSelf = renderer.onCameraChange(() => {
+      heard.push('self');
+      stopSelf();
+    });
+    renderer.onCameraChange(() => heard.push('c'));
+    renderer.panBy(-40, -40);
+    expect(heard.slice(4)).toEqual(['a', 'self', 'c']);
+    renderer.panBy(-40, -40);
+    expect(heard.slice(7)).toEqual(['a', 'c']);
+
+    // Taking the view away is a change too (no tile is anywhere any more).
+    renderer.setView(null);
+    expect(heard.slice(9)).toEqual(['a', 'c']);
+    renderer.setView(LARGE);
+    expect(heard.slice(11)).toEqual(['a', 'c']);
+
+    renderer.destroy();
+    renderer.panBy(-40, -40);
+    renderer.zoomBy(1);
+    renderer.setView(sampleView());
+    canvas.setBox(LOW);
+    browser.fireResize();
+    expect(heard.length).toBe(13);
+    stopA(); // still harmless
+  });
+});
+
 describe('createMapRenderer: when it draws', () => {
   beforeEach(() => start());
 
@@ -738,7 +1037,7 @@ describe('createMapRenderer: what it draws', () => {
       const wanted = sheet.get(`ground.${tile.terrain}`, undefined, {
         look: tile.visible ? 'normal' : 'fogged',
         variant: index,
-        bare: tile.feature !== null,
+        bare: tile.feature !== null || tile.improvement !== null,
       });
       expect(here.length, `tile ${index}`).toBe(1);
       expect(here[0].args.slice(1, 3), `tile ${index}`).toEqual([wanted.sx, wanted.sy]);
@@ -808,7 +1107,7 @@ describe('createMapRenderer: what it draws', () => {
     expect(terrain.calls.length).toBe(painted);
 
     const tiles = view.tiles.slice();
-    tiles[0] = { terrain: 'ocean', feature: null, owner: null, visible: true };
+    tiles[0] = { terrain: 'ocean', feature: null, improvement: null, owner: null, visible: true };
     renderer.setView({ ...view, tiles });
     browser.runFrames();
     expect(terrain.calls.length).toBeGreaterThan(painted);
@@ -862,7 +1161,9 @@ describe('createMapRenderer: what it draws', () => {
     expect(terrain.calls.length).toBe(before);
 
     // More than a quarter of the tiles changed: one full repaint, no clip.
-    const everythingSeen = view.tiles.map((tile) => (tile === null ? { terrain: 'ocean' as const, feature: null, owner: null, visible: true } : { ...tile, visible: true }));
+    const everythingSeen = view.tiles.map((tile): TileView =>
+      tile === null ? { terrain: 'ocean', feature: null, improvement: null, owner: null, visible: true } : { ...tile, visible: true },
+    );
     renderer.setView({ ...view, tiles: everythingSeen });
     browser.runFrames();
     const repaint = terrain.calls.slice(before);
@@ -986,6 +1287,235 @@ describe('createMapRenderer: what it draws', () => {
     expect(rimmedDraw[4]).toBe(plainDraw[4]);
     expect(rimmedDraw[5]).toBe(plainDraw[5] - zoom); // one art pixel higher, for the added row
     expect(rimmedDraw[7]).toBe(plainDraw[7] + zoom);
+  });
+
+  /** Where the terrain picture copied this sprite for this tile: the places of those calls in `calls`. */
+  function terrainDraws(calls: DrawCall[], sprite: Sprite, view: PlayerView, tile: TileIndex): number[] {
+    const origin = tileOrigin(tileCoord(tile, view));
+    const found: number[] = [];
+    calls.forEach((call, index) => {
+      if (call.method !== 'drawImage' || call.args.length !== 9) return;
+      const [, sx, sy, width, height, x, y] = call.args as number[];
+      const isSprite = sx === sprite.sx && sy === sprite.sy && width === sprite.width && height === sprite.height;
+      if (isSprite && x === LAYER_PADDING + origin.px + sprite.offsetX && y === LAYER_PADDING + origin.py + sprite.offsetY) found.push(index);
+    });
+    return found;
+  }
+
+  it('the terrain picture has bare ground under an improvement, the improvement on top of the feature, and the fogged twin on a tile out of sight', () => {
+    const view = sampleView();
+    const FARM = 3 * 14 + 3; // a finished farm on grassland, in sight
+    const MINE = 2 * 14 + 10; // a mine on desert hills, remembered
+    expect(view.tiles[FARM]).toMatchObject({ terrain: 'grassland', feature: null, improvement: 'farm', visible: true });
+    expect(view.tiles[MINE]).toMatchObject({ terrain: 'desert', feature: 'hills', improvement: 'mine', visible: false });
+    renderer.setView(view);
+    browser.runFrames();
+    const calls = terrain.calls;
+    const one = (sprite: Sprite, tile: TileIndex, what: string): number => {
+      const found = terrainDraws(calls, sprite, view, tile);
+      expect(found.length, what).toBe(1);
+      return found[0];
+    };
+    const none = (sprite: Sprite, tile: TileIndex, what: string): void => {
+      expect(terrainDraws(calls, sprite, view, tile).length, what).toBe(0);
+    };
+
+    // The farm: bare ground (no tuft between the fields), then the farm in its grassland colours.
+    const farmGround = one(sheet.get('ground.grassland', undefined, { bare: true }), FARM, 'bare ground under the farm');
+    none(sheet.get('ground.grassland', undefined, { variant: FARM }), FARM, 'decorated ground under the farm');
+    const farm = one(sheet.get('improvement.farm', undefined, { on: 'grassland' }), FARM, 'the farm');
+    none(sheet.get('improvement.farm', undefined, { on: 'plains' }), FARM, 'a farm in the colours of another ground');
+    none(sheet.get('improvement.farm', undefined, { on: 'grassland', look: 'fogged' }), FARM, 'a fogged farm on a tile in sight');
+    expect(farmGround).toBeLessThan(farm);
+
+    // The mine: bare ground, the hills, the mine over the hills; all of them fogged twins.
+    const mineGround = one(sheet.get('ground.desert', undefined, { bare: true, look: 'fogged' }), MINE, 'fogged bare ground under the mine');
+    const hills = one(sheet.get('feature.hills', undefined, { on: 'desert', look: 'fogged' }), MINE, 'the fogged hills');
+    const mine = one(sheet.get('improvement.mine', undefined, { on: 'desert', look: 'fogged' }), MINE, 'the fogged mine');
+    none(sheet.get('improvement.mine', undefined, { on: 'desert' }), MINE, 'a bright mine on a tile out of sight');
+    none(sheet.get('feature.hills', undefined, { on: 'desert' }), MINE, 'bright hills on a tile out of sight');
+    expect(mineGround).toBeLessThan(hills);
+    expect(hills).toBeLessThan(mine);
+
+    // Both lie over the border strips (the farm tile is inside Rome's land, the mine tile at the edge of Egypt's).
+    const strips = calls.map((call, index) => (call.method === 'drawImage' && call.args.length === 3 ? index : -1)).filter((index) => index >= 0);
+    expect(strips.length).toBeGreaterThan(12);
+    expect(Math.max(...strips)).toBeLessThan(Math.min(farm, hills, mine));
+
+    // Nothing else of the sample view carries an improvement: two improvement pictures in all.
+    const improvementDraws = view.tiles.flatMap((tile, index) =>
+      tile === null
+        ? []
+        : (['farm', 'mine'] as const).flatMap((improvement) =>
+            (['normal', 'fogged'] as const).flatMap((look) =>
+              terrainDraws(calls, sheet.get(`improvement.${improvement}`, undefined, { on: tile.terrain, look }), view, index),
+            ),
+          ),
+    );
+    expect(improvementDraws.sort((a, b) => a - b)).toEqual([farm, mine].sort((a, b) => a - b));
+  });
+
+  it('a tile whose improvement changed is painted again, and nothing beyond its neighbors', () => {
+    const view = sampleView();
+    const SITE = 47; // open grassland in sight, with nothing built on it
+    expect(view.tiles[SITE]).toMatchObject({ terrain: 'grassland', feature: null, improvement: null, visible: true });
+    renderer.setView(view);
+    browser.runFrames();
+    const before = terrain.calls.length;
+    const farm = sheet.get('improvement.farm', undefined, { on: 'grassland' });
+    expect(terrainDraws(terrain.calls, farm, view, SITE)).toEqual([]);
+
+    // A Worker finishes a farm there: only that field of that tile is different.
+    const tiles = view.tiles.slice();
+    tiles[SITE] = { ...tiles[SITE]!, improvement: 'farm' };
+    const built = { ...view, tiles };
+    renderer.setView(built);
+    browser.runFrames();
+    const patch = terrain.calls.slice(before);
+
+    // The farm is there, on bare ground.
+    expect(terrainDraws(patch, farm, built, SITE).length).toBe(1);
+    expect(terrainDraws(patch, sheet.get('ground.grassland', undefined, { bare: true }), built, SITE).length).toBe(1);
+    expect(terrainDraws(patch, sheet.get('ground.grassland', undefined, { variant: SITE }), built, SITE).length).toBe(0);
+
+    // Wiped and painted: the boxes of the tile and of its six neighbors, and no other; drawing is confined to them.
+    const around = [SITE, ...neighbors(SITE, view)];
+    expect(around.length).toBe(7);
+    const boxes = around.map((tile) => {
+      const origin = tileOrigin(tileCoord(tile, view));
+      return [LAYER_PADDING + origin.px, LAYER_PADDING + origin.py, TILE_WIDTH, TILE_HEIGHT].join();
+    });
+    const rects = patch.filter((call) => call.method === 'rect').map((call) => call.args.join());
+    expect(rects.slice().sort()).toEqual(boxes.slice().sort());
+    const methods = patch.map((call) => call.method);
+    expect(methods.filter((method) => method === 'clip').length).toBe(1);
+    expect(methods.indexOf('clip')).toBeLessThan(methods.indexOf('clearRect'));
+    expect(methods.indexOf('clearRect')).toBeLessThan(methods.indexOf('drawImage'));
+    expect(methods[methods.length - 1]).toBe('restore');
+    // What is painted into those boxes is the tile and the two rings around it (their pictures reach into the boxes).
+    const grounds = patch.filter((call) => call.method === 'drawImage' && call.args.length === 9 && call.args[4] === TILE_HEIGHT);
+    expect(grounds.length).toBe(19);
+
+    // Taking it away again (a city founded on the tile removes what was built there) repaints the same few tiles.
+    const repainted = terrain.calls.length;
+    renderer.setView(view);
+    browser.runFrames();
+    const second = terrain.calls.slice(repainted);
+    expect(second.filter((call) => call.method === 'rect').length).toBe(7);
+    expect(terrainDraws(second, farm, view, SITE)).toEqual([]);
+    expect(terrainDraws(second, sheet.get('ground.grassland', undefined, { variant: SITE }), view, SITE).length).toBe(1);
+  });
+
+  it('the "at work" sign is drawn for a working unit, after the unit; the "builds nothing" sign for the sample city once its queue is emptied, after the units and before the banners; neither for foreign things', () => {
+    const sample = sampleView();
+    const ROME = 4 * 14 + 3;
+    const WORKER_TILE = 5 * 14 + 3;
+    const working = sheet.get('marker.working');
+    const idle = sheet.get('marker.idle');
+    const zoom = 2; // one step out: the whole sample map is on screen
+    /** Where a sprite's top-left corner is drawn for a tile, moved by (dx, dy) art pixels: device pixels on the canvas. */
+    const placeOn = (tile: TileIndex, sprite: Sprite, dx = 0, dy = 0): number[] => {
+      const box = renderer.tileScreenRect(tile);
+      return [box.left - BOX.left + (sprite.offsetX + dx) * zoom, box.top - BOX.top + (sprite.offsetY + dy) * zoom];
+    };
+    /** The place in the frame of the one call that drew this sprite. */
+    const indexOf = (frame: DrawCall[], sprite: Sprite): number => {
+      const found = frame.flatMap((call, index) =>
+        call.method === 'drawImage' && call.args.length === 9 && call.args[1] === sprite.sx && call.args[2] === sprite.sy &&
+        call.args[3] === sprite.width && call.args[4] === sprite.height ? [index] : [],
+      );
+      expect(found.length).toBe(1);
+      return found[0];
+    };
+    const firstBanner = (frame: DrawCall[]): number => frame.findIndex((call) => call.method === 'drawImage' && call.args.length === 3);
+
+    // ---- The sample view: its Worker is at work, Rome is building, and a foreign Worker stands in sight.
+    const foreignWorker: UnitView = { id: 'u2_w0rk3r', type: 'worker', owner: 'p2', tile: 4 * 14 + 8, own: null };
+    const view: PlayerView = { ...sample, units: [...sample.units, foreignWorker] };
+    renderer.setView(view);
+    renderer.zoomBy(-1);
+    const frame = nextFrame();
+
+    // One sign, for the own Worker: left of the figure, drawn right after the (dimmed) figure.
+    const signs = drawsOf(frame, working);
+    expect(signs.length).toBe(1);
+    expect(signs[0].slice(4, 6)).toEqual(placeOn(WORKER_TILE, working));
+    expect(signs[0].slice(6)).toEqual([working.width * zoom, working.height * zoom]);
+    const dimmedWorker = sheet.get('unit.worker', 'rome', { look: 'spent' });
+    expect(drawsOf(frame, sheet.get('unit.worker', 'rome')).length).toBe(0);
+    expect(indexOf(frame, working)).toBe(indexOf(frame, dimmedWorker) + 1);
+    // The foreign Worker is drawn like any unit of another player: bright, without a sign.
+    expect(drawsOf(frame, sheet.get('unit.worker', 'egypt')).length).toBe(1);
+    // Rome has a queue and Thebes is another player's: no "builds nothing" sign anywhere.
+    expect(drawsOf(frame, idle).length).toBe(0);
+
+    // ---- The Worker behind a Warrior: the sign is held back onto its own tile.
+    const shared: PlayerView = {
+      ...view,
+      units: view.units.map((unit) => (unit.id === 'u1_k7m2qd' ? { ...unit, tile: WORKER_TILE } : unit)),
+    };
+    const behind = unitDrawings(shared, null).find((drawing) => drawing.unit.id === 'u1_m4wq7e')!;
+    expect(behind.dx).toBeLessThan(0);
+    const offset = workingSignOffset(behind);
+    expect(offset).not.toEqual({ dx: behind.dx, dy: behind.dy });
+    renderer.setView(shared);
+    browser.now += SLIDE_MS + 50; // the Warrior's slide to the tile is over
+    const sharedFrame = nextFrame();
+    expect(drawsOf(sharedFrame, working).map((draw) => draw.slice(4, 6))).toEqual([placeOn(WORKER_TILE, working, offset.dx, offset.dy)]);
+    expect(drawsOf(sharedFrame, dimmedWorker).map((draw) => draw.slice(4, 6))).toEqual([placeOn(WORKER_TILE, dimmedWorker, behind.dx, behind.dy)]);
+    // The Warrior in front is drawn after the Worker and its sign, so it covers both where they overlap.
+    expect(indexOf(sharedFrame, working)).toBe(indexOf(sharedFrame, dimmedWorker) + 1);
+    expect(indexOf(sharedFrame, sheet.get('unit.warrior', 'rome'))).toBeGreaterThan(indexOf(sharedFrame, working));
+
+    // ---- Rome's queue runs empty while a unit stands in the city, and Thebes comes into sight.
+    const guard: UnitView = { id: 'u1_gu4rd0', type: 'scout', owner: 'p1', tile: ROME, own: { movesLeft: 3, foundCityError: 'cannotFoundCity', job: null, jobOptions: [] } };
+    const idleView: PlayerView = {
+      ...view,
+      units: [...view.units, guard],
+      cities: view.cities.map((city) =>
+        city.own === null ? { ...city, visible: true } : { ...city, own: { ...city.own, buildQueue: [] } },
+      ),
+    };
+    renderer.setView(idleView);
+    browser.now += SLIDE_MS + 50; // the Warrior's slide back to its own tile is over
+    const idleFrame = nextFrame();
+    const idleSigns = drawsOf(idleFrame, idle);
+    expect(idleSigns.length).toBe(1); // Rome's; none for Thebes, although it is in sight now
+    expect(drawsOf(idleFrame, sheet.get('city', 'egypt')).length).toBe(1);
+    expect(idleSigns[0].slice(4, 6)).toEqual(placeOn(ROME, idle));
+    expect(idleSigns[0].slice(6)).toEqual([idle.width * zoom, idle.height * zoom]);
+    // After every unit (the one standing in Rome included) and before the first banner.
+    const unitSprites = [
+      sheet.get('unit.warrior', 'rome'), dimmedWorker, sheet.get('unit.settler', 'rome'), sheet.get('unit.scout', 'rome'),
+      sheet.get('unit.warrior', 'egypt'), sheet.get('unit.worker', 'egypt'),
+    ];
+    const lastUnit = Math.max(...unitSprites.map((sprite) => indexOf(idleFrame, sprite)));
+    expect(indexOf(idleFrame, working)).toBeLessThan(lastUnit); // the "at work" sign is among the units, not after them
+    expect(indexOf(idleFrame, idle)).toBeGreaterThan(lastUnit);
+    expect(firstBanner(idleFrame)).toBeGreaterThan(indexOf(idleFrame, idle));
+    expect(idleFrame.filter((call) => call.method === 'drawImage' && call.args.length === 3).length).toBe(2);
+
+    // ---- Something is queued again: the sign is gone with the next frame.
+    renderer.setView({ ...idleView, cities: view.cities });
+    expect(drawsOf(nextFrame(), idle).length).toBe(0);
+  });
+
+  it('draws neither sign for a unit or a city that is off screen', () => {
+    const sample = sampleView();
+    const idleView: PlayerView = {
+      ...sample,
+      cities: sample.cities.map((city) => (city.own === null ? city : { ...city, own: { ...city.own, buildQueue: [] } })),
+    };
+    renderer.setView(idleView);
+    renderer.zoomBy(3);
+    renderer.centerOn(8 * 14 + 9); // the south-east of the island, far from Rome and its Worker
+    const frame = nextFrame();
+    expect(drawsOf(frame, sheet.get('marker.working')).length).toBe(0);
+    expect(drawsOf(frame, sheet.get('marker.idle')).length).toBe(0);
+    renderer.centerOn(4 * 14 + 3);
+    const back = nextFrame();
+    expect(drawsOf(back, sheet.get('marker.working')).length).toBe(1);
+    expect(drawsOf(back, sheet.get('marker.idle')).length).toBe(1);
   });
 
   it('skips what is off screen: zoomed in on one corner, the far city and units are not drawn', () => {

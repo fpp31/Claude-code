@@ -2,28 +2,31 @@
  * The list of every picture the game has (work package WP5). Pure: no
  * canvas. The sprite sheet rasterises this list; tests walk through it.
  *
- * Most sprite ids have one picture. Three kinds have several VERSIONS:
+ * Most sprite ids have one picture. Four kinds have several VERSIONS:
  *  - a ground has a few variants (the same terrain with its decorations in
  *    other places), named '0', '1', '2'..., and one without decorations for
- *    under a feature, named 'bare';
+ *    under a feature or an improvement, named 'bare';
  *  - a feature has one picture per ground it can stand on, named after the
  *    terrain ('grassland', 'desert'...);
+ *  - an improvement has one picture per ground, named after the terrain,
+ *    like a feature;
  *  - a unit has its picture ('') and the same picture with a pale line
  *    around the figure ('rim'), for standing among trees (rim.ts).
  * Everything else has the single version ''.
  */
 
-import { FEATURE_IDS, TERRAIN_IDS, UNIT_TYPE_IDS } from '@domination/shared';
-import type { FeatureId, TerrainId, UnitTypeId } from '@domination/shared';
+import { FEATURE_IDS, IMPROVEMENT_IDS, TERRAIN_IDS, UNIT_TYPE_IDS } from '@domination/shared';
+import type { FeatureId, ImprovementId, TerrainId, UnitTypeId } from '@domination/shared';
 import { city } from './art/buildings';
 import { FEATURE_SPRITES } from './art/features';
 import { BARE_GROUND_SPRITES, GROUND_SPRITES } from './art/ground';
+import { IMPROVEMENT_SPRITES } from './art/improvements';
 import { MARKER_IDS, MARKER_SPRITES } from './art/markers';
-import { scout, settler, warrior } from './art/units';
+import { scout, settler, warrior, worker } from './art/units';
 import type { SpriteSource } from './format';
 import type { SpriteId } from './spriteSheet';
 
-const UNIT_SPRITES: Record<UnitTypeId, SpriteSource> = { warrior, scout, settler };
+const UNIT_SPRITES: Record<UnitTypeId, SpriteSource> = { warrior, scout, settler, worker };
 
 export interface CatalogEntry {
   id: SpriteId;
@@ -42,10 +45,11 @@ export const BARE_VERSION = 'bare';
 /** The version name of a unit with the pale line around it. */
 export const RIM_VERSION = 'rim';
 
-/** Every sprite id, in a fixed order: grounds, features, units, the city, markers. */
+/** Every sprite id, in a fixed order: grounds, features, improvements, units, the city, markers. */
 export const ALL_SPRITE_IDS: readonly SpriteId[] = [
   ...TERRAIN_IDS.map((terrain): SpriteId => `ground.${terrain}`),
   ...FEATURE_IDS.map((feature): SpriteId => `feature.${feature}`),
+  ...IMPROVEMENT_IDS.map((improvement): SpriteId => `improvement.${improvement}`),
   ...UNIT_TYPE_IDS.map((unitType): SpriteId => `unit.${unitType}`),
   'city',
   ...MARKER_IDS.map((marker): SpriteId => `marker.${marker}`),
@@ -63,6 +67,13 @@ export function buildCatalog(): CatalogEntry[] {
   for (const feature of FEATURE_IDS) {
     for (const terrain of TERRAIN_IDS) {
       entries.push({ id: `feature.${feature}`, version: terrain, source: FEATURE_SPRITES[feature][terrain], owned: false, rim: false });
+    }
+  }
+  for (const improvement of IMPROVEMENT_IDS) {
+    for (const terrain of TERRAIN_IDS) {
+      entries.push({
+        id: `improvement.${improvement}`, version: terrain, source: IMPROVEMENT_SPRITES[improvement][terrain], owned: false, rim: false,
+      });
     }
   }
   for (const unitType of UNIT_TYPE_IDS) {
@@ -94,4 +105,9 @@ export function isUnitSprite(id: SpriteId): boolean {
 /** The feature of a feature sprite id, or null for any other id. */
 export function featureOf(id: SpriteId): FeatureId | null {
   return FEATURE_IDS.find((feature) => id === `feature.${feature}`) ?? null;
+}
+
+/** The improvement of an improvement sprite id, or null for any other id. */
+export function improvementOf(id: SpriteId): ImprovementId | null {
+  return IMPROVEMENT_IDS.find((improvement) => id === `improvement.${improvement}`) ?? null;
 }

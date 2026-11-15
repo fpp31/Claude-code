@@ -36,6 +36,38 @@
  *  16. A double-click on Leave gives no error message, and the first screen
  *      does not offer the game that was just left.
  *
+ * And what the second round added: words about every tile, the build queue
+ * of a city, and the Worker. Four of the steps above grew: step 4 reads the
+ * unit panel's two new lines; step 5 goes on (5a) with the new city, which
+ * asks for something to build and whose queue is edited; step 6 sees the
+ * city save production; step 10 works the queue in the low window. Then
+ * Ada and Ben play on, after everything above, so that steps 1 to 16 play
+ * on a game these have not touched.
+ *
+ * The map explains itself (`checkTheMapExplainsItself`):
+ *  17. Ada rests the mouse on a tile of her own land: a box beside the tile
+ *      says what it is. It goes away on the next tile, on Escape, during a
+ *      drag, with the wheel, with the keyboard and off the map.
+ *  18. Ada clicks tiles: the card in the corner. After End Turn every tile
+ *      answers a tap; in a low window the map steps out from under the card.
+ *  19. A tile Ada has seen and left says so.
+ *  20. The boxes keep the fog: Ben reads nothing about Ada's city.
+ *  21. On a phone, a finger does it all (one more player, a touch screen).
+ *
+ * The queue runs empty (`checkTheQueueRunsEmpty`):
+ *  22. Ada's city completes a unit, its queue runs empty, and the game says so.
+ *
+ * A Worker improves the land (`checkAWorkerImprovesTheLand`):
+ *  23. Ada queues a Worker and puts it first.     28. Stop and start again.
+ *  24. The Worker is built.                       29. The low window.
+ *  25. In the city nothing can be built.          30. Ben learns nothing.
+ *  26. The Worker walks to a tile it can improve. 31. The improvement is finished,
+ *  27. Ada starts the job.                            and is still there after a reload.
+ *
+ * Steps 19 and 26 depend on the map the fixed seed gives, and step 21 on a
+ * browser that can pretend to have a touch screen; each fails with a
+ * sentence that says what to change.
+ *
  * Playwright is NOT a dependency of this project and `npm install` does not
  * fetch it. It is loaded from a global install; the default path below only
  * fits the machine this was first written on, so on your own computer set
@@ -47,10 +79,33 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { idleUnits } from '../packages/client/src/game/selectors';
+import { describeTile, unitTileText } from '../packages/client/src/game/tileInfo';
+import type { TileInfo } from '../packages/client/src/game/tileInfo';
 import { TEST_IDS } from '../packages/client/src/ui/testIds';
+import { todoHints } from '../packages/client/src/ui/texts';
 import { loadConfig } from '../packages/server/src/config';
 import { startServer } from '../packages/server/src/server';
-import type { CityView, PlayerView, TileIndex, UnitView } from '../packages/shared/src/index';
+import {
+  IMPROVEMENTS,
+  IMPROVEMENT_IDS,
+  RULE_ERROR_MESSAGES,
+  UNITS,
+  distance,
+  improvementFits,
+  neighbors,
+} from '../packages/shared/src/index';
+import type {
+  CityId,
+  CityView,
+  ImprovementId,
+  OwnCityDetail,
+  PlayerView,
+  TileIndex,
+  UnitId,
+  UnitTypeId,
+  UnitView,
+} from '../packages/shared/src/index';
 
 const PLAYWRIGHT_PATH = process.env.PLAYWRIGHT_PATH ?? '/opt/node-tools/node_modules/playwright';
 
@@ -63,6 +118,16 @@ const WAIT_MS = 20_000;
  * turn the test waits a little longer than that, as a person would.
  */
 const END_TURN_PAUSE_MS = 800;
+
+/**
+ * The client ignores a press of a build queue's row buttons (up, down,
+ * remove) for 0.6 s after a row press went out (QUEUE_ROW_GUARD_MS in
+ * ui/cityPanel.ts), and a press of "Build ..." or "Stop work" for 0.6 s
+ * after a job started or stopped (JOB_GUARD_MS in game/controller.ts).
+ * Before the next such press the test waits a little longer than that, as
+ * a person would.
+ */
+const GUARD_PAUSE_MS = 700;
 
 // The small functions handed to `page.evaluate` and `page.waitForFunction`
 // run inside the browser, where `window` and `document` exist. This file
@@ -181,14 +246,52 @@ function ownUnit(view: PlayerView, type: UnitView['type']): UnitView {
   return unit;
 }
 
+/** A rectangle on the screen, in CSS pixels. */
+interface Box {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
+/** A point on the screen, in CSS pixels. */
+interface Point {
+  x: number;
+  y: number;
+}
+
 /** Where an element is on the screen, in CSS pixels; fails if the page has no such element. */
-async function boxOf(page: any, selector: string): Promise<{ top: number; bottom: number; width: number; height: number }> {
+async function boxOf(page: any, selector: string): Promise<Box> {
   const box = await page.evaluate((wanted: string) => {
     const rect = document.querySelector(wanted)?.getBoundingClientRect();
-    return rect === undefined ? null : { top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height };
+    return rect === undefined
+      ? null
+      : { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height };
   }, selector);
   if (box === null) throw new Error(`The page has no element "${selector}".`);
   return box;
+}
+
+/** Does `inner` lie wholly inside `outer`? (Half a pixel is forgiven: browsers place things on fractions of a pixel.) */
+function isInside(inner: Box, outer: Box): boolean {
+  return inner.left >= outer.left - 0.5 && inner.right <= outer.right + 0.5 && inner.top >= outer.top - 0.5 && inner.bottom <= outer.bottom + 0.5;
+}
+
+/** Do the two rectangles have a pixel in common? */
+function overlap(a: { left: number; top: number; right: number; bottom: number }, b: { left: number; top: number; right: number; bottom: number }): boolean {
+  return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+}
+
+/** Does the point lie inside the rectangle? */
+function holds(box: Box, point: Point): boolean {
+  return point.x >= box.left && point.x <= box.right && point.y >= box.top && point.y <= box.bottom;
+}
+
+/** "(149, 283)": a place on the screen, for a message. */
+function at(point: Point): string {
+  return `(${Math.round(point.x)}, ${Math.round(point.y)})`;
 }
 
 /** Scrolls the map so the tile is in the middle of the screen, then clicks on it. */
@@ -203,14 +306,410 @@ async function tapTile(page: any, tile: TileIndex): Promise<void> {
 /** The size of a laptop window, which is what the game is played in unless a step says otherwise. */
 const LAPTOP = { width: 1280, height: 800 };
 
-/** Opens a page in a browser of its own (its own storage, so its own player), and watches it for crashes. */
-async function openPlayer(browser: any, name: string, crashes: string[], viewport = LAPTOP): Promise<any> {
-  const context = await browser.newContext({ viewport });
+/** A low window: a phone held sideways. */
+const LOW_WINDOW = { width: 844, height: 390 };
+
+/** The same phone held upright. */
+const PHONE = { width: 390, height: 844 };
+
+/**
+ * Opens a page in a browser of its own (its own storage, so its own player), and watches it for crashes.
+ *
+ * @param touch  true for a browser that has a touch screen, as a phone has:
+ *               the page then gets fingers (`page.touchscreen`, `page.tap`)
+ *               and shows its larger buttons
+ */
+async function openPlayer(browser: any, name: string, crashes: string[], viewport = LAPTOP, touch = false): Promise<any> {
+  const context = await browser.newContext(touch ? { viewport, hasTouch: true } : { viewport });
   const page = await context.newPage();
   page.setDefaultTimeout(WAIT_MS);
   // An exception nobody caught inside the page is a bug, whatever the test was looking at.
   page.on('pageerror', (error: Error) => crashes.push(`${name}'s page: ${error.message}`));
   return page;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for the second round: views, the build queue, the hover box, the
+// tile card, turns, a finger
+// ---------------------------------------------------------------------------
+
+/** Waits until the element with this test id is on the screen (in the page and not hidden). */
+async function waitUntilShown(page: any, id: string): Promise<void> {
+  try {
+    await page.waitForSelector(byTestId(id), { state: 'visible', timeout: WAIT_MS });
+  } catch {
+    throw new Error(`Waited ${WAIT_MS / 1000} s for "${id}" to be on the screen, but it is not.`);
+  }
+}
+
+/**
+ * Waits until what this player's client knows passes `test`, and returns
+ * that view. No button of the game changes anything on the page at the
+ * press: it sends a wish, and the page changes when the server's view comes
+ * back. So every press is followed by a wait like this one.
+ *
+ * @param what   completes the sentence "Waited 20 s for ..."
+ * @param found  says what is there instead, for the message
+ */
+async function waitForView(
+  page: any,
+  what: string,
+  test: (view: PlayerView) => boolean,
+  found: (view: PlayerView) => string = () => 'it did not happen',
+): Promise<PlayerView> {
+  const deadline = Date.now() + WAIT_MS;
+  for (;;) {
+    const view = await viewOf(page);
+    if (test(view)) return view;
+    if (Date.now() > deadline) throw new Error(`Waited ${WAIT_MS / 1000} s for ${what}, but ${found(view)}.`);
+    await page.waitForTimeout(50);
+  }
+}
+
+/** What a player is told about a city of their own; fails if the view has no such city. */
+function ownCity(view: PlayerView, cityId: CityId): OwnCityDetail {
+  const own = view.cities.find((city) => city.id === cityId)?.own ?? null;
+  if (own === null) throw new Error(`${view.you} has no city "${cityId}" of their own.`);
+  return own;
+}
+
+/** The build queue of an own city, as a list of unit types: ['warrior', 'scout']. */
+function queueOf(view: PlayerView, cityId: CityId): UnitTypeId[] {
+  return ownCity(view, cityId).buildQueue.map((entry) => entry.item.unitType);
+}
+
+/** Waits until the city's build queue is exactly this list, and returns the view that shows it. */
+async function waitForQueue(page: any, cityId: CityId, wanted: UnitTypeId[]): Promise<PlayerView> {
+  return waitForView(
+    page,
+    `the build queue to be [${wanted.join(', ')}]`,
+    (view) => isDeepStrictEqual(queueOf(view, cityId), wanted),
+    (view) => `it is [${queueOf(view, cityId).join(', ')}]`,
+  );
+}
+
+/** One of the viewer's own units, by its id; fails if the view no longer has it. */
+function unitOf(view: PlayerView, unitId: UnitId): UnitView {
+  const unit = view.units.find((candidate) => candidate.id === unitId);
+  if (unit === undefined) throw new Error(`${view.you}'s view has no unit "${unitId}".`);
+  return unit;
+}
+
+/** Does anything of the viewer's own stand on this tile (a unit or a city)? */
+function holdsOwnThing(view: PlayerView, tile: TileIndex): boolean {
+  return (
+    view.units.some((unit) => unit.owner === view.you && unit.tile === tile) ||
+    view.cities.some((city) => city.owner === view.you && city.tile === tile)
+  );
+}
+
+/** The tiles an own unit can reach this turn, as the page itself works them out. */
+async function reachableOf(page: any, unitId: UnitId): Promise<TileIndex[]> {
+  return page.evaluate((id: string) => window.__domination.reachable(id), unitId);
+}
+
+/** Where the middle of a tile is on the screen right now. */
+async function screenOf(page: any, tile: TileIndex): Promise<Point> {
+  return page.evaluate((target: number) => window.__domination.tileToScreen(target), tile);
+}
+
+/** Where a tile's box is on the screen right now. */
+async function tileRectOf(page: any, tile: TileIndex): Promise<{ left: number; top: number; right: number; bottom: number }> {
+  return page.evaluate((target: number) => window.__domination.tileScreenRect(target), tile);
+}
+
+/**
+ * Taps a tile until the element with this test id shows this text. A tile
+ * that holds several of the player's things (a unit in a city, a Worker
+ * behind a Warrior) gives them one after the other, tap by tap.
+ */
+async function tapTileUntil(page: any, tile: TileIndex, id: string, text: string): Promise<void> {
+  const most = 3;
+  for (let taps = 0; taps < most; taps++) {
+    await tapTile(page, tile);
+    if ((await page.isVisible(byTestId(id))) && (await textOf(page, id)) === text) return;
+  }
+  throw new Error(`Tapped tile ${tile} ${most} times, but "${id}" never showed "${text}".`);
+}
+
+/** The test ids of one place that prints what is on a tile. There are two: the hover box and the tile card. */
+interface TileWordsIds {
+  box: string;
+  title: string;
+  line: string;
+}
+
+const HOVER_BOX: TileWordsIds = { box: TEST_IDS.hoverBox, title: TEST_IDS.hoverBoxTitle, line: TEST_IDS.hoverBoxLine };
+const TILE_CARD: TileWordsIds = { box: TEST_IDS.tileCard, title: TEST_IDS.tileCardTitle, line: TEST_IDS.tileCardLine };
+
+/** What a hover box or a tile card prints, read from the page. */
+interface ShownTile {
+  /** The tile it says it is about (its data-tile attribute). */
+  tile: number | null;
+  /** How well the player knows that tile (its data-knowledge attribute). */
+  knowledge: string | null;
+  title: string;
+  /** Top to bottom: what each line is about (the end of its test id) and its words. */
+  lines: { kind: string; text: string }[];
+}
+
+/** Reads what the hover box or the tile card prints right now; fails if the page has no such element. */
+async function shownTile(page: any, ids: TileWordsIds): Promise<ShownTile> {
+  const shown = await page.evaluate(
+    ([box, title, line]: string[]) => {
+      const element = document.querySelector(`[data-testid="${box}"]`);
+      if (element === null) return null;
+      const tile = element.getAttribute('data-tile');
+      return {
+        tile: tile === null ? null : Number(tile),
+        knowledge: element.getAttribute('data-knowledge'),
+        title: (element.querySelector(`[data-testid="${title}"]`)?.textContent ?? '').trim(),
+        lines: [...element.querySelectorAll(`[data-testid^="${line}"]`)].map((item: any) => ({
+          kind: item.getAttribute('data-testid').slice(line.length),
+          text: (item.textContent ?? '').trim(),
+        })),
+      };
+    },
+    [ids.box, ids.title, ids.line],
+  );
+  if (shown === null) throw new Error(`The page has no "${ids.box}".`);
+  return shown;
+}
+
+/** Does the page print exactly what describeTile says about the tile: the same title, the same lines, in the same order? */
+function saysTheSame(shown: ShownTile, words: TileInfo): boolean {
+  const lines = words.lines.map((line) => ({ kind: line.kind, text: line.text }));
+  return shown.title === words.title && isDeepStrictEqual(shown.lines, lines);
+}
+
+/** Everything a box prints, on one line, for a message. */
+function wordsOf(shown: { title: string; lines: { text: string }[] }): string {
+  return [shown.title, ...shown.lines.map((line) => line.text)].join(' / ');
+}
+
+/** The words of the lines of one kind ('owner', 'worked', 'canBuild'...). */
+function linesOf(shown: ShownTile, kind: string): string[] {
+  return shown.lines.filter((line) => line.kind === kind).map((line) => line.text);
+}
+
+/** Is the hover box away (not on the screen)? */
+async function hoverBoxIsAway(page: any): Promise<boolean> {
+  return !(await page.isVisible(byTestId(TEST_IDS.hoverBox)));
+}
+
+/**
+ * Waits until the hover box is on the screen, and returns the tile it is about.
+ *
+ * @param tile  the tile it must be about; left out, any tile will do
+ */
+async function waitForHoverBox(page: any, tile: TileIndex | null = null): Promise<TileIndex> {
+  try {
+    await page.waitForFunction(
+      ([selector, wanted]: [string, number | null]) => {
+        const box = document.querySelector(selector);
+        return box !== null && !box.hidden && (wanted === null || box.getAttribute('data-tile') === String(wanted));
+      },
+      [byTestId(TEST_IDS.hoverBox), tile],
+      { timeout: WAIT_MS },
+    );
+  } catch {
+    const away = await hoverBoxIsAway(page);
+    const instead = away ? 'no box is showing' : `the box of tile ${(await shownTile(page, HOVER_BOX)).tile} is showing`;
+    throw new Error(`Waited ${WAIT_MS / 1000} s for the hover box${tile === null ? '' : ` of tile ${tile}`}, but ${instead}.`);
+  }
+  const shown = (await shownTile(page, HOVER_BOX)).tile;
+  if (shown === null) throw new Error('The hover box does not say which tile it is about (it has no data-tile).');
+  return shown;
+}
+
+/**
+ * Brings up the hover box of a tile, as a hand on a mouse does. A box comes
+ * only for a mouse that has MOVED onto a tile and rests there, and not for
+ * the tile that was clicked last. So the map is scrolled until the tile is
+ * in the middle of the screen, the mouse goes to the middle of a
+ * neighboring tile first, then onto the tile, and stays there.
+ */
+async function showHoverBox(page: any, tile: TileIndex): Promise<void> {
+  const beside = neighbors(tile, await viewOf(page))[0];
+  const points = await page.evaluate(
+    ([target, neighbor]: number[]) => {
+      const hook = window.__domination;
+      hook.centerOn(target);
+      return { tile: hook.tileToScreen(target), beside: hook.tileToScreen(neighbor) };
+    },
+    [tile, beside],
+  );
+  await page.mouse.move(points.beside.x, points.beside.y);
+  await page.mouse.move(points.tile.x, points.tile.y);
+  await waitForHoverBox(page, tile);
+}
+
+/**
+ * Makes the page write down what its hover box does from now on: one entry
+ * each time the box appears, goes away or turns to another tile (null: it
+ * went away; a number: it shows that tile). Read with hoverBoxStory.
+ *
+ * "The box is gone the moment the mouse moves on" is over a sixth of a
+ * second later, when the next box comes. Asked from this script, the answer
+ * would depend on how busy the computer is; written down by the page
+ * itself, it does not.
+ */
+async function watchHoverBox(page: any): Promise<void> {
+  await page.evaluate((selector: string) => {
+    const box = document.querySelector(selector);
+    const story: (number | null)[] = [];
+    window.__hoverBoxWatch?.disconnect();
+    window.__hoverBoxStory = story;
+    window.__hoverBoxWatch = new window.MutationObserver(() => {
+      story.push(box.hidden ? null : Number(box.getAttribute('data-tile')));
+    });
+    window.__hoverBoxWatch.observe(box, { attributes: true, attributeFilter: ['hidden', 'data-tile'] });
+  }, byTestId(TEST_IDS.hoverBox));
+}
+
+/**
+ * Waits until the hover box has done something since watchHoverBox and is
+ * on the screen, and returns what it did, oldest first.
+ *
+ * @param after  what was done to the page, for the message: "the mouse moved to the next tile"
+ */
+async function hoverBoxStory(page: any, after: string): Promise<(TileIndex | null)[]> {
+  try {
+    await page.waitForFunction(
+      () => {
+        const story = window.__hoverBoxStory;
+        return story.length > 0 && story[story.length - 1] !== null;
+      },
+      undefined,
+      { timeout: WAIT_MS },
+    );
+  } catch {
+    const story = await page.evaluate(() => window.__hoverBoxStory);
+    throw new Error(`Waited ${WAIT_MS / 1000} s for a hover box after ${after}, but none came (what the box did meanwhile: ${JSON.stringify(story)}).`);
+  }
+  return page.evaluate(() => window.__hoverBoxStory);
+}
+
+/** Is everything this page shows as a message a "Turn N has begun."? More than that, a player whose turn held nothing of their own may not be told. */
+async function onlyTurnNews(page: any): Promise<boolean> {
+  return (await toastTexts(page)).every((text) => /^Turn \d+ has begun\.$/.test(text));
+}
+
+/**
+ * Ada and Ben both end the turn, and both pages arrive in the next one.
+ * Returns the number of that turn.
+ *
+ * Ben does nothing in this game but end his turns. So right after every
+ * turn start his page is looked at: all it may show is that a turn has
+ * begun, whatever Ada has built, queued or improved meanwhile.
+ */
+async function bothEndTheTurn(ada: any, ben: any): Promise<number> {
+  const turn = (await viewOf(ada)).turn;
+  await ada.waitForTimeout(END_TURN_PAUSE_MS);
+  await ada.click(byTestId(TEST_IDS.endTurnButton));
+  for (const page of [ada, ben]) await waitForAttribute(page, TEST_IDS.topPlayer + 'p1', 'data-ended', 'true');
+  await ben.click(byTestId(TEST_IDS.endTurnButton));
+  for (const page of [ada, ben]) {
+    await waitForTurn(page, turn + 1);
+    await waitForAttribute(page, TEST_IDS.endTurnButton, 'data-ended', 'false');
+  }
+  check(await onlyTurnNews(ben), `all Ben is told is that turn ${turn + 1} has begun (on his screen: ${(await toastTexts(ben)).join(' | ')})`);
+  return turn + 1;
+}
+
+/** Where the bottom-left panels float in a low window: a tile brought here lies under the panel that opens for it. */
+const PANEL_CORNER: Point = { x: 60, y: 330 };
+
+/**
+ * Scrolls the map so that a tile comes to lie near a place on the screen,
+ * with the debug hook alone (no dragging), and returns where the tile is
+ * afterwards. The hook can only put a tile in the MIDDLE of the map. So
+ * this looks for the tile that lies as far from the wanted tile as the
+ * middle lies from the wanted place, and puts that one in the middle.
+ */
+async function bringTileNear(page: any, tile: TileIndex, place: Point): Promise<Point> {
+  return page.evaluate(
+    ([target, wanted, selector]: [number, { x: number; y: number }, string]) => {
+      const hook = window.__domination;
+      const canvas = document.querySelector(selector).getBoundingClientRect();
+      const from = hook.tileToScreen(target);
+      const aim = { x: from.x + (canvas.left + canvas.right) / 2 - wanted.x, y: from.y + (canvas.top + canvas.bottom) / 2 - wanted.y };
+      let nearest = 0;
+      let nearestGap = Infinity;
+      for (let candidate = 0; candidate < hook.view().tiles.length; candidate++) {
+        const point = hook.tileToScreen(candidate);
+        const gap = Math.hypot(point.x - aim.x, point.y - aim.y);
+        if (gap < nearestGap) {
+          nearest = candidate;
+          nearestGap = gap;
+        }
+      }
+      hook.centerOn(nearest);
+      return hook.tileToScreen(target);
+    },
+    [tile, place, byTestId(TEST_IDS.gameCanvas)],
+  );
+}
+
+/** Did the tile arrive where bringTileNear was asked to put it (within 45 pixels both ways: tiles lie about 80 apart)? */
+function isNear(point: Point, place: Point): boolean {
+  return Math.abs(point.x - place.x) <= 45 && Math.abs(point.y - place.y) <= 45;
+}
+
+/**
+ * Within a second: is the middle of the tile outside the element's box?
+ * (The map steps aside one or two frames after a panel has opened on the
+ * tile it is about.)
+ */
+async function comesOutFromUnder(page: any, tile: TileIndex, selector: string): Promise<boolean> {
+  try {
+    await page.waitForFunction(
+      ([target, wanted]: [number, string]) => {
+        const point = window.__domination.tileToScreen(target);
+        const box = document.querySelector(wanted).getBoundingClientRect();
+        return !(point.x >= box.left && point.x <= box.right && point.y >= box.top && point.y <= box.bottom);
+      },
+      [tile, selector],
+      { timeout: 1000 },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Waits until the page has drawn three more frames. The map steps aside for
+ * a panel that has just opened or changed its size, one or two frames
+ * later; a finger that is aimed at a tile before that would land beside it.
+ */
+async function settled(page: any): Promise<void> {
+  await page.evaluate(
+    () =>
+      new Promise<void>((done) => {
+        window.requestAnimationFrame(() => window.requestAnimationFrame(() => window.requestAnimationFrame(() => done())));
+      }),
+  );
+}
+
+/** Scrolls the map so the tile is in the middle of the map, then taps it with a finger. */
+async function fingerTile(page: any, tile: TileIndex): Promise<void> {
+  await settled(page);
+  const point = await page.evaluate((target: number) => {
+    window.__domination.centerOn(target);
+    return window.__domination.tileToScreen(target);
+  }, tile);
+  await page.touchscreen.tap(point.x, point.y);
+}
+
+/** tapTileUntil with a finger. */
+async function fingerTileUntil(page: any, tile: TileIndex, id: string, text: string): Promise<void> {
+  const most = 3;
+  for (let taps = 0; taps < most; taps++) {
+    await fingerTile(page, tile);
+    if ((await page.isVisible(byTestId(id))) && (await textOf(page, id)) === text) return;
+  }
+  throw new Error(`Tapped tile ${tile} ${most} times with a finger, but "${id}" never showed "${text}".`);
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +780,12 @@ async function playTwoPlayers(setup: TestSetup): Promise<void> {
     (await textOf(ada, TEST_IDS.unitPanel)).includes('Tap the same tile again to select the Settler.'),
     'the Warrior\'s panel says how to get at the Settler on the same tile',
   );
+  check((await textOf(ada, TEST_IDS.unitDescription)) === UNITS.warrior.description, 'the unit panel says what a Warrior is for');
+  const tileLine = await textOf(ada, TEST_IDS.unitTile);
+  check(
+    tileLine === unitTileText(start, warrior) && tileLine.startsWith('Tile: '),
+    `the unit panel has a line about the tile the Warrior stands on (it says "${tileLine}")`,
+  );
   const reachable: TileIndex[] = await ada.evaluate((id: string) => window.__domination.reachable(id), warrior.id);
   check(reachable.length > 0, 'the Warrior can reach at least one tile');
   check(!reachable.includes(warrior.tile), 'the tile the Warrior stands on is not a place to go');
@@ -321,6 +826,60 @@ async function playTwoPlayers(setup: TestSetup): Promise<void> {
   check(!JSON.stringify(benView).includes(city.id), 'the city\'s id appears nowhere in what Ben was sent');
   check((await ben.locator(byTestId(TEST_IDS.toast)).count()) === 0, 'Ben was shown no message about it');
 
+  step('5a. Ada opens her new city: it asks for something to build, and the queue can be edited');
+  await tapTile(ada, city.tile);
+  await waitForText(ada, TEST_IDS.cityName, 'Rome');
+  check((await textOf(ada, TEST_IDS.cityProduction)).includes('Nothing to build'), 'the panel of a new city says that it has nothing to build');
+  check((await textOf(ada, TEST_IDS.endTurnButton)).includes('Rome has nothing to build'), 'the End Turn button names the city that builds nothing');
+  await showHoverBox(ada, city.tile);
+  check(
+    isDeepStrictEqual(linesOf(await shownTile(ada, HOVER_BOX), 'building'), ['Builds nothing']),
+    'the hover box on the city says "Builds nothing"',
+  );
+
+  await ada.click(byTestId(TEST_IDS.buildOption + 'warrior'));
+  await waitForQueue(ada, city.id, ['warrior']);
+  const firstRow = await textOf(ada, TEST_IDS.queueRow + 0);
+  check(firstRow.includes('Warrior') && firstRow.includes('now'), `the first row of the queue is the Warrior, being built now (it says "${firstRow}")`);
+  check((await textOf(ada, TEST_IDS.queueCount)) === 'Queue 1 of 8', 'the head of the panel counts the queue');
+  check(!(await textOf(ada, TEST_IDS.endTurnButton)).includes('Rome'), 'the End Turn button no longer names Rome');
+
+  await ada.click(byTestId(TEST_IDS.buildOption + 'scout'));
+  await waitForQueue(ada, city.id, ['warrior', 'scout']);
+  const secondRow = await textOf(ada, TEST_IDS.queueRow + 1);
+  check(secondRow.includes('Scout') && secondRow.includes('in '), `the second row is the Scout, with the turn it will be done in (it says "${secondRow}")`);
+
+  await ada.click(byTestId(TEST_IDS.queueUp + 1));
+  await waitForQueue(ada, city.id, ['scout', 'warrior']);
+  await ada.waitForTimeout(GUARD_PAUSE_MS);
+  await ada.click(byTestId(TEST_IDS.queueDown + 0));
+  await waitForQueue(ada, city.id, ['warrior', 'scout']);
+  check(await ada.isDisabled(byTestId(TEST_IDS.queueUp + 0)), 'the first row cannot go further up: its up arrow is greyed out');
+  check(await ada.isDisabled(byTestId(TEST_IDS.queueDown + 1)), 'the last row cannot go further down: its down arrow is greyed out');
+
+  // The row guard. A double-click removes one entry, not two; and the row
+  // that slid under the pointer is safe for the rest of the guard's 0.6 s.
+  await ada.waitForTimeout(GUARD_PAUSE_MS);
+  await ada.dblclick(byTestId(TEST_IDS.queueRemove + 1));
+  await waitForQueue(ada, city.id, ['warrior']);
+  await ada.click(byTestId(TEST_IDS.queueRemove + 0));
+  await ada.waitForTimeout(400); // the answer to a second removal would be here by now
+  check(
+    isDeepStrictEqual(queueOf(await viewOf(ada), city.id), ['warrior']),
+    'a double-click on a remove button, and a press right after it, took one entry out of the queue, not two',
+  );
+
+  await ada.click(byTestId(TEST_IDS.buildOption + 'scout'));
+  await waitForQueue(ada, city.id, ['warrior', 'scout']);
+  check(
+    (await ada.isVisible(byTestId(TEST_IDS.buildOption + 'worker'))) &&
+      (await textOf(ada, TEST_IDS.buildOption + 'worker')).includes(UNITS.worker.description),
+    'the city can build a Worker, and the button says what a Worker is for',
+  );
+  check((await toastTexts(ben)).length === 0, `Ben was shown no message about any of it (on his screen: ${(await toastTexts(ben)).join(' | ')})`);
+  check(!JSON.stringify(await viewOf(ben)).includes('buildQueue'), 'what Ben was sent holds nobody\'s build queue');
+  await ada.keyboard.press('Escape');
+
   step('6. Ada ends her turn: still turn 1. Ben ends his: turn 2');
   await ada.click(byTestId(TEST_IDS.endTurnButton));
   await waitForAttribute(ada, TEST_IDS.endTurnButton, 'data-ended', 'true');
@@ -334,6 +893,9 @@ async function playTwoPlayers(setup: TestSetup): Promise<void> {
     await waitForAttribute(page, TEST_IDS.topPlayer + 'p1', 'data-ended', 'false');
   }
   check(ownUnit(await viewOf(ada), 'warrior').own?.movesLeft === 2, 'a new turn gives the Warrior its moves back');
+  const afterOneTurn = await viewOf(ada);
+  check(ownCity(afterOneTurn, city.id).productionStored > 0, 'the city has saved production for what it builds');
+  check(isDeepStrictEqual(queueOf(afterOneTurn, city.id), ['warrior', 'scout']), 'the queue still has its two entries');
 
   step('7. Ada reloads the page: same game, same seat, turn 2, and her city is there');
   await ada.reload();
@@ -362,6 +924,9 @@ async function playTwoPlayers(setup: TestSetup): Promise<void> {
 
   await checkTheScreenHoldsTogether(setup, crashes, ada, link, city);
   await checkTheSmallThings(setup, crashes);
+  await checkTheMapExplainsItself(setup, crashes, ada, ben, city);
+  await checkTheQueueRunsEmpty(ada, ben, city);
+  await checkAWorkerImprovesTheLand(ada, ben, city);
 
   check(crashes.length === 0, `no page may crash, but: ${crashes.join('; ')}`);
 }
@@ -398,6 +963,34 @@ async function checkTheScreenHoldsTogether(setup: TestSetup, crashes: string[], 
     `the city panel starts below the top bar (the bar ends at ${lowWindow.bar.bottom}, the panel starts at ${lowWindow.panel.top})`,
   );
   check(lowWindow.panel.bottom <= 390, `the city panel ends on the screen (at ${lowWindow.panel.bottom} of 390)`);
+
+  // The queue can be worked in a low window. The Settler's button is far
+  // down the panel: the click scrolls it into view first.
+  await ada.click(byTestId(TEST_IDS.buildOption + 'settler'));
+  await waitForQueue(ada, city.id, ['warrior', 'scout', 'settler']);
+  await waitUntilShown(ada, TEST_IDS.queueRow + 2);
+  const scrolledBy: number = await ada.evaluate((selector: string) => document.querySelector(selector).scrollTop, byTestId(TEST_IDS.cityPanel));
+  check(scrolledBy > 0, 'the panel had to scroll to reach the Settler\'s button (if not, the checks of its head below check nothing: make the window lower)');
+  const scrolled = {
+    panel: await boxOf(ada, byTestId(TEST_IDS.cityPanel)),
+    close: await boxOf(ada, `${byTestId(TEST_IDS.cityPanel)} .panel-close`),
+    count: await boxOf(ada, byTestId(TEST_IDS.queueCount)),
+    row: await boxOf(ada, byTestId(TEST_IDS.queueRow + 2)),
+    rowEnd: await boxOf(ada, byTestId(TEST_IDS.queueRemove + 2)),
+  };
+  check(
+    scrolled.panel.top >= lowWindow.bar.bottom && scrolled.panel.bottom <= 390,
+    `with three entries the city panel is still below the top bar and on the screen (it reaches from ${scrolled.panel.top} to ${scrolled.panel.bottom})`,
+  );
+  check(isInside(scrolled.close, scrolled.panel), 'the close button stayed in sight while the panel scrolled');
+  check(isInside(scrolled.count, scrolled.panel), 'the queue count in the panel\'s head stayed in sight while the panel scrolled');
+  check(
+    scrolled.row.width <= scrolled.panel.width && scrolled.rowEnd.right <= scrolled.panel.right + 0.5,
+    `a queue row is not wider than the panel, and its last button ends inside the panel (the row is ${scrolled.row.width} pixels wide, the panel ${scrolled.panel.width}; the button ends at ${scrolled.rowEnd.right}, the panel at ${scrolled.panel.right})`,
+  );
+  await ada.click(byTestId(TEST_IDS.queueRemove + 2));
+  await waitForQueue(ada, city.id, ['warrior', 'scout']);
+
   await ada.keyboard.press('Escape');
   await ada.setViewportSize(LAPTOP);
 
@@ -514,6 +1107,592 @@ async function checkTheSmallThings(setup: TestSetup, crashes: string[]): Promise
   check(!dora.url().includes('g='), 'the address no longer names the game');
 
   await dora.context().close();
+}
+
+/**
+ * Steps 17 to 21: the words about tiles. A box beside the tile under a
+ * resting mouse, a card in the corner for a tile that was clicked, and the
+ * card again under a finger on a phone. Both print what describeTile
+ * (packages/client/src/game/tileInfo.ts) makes of the player's own view, so
+ * the test compares the page with that function instead of repeating its
+ * sentences.
+ *
+ * @param ada   the page of the player who owns `city`
+ * @param ben   the page of the other player, who has never seen that city
+ */
+async function checkTheMapExplainsItself(setup: TestSetup, crashes: string[], ada: any, ben: any, city: CityView): Promise<void> {
+  step('17. Ada rests the mouse on a tile of her own land: a box beside the tile says what it is');
+  await ada.keyboard.press('Escape');
+  const view = await viewOf(ada);
+  const spot = view.tiles.findIndex(
+    (tile, index) =>
+      tile !== null &&
+      tile.owner === view.you &&
+      tile.visible &&
+      !view.units.some((unit) => unit.tile === index) &&
+      !view.cities.some((other) => other.tile === index),
+  );
+  check(spot !== -1, 'Ada has a tile of her own land with no unit and no city on it');
+  const next = neighbors(spot, view).find((tile) => view.tiles[tile] !== null);
+  if (next === undefined) throw new Error(`Check failed: Ada has seen a neighbor of tile ${spot}`);
+  await showHoverBox(ada, spot);
+  const box = await shownTile(ada, HOVER_BOX);
+  const words = describeTile(view, spot);
+  check(box.tile === spot, `the box says which tile it is about (tile ${spot}; it says ${box.tile})`);
+  check(saysTheSame(box, words), `the box prints what describeTile says about the tile (the box: "${wordsOf(box)}"; describeTile: "${wordsOf(words)}")`);
+  check(isDeepStrictEqual(linesOf(box, 'owner'), ['Belongs to you']), 'the box says that the land is Ada\'s own');
+  check(
+    linesOf(box, 'worked').length === 1,
+    'the box says whether a citizen works the tile (if this fails after a change to the map generator, the first tile of Ada\'s land cannot be worked: pick another seed)',
+  );
+  const boxAt = await boxOf(ada, byTestId(TEST_IDS.hoverBox));
+  check(!overlap(boxAt, await tileRectOf(ada, spot)), 'the box lies beside the tile, never on it');
+  check(boxAt.top >= (await boxOf(ada, '.top-bar')).bottom, 'the box starts below the top bar');
+  check(
+    boxAt.left >= 0 && boxAt.top >= 0 && boxAt.right <= LAPTOP.width && boxAt.bottom <= LAPTOP.height,
+    `the box lies inside the window (it reaches from ${at({ x: boxAt.left, y: boxAt.top })} to ${at({ x: boxAt.right, y: boxAt.bottom })})`,
+  );
+
+  // The next tile. The box of the tile the mouse has left goes away at
+  // once; the next one comes when the mouse has rested again.
+  await watchHoverBox(ada);
+  const nextPoint = await screenOf(ada, next);
+  await ada.mouse.move(nextPoint.x, nextPoint.y);
+  const onTheWay = await hoverBoxStory(ada, 'the mouse moved to the next tile');
+  check(onTheWay[0] === null, `the box goes away the moment the mouse is on another tile (what it did: ${JSON.stringify(onTheWay)})`);
+  await waitForHoverBox(ada, next);
+
+  // Escape closes only the box. (With a unit selected the box takes its
+  // time, so that it does not hop about over the tiles the unit is sent to.)
+  const warrior = ownUnit(view, 'warrior');
+  await tapTile(ada, warrior.tile);
+  await waitForText(ada, TEST_IDS.unitName, 'Warrior');
+  const reach = await reachableOf(ada, warrior.id);
+  check(reach.length > 0, 'the Warrior can go somewhere, so there is a tile to aim at');
+  await showHoverBox(ada, reach[0]);
+  await ada.keyboard.press('Escape');
+  check(await hoverBoxIsAway(ada), 'Escape closes the hover box');
+  check(await ada.isVisible(byTestId(TEST_IDS.unitPanel)), 'and nothing else: the Warrior is still selected');
+  await ada.keyboard.press('Escape');
+  check(!(await ada.isVisible(byTestId(TEST_IDS.unitPanel))), 'Escape without a hover box clears the selection, as before');
+
+  // A drag. Nothing is shown from the press on; when the map has come to
+  // rest, the tile under the mouse gets its box.
+  await showHoverBox(ada, spot);
+  const grip = await screenOf(ada, spot);
+  await ada.mouse.down();
+  check(await hoverBoxIsAway(ada), 'the box goes away when the mouse button goes down');
+  for (let dragged = 10; dragged <= 40; dragged += 10) {
+    await ada.mouse.move(grip.x + dragged, grip.y);
+    check(await hoverBoxIsAway(ada), `no box is shown while the map is dragged (${dragged} pixels so far)`);
+  }
+  await ada.mouse.up();
+  check((await screenOf(ada, spot)).x > grip.x + 20, 'the map went along with the mouse');
+  check(
+    !(await ada.isVisible(byTestId(TEST_IDS.tileCard))) &&
+      !(await ada.isVisible(byTestId(TEST_IDS.unitPanel))) &&
+      !(await ada.isVisible(byTestId(TEST_IDS.cityPanel))),
+    'a drag is not a click: no card opened and nothing was selected',
+  );
+  await waitForHoverBox(ada);
+
+  // The wheel. Gone at once; back when the map has come to rest, and again
+  // beside its tile.
+  await watchHoverBox(ada);
+  await ada.mouse.wheel(0, -100);
+  const whileZooming = await hoverBoxStory(ada, 'the wheel turned');
+  check(whileZooming[0] === null, `the box goes away the moment the wheel turns (what it did: ${JSON.stringify(whileZooming)})`);
+  const zoomedOn = await waitForHoverBox(ada);
+  check(
+    !overlap(await boxOf(ada, byTestId(TEST_IDS.hoverBox)), await tileRectOf(ada, zoomedOn)),
+    'after the zoom step the box is again beside its tile, not on it',
+  );
+  await ada.waitForTimeout(500); // for 0.4 s the wheel counts as still turning; after that a notch is a step again
+  await watchHoverBox(ada);
+  await ada.mouse.wheel(0, 100);
+  await hoverBoxStory(ada, 'the wheel turned back');
+
+  // The keyboard. The map moves and the mouse does not: the box goes away
+  // and stays away until the mouse itself moves.
+  await ada.keyboard.press('+');
+  check(await hoverBoxIsAway(ada), 'the box goes away when a key zooms the map');
+  await ada.waitForTimeout(700);
+  check(await hoverBoxIsAway(ada), 'and it stays away while the mouse rests');
+  await ada.keyboard.press('-');
+  await ada.mouse.move(grip.x + 42, grip.y);
+  await waitForHoverBox(ada);
+
+  // Off the map.
+  await ada.hover(byTestId(TEST_IDS.endTurnButton));
+  check(await hoverBoxIsAway(ada), 'the box goes away when the mouse leaves the map');
+
+  step('18. Ada clicks tiles: the card in the corner says the same, also after End Turn and in a low window');
+  // Her city's panel is open when she clicks the first tile, so that the card has something to take the place of.
+  await tapTile(ada, city.tile);
+  await waitForText(ada, TEST_IDS.cityName, city.name);
+  await tapTile(ada, spot);
+  await waitUntilShown(ada, TEST_IDS.tileCard);
+  const card = await shownTile(ada, TILE_CARD);
+  check(card.tile === spot, `the card says which tile it is about (tile ${spot}; it says ${card.tile})`);
+  check(saysTheSame(card, words), `the card prints what describeTile says about the tile, as the hover box did (the card: "${wordsOf(card)}"; describeTile: "${wordsOf(words)}")`);
+  check(
+    !(await ada.isVisible(byTestId(TEST_IDS.unitPanel))) && !(await ada.isVisible(byTestId(TEST_IDS.cityPanel))),
+    'the card is the only thing bottom left: the city panel made room for it',
+  );
+  await tapTile(ada, spot);
+  check(await ada.isVisible(byTestId(TEST_IDS.tileCard)), 'a second click on the same tile leaves the card open');
+  await ada.click(byTestId(TEST_IDS.tileCardClose));
+  check(!(await ada.isVisible(byTestId(TEST_IDS.tileCard))), 'the x button closes the card');
+
+  const unseen = view.tiles.findIndex((tile) => tile === null);
+  check(unseen !== -1, 'Ada has not seen the whole map yet');
+  await tapTile(ada, unseen);
+  await waitUntilShown(ada, TEST_IDS.tileCard);
+  const blank = await shownTile(ada, TILE_CARD);
+  check(blank.tile === unseen && blank.title === 'Unexplored', `the card of a tile Ada has never seen is headed "Unexplored" (it says "${blank.title}")`);
+  check(blank.lines.length === 0, `and has no lines (it says "${wordsOf(blank)}")`);
+  await ada.keyboard.press('Escape');
+  check(!(await ada.isVisible(byTestId(TEST_IDS.tileCard))), 'Escape closes the card');
+  // A card is open again when she clicks her own city, so that there is a card that has to go.
+  await tapTile(ada, spot);
+  await waitUntilShown(ada, TEST_IDS.tileCard);
+  await tapTile(ada, city.tile);
+  await waitForText(ada, TEST_IDS.cityName, city.name);
+  check(
+    (await ada.isVisible(byTestId(TEST_IDS.cityPanel))) && !(await ada.isVisible(byTestId(TEST_IDS.tileCard))),
+    'a click on Ada\'s own city opens the city panel and closes the card',
+  );
+  await ada.keyboard.press('Escape');
+
+  // After End Turn every tile answers a tap. (A tile the selected unit
+  // could reach used to swallow the tap while the turn was ended.)
+  await tapTile(ada, warrior.tile);
+  await waitForText(ada, TEST_IDS.unitName, 'Warrior');
+  const target = (await reachableOf(ada, warrior.id)).find((tile) => !holdsOwnThing(view, tile)); // nothing has moved since `view`
+  if (target === undefined) throw new Error('Check failed: the Warrior can reach a tile that holds nothing of Ada\'s');
+  await ada.click(byTestId(TEST_IDS.endTurnButton));
+  await waitForAttribute(ada, TEST_IDS.endTurnButton, 'data-ended', 'true');
+  await tapTile(ada, target);
+  await waitUntilShown(ada, TEST_IDS.tileCard);
+  check((await shownTile(ada, TILE_CARD)).tile === target, 'after End Turn a tap on a tile the Warrior could reach opens that tile\'s card');
+  await ada.waitForTimeout(END_TURN_PAUSE_MS); // the answer to an order would be here by now; and the pause before End Turn is pressed again
+  check(unitOf(await viewOf(ada), warrior.id).tile === warrior.tile, 'and the Warrior has not moved');
+  await ada.click(byTestId(TEST_IDS.endTurnButton));
+  await waitForAttribute(ada, TEST_IDS.endTurnButton, 'data-ended', 'false');
+  await ada.keyboard.press('Escape');
+
+  // The low window. The card opens bottom left, so the tile is brought
+  // there first: the map then has to step out from under the card.
+  await ada.setViewportSize(LOW_WINDOW);
+  await settled(ada); // the page takes a new window size in with its next frames; nobody clicks sooner
+  const under = await bringTileNear(ada, spot, PANEL_CORNER);
+  check(
+    isNear(under, PANEL_CORNER),
+    `the tile did not arrive in the bottom-left corner (the camera stops at the map's edge): pick another tile for this step (it is at ${at(under)})`,
+  );
+  await ada.mouse.click(under.x, under.y);
+  await waitUntilShown(ada, TEST_IDS.tileCard);
+  const lowCard = await boxOf(ada, byTestId(TEST_IDS.tileCard));
+  check((await shownTile(ada, TILE_CARD)).tile === spot, 'the click in the corner opened the card of the tile that was brought there');
+  check(lowCard.top >= (await boxOf(ada, '.top-bar')).bottom, 'in a low window the card starts below the top bar');
+  check(lowCard.bottom <= LOW_WINDOW.height, `the card ends on the screen (at ${lowCard.bottom} of ${LOW_WINDOW.height})`);
+  check(lowCard.height <= 150, `the card is at most 150 pixels tall (it is ${lowCard.height})`);
+  check(holds(lowCard, under), `the card opened on top of its own tile (if not, the next check checks nothing: move the corner; the tile was at ${at(under)})`);
+  check(await comesOutFromUnder(ada, spot, byTestId(TEST_IDS.tileCard)), 'within a second the map has stepped aside, and the tile is no longer under its card');
+  await ada.keyboard.press('Escape');
+  await ada.setViewportSize(LAPTOP);
+
+  step('19. A tile Ada has seen and left says so');
+  await tapTile(ada, warrior.tile);
+  await waitForText(ada, TEST_IDS.unitName, 'Warrior');
+  const fromCity = (tile: TileIndex): number => distance(tile, city.tile, view);
+  const wayOut = await reachableOf(ada, warrior.id);
+  check(wayOut.length > 0, 'the Warrior can walk away from the city');
+  const away = wayOut.reduce((far, tile) => (fromCity(tile) > fromCity(far) ? tile : far));
+  await tapTile(ada, away);
+  await waitForView(ada, 'the Warrior to walk away from the city', (now) => unitOf(now, warrior.id).tile === away);
+  await bothEndTheTurn(ada, ben);
+  const wayBack = (await reachableOf(ada, warrior.id)).filter((tile) => tile !== city.tile);
+  check(wayBack.length > 0, 'the Warrior can walk back towards the city');
+  const back = wayBack.reduce((near, tile) => (fromCity(tile) < fromCity(near) ? tile : near));
+  await tapTile(ada, back);
+  const walked = await waitForView(ada, 'the Warrior to walk back towards the city', (now) => unitOf(now, warrior.id).tile === back);
+  const fogged = walked.tiles.findIndex((tile) => tile !== null && !tile.visible);
+  check(fogged !== -1, 'no tile is out of sight after the walk: pick another seed or walk further');
+  await ada.keyboard.press('Escape');
+  await tapTile(ada, fogged);
+  await waitUntilShown(ada, TEST_IDS.tileCard);
+  const remembered = await shownTile(ada, TILE_CARD);
+  check(remembered.tile === fogged && remembered.knowledge === 'remembered', `the card of a tile out of sight is marked as remembered (it is marked "${remembered.knowledge}")`);
+  check(linesOf(remembered, 'remembered').length === 1, 'its first words are that the tile is shown as Ada last saw it');
+  check(linesOf(remembered, 'unit').length === 0, 'and it names no unit');
+  await ada.keyboard.press('Escape');
+
+  step('20. The boxes keep the fog: Ben reads nothing about the tile of Ada\'s city');
+  check(
+    (await viewOf(ben)).tiles[city.tile] === null,
+    'Ben has never seen the tile of Ada\'s city (if this fails after a change to the map generator, this step checks nothing: pick another seed)',
+  );
+  await tapTile(ben, city.tile);
+  await waitUntilShown(ben, TEST_IDS.tileCard);
+  const benCard = await shownTile(ben, TILE_CARD);
+  check(benCard.tile === city.tile && benCard.title === 'Unexplored' && benCard.lines.length === 0, `Ben's card of that tile says "Unexplored" and nothing else (it says "${wordsOf(benCard)}")`);
+  check(!(await textOf(ben, TEST_IDS.tileCard)).includes(city.name), 'the city\'s name is nowhere on Ben\'s card');
+  await showHoverBox(ben, city.tile);
+  const benBox = await shownTile(ben, HOVER_BOX);
+  check(benBox.title === 'Unexplored' && benBox.lines.length === 0, `Ben's hover box on that tile says the same (it says "${wordsOf(benBox)}")`);
+  check(!(await textOf(ben, TEST_IDS.hoverBox)).includes(city.name), 'the city\'s name is nowhere in Ben\'s hover box');
+  await ben.keyboard.press('Escape'); // the box
+  await ben.keyboard.press('Escape'); // the card
+
+  step('21. On a phone, a finger does it all: Eve taps units and tiles, founds a city and queues a Warrior');
+  const eve = await openPlayer(setup.browser, 'Eve', crashes, PHONE, true);
+  await eve.goto(setup.baseUrl);
+  await eve.fill(byTestId(TEST_IDS.homeNameInput), 'Eve');
+  await eve.waitForSelector(`${byTestId(TEST_IDS.homeCreateButton)}:enabled`);
+  await eve.tap(byTestId(TEST_IDS.homeCreateButton));
+  await eve.waitForSelector(byTestId(TEST_IDS.lobbyCode));
+  await eve.tap(byTestId(TEST_IDS.lobbyStartButton));
+  await eve.waitForSelector(byTestId(TEST_IDS.gameCanvas));
+  await waitForTurn(eve, 1);
+  check(
+    await eve.evaluate(() => window.matchMedia('(pointer: coarse)').matches),
+    'the page takes this browser for one with a touch screen (if not, this step checks nothing: start the browser with a touch screen another way)',
+  );
+  const eveStart = await viewOf(eve);
+  const eveWarrior = ownUnit(eveStart, 'warrior');
+  const home = eveWarrior.tile;
+  const phoneScreen = { left: 0, top: 0, right: PHONE.width, bottom: PHONE.height, width: PHONE.width, height: PHONE.height };
+
+  await fingerTile(eve, home);
+  await waitForText(eve, TEST_IDS.unitName, 'Warrior');
+  check(
+    (await eve.isVisible(byTestId(TEST_IDS.unitTile))) && (await textOf(eve, TEST_IDS.unitTile)).startsWith('Tile: '),
+    'a tap on a unit opens its panel, with the line about its tile',
+  );
+  await eve.tap(`${byTestId(TEST_IDS.unitPanel)} .panel-close`);
+  check(!(await eve.isVisible(byTestId(TEST_IDS.unitPanel))), 'the x button closes the unit panel');
+
+  const beside = neighbors(home, eveStart).find((tile) => !eveStart.units.some((unit) => unit.tile === tile));
+  if (beside === undefined) throw new Error('Check failed: a tile next to Eve\'s start has nothing on it');
+  await fingerTile(eve, beside);
+  await waitUntilShown(eve, TEST_IDS.tileCard);
+  await settled(eve);
+  const deckCard = await boxOf(eve, byTestId(TEST_IDS.tileCard));
+  const phoneMap = await boxOf(eve, byTestId(TEST_IDS.gameCanvas));
+  check((await shownTile(eve, TILE_CARD)).tile === beside, 'a tap on a tile with nothing on it opens that tile\'s card');
+  check(deckCard.top >= phoneMap.bottom - 0.5, `on a phone held upright the card lies in the deck below the map (the map ends at ${phoneMap.bottom}, the card starts at ${deckCard.top})`);
+  check(isInside(deckCard, phoneScreen), `the card is wholly on the screen (it reaches from ${at({ x: deckCard.left, y: deckCard.top })} to ${at({ x: deckCard.right, y: deckCard.bottom })})`);
+  check(!(await eve.isVisible(byTestId(TEST_IDS.startHint))), 'the "First steps" note makes room for the card');
+  await eve.waitForTimeout(1000);
+  check(await hoverBoxIsAway(eve), 'a finger never brings up a hover box');
+
+  await fingerTile(eve, home);
+  await waitForText(eve, TEST_IDS.unitName, 'Warrior');
+  const eveReach = await reachableOf(eve, eveWarrior.id);
+  check(eveReach.length > 0, 'Eve\'s Warrior can go somewhere');
+  await fingerTile(eve, eveReach[0]);
+  await waitForView(eve, 'Eve\'s Warrior to walk to the tapped tile', (now) => unitOf(now, eveWarrior.id).tile === eveReach[0]);
+  check(!(await eve.isVisible(byTestId(TEST_IDS.tileCard))), 'a tap on a highlighted tile is an order: no card opens');
+
+  // No Escape key on a phone: the x button clears the selection, so that
+  // the next tap on the start tile selects instead of calling the Warrior back.
+  await eve.tap(`${byTestId(TEST_IDS.unitPanel)} .panel-close`);
+  await fingerTileUntil(eve, home, TEST_IDS.unitName, 'Settler');
+  await eve.tap(byTestId(TEST_IDS.foundCityButton));
+  const eveCity = (await waitForView(eve, 'Eve\'s city to be founded', (now) => now.cities.length === 1)).cities[0];
+  await fingerTileUntil(eve, eveCity.tile, TEST_IDS.cityName, eveCity.name);
+  await eve.tap(byTestId(TEST_IDS.buildOption + 'warrior'));
+  await waitForQueue(eve, eveCity.id, ['warrior']);
+  await waitUntilShown(eve, TEST_IDS.queueRemove + 0);
+  const removeButton = await boxOf(eve, byTestId(TEST_IDS.queueRemove + 0));
+  check(
+    removeButton.width >= 44 && removeButton.height >= 44,
+    `a row button is big enough for a finger, 44 by 44 pixels (it is ${removeButton.width} by ${removeButton.height})`,
+  );
+  await eve.locator(byTestId(TEST_IDS.buildOption + 'worker')).scrollIntoViewIfNeeded();
+  const eveScrolledBy: number = await eve.evaluate((selector: string) => document.querySelector(selector).scrollTop, byTestId(TEST_IDS.cityPanel));
+  check(eveScrolledBy > 0, 'the panel had to scroll to show the Worker\'s button (if not, the two checks after this one check nothing)');
+  const evePanel = await boxOf(eve, byTestId(TEST_IDS.cityPanel));
+  check(isInside(await boxOf(eve, `${byTestId(TEST_IDS.cityPanel)} .panel-close`), evePanel), 'the close button stays in sight while the panel is scrolled down');
+  check(isInside(await boxOf(eve, byTestId(TEST_IDS.queueCount)), evePanel), 'the queue count stays in sight while the panel is scrolled down');
+
+  // The phone is turned on its side: the panels float bottom left again.
+  await eve.setViewportSize(LOW_WINDOW);
+  await eve.tap(`${byTestId(TEST_IDS.cityPanel)} .panel-close`);
+  const turned = await viewOf(eve);
+  const empty = neighbors(eveCity.tile, turned).find((tile) => !turned.units.some((unit) => unit.tile === tile));
+  if (empty === undefined) throw new Error('Check failed: a tile next to Eve\'s city has nothing on it');
+  await fingerTile(eve, empty);
+  await waitUntilShown(eve, TEST_IDS.tileCard);
+  const sideCard = await boxOf(eve, byTestId(TEST_IDS.tileCard));
+  check((await shownTile(eve, TILE_CARD)).tile === empty, 'with the phone on its side a tap on an empty tile opens that tile\'s card');
+  check(
+    isInside(sideCard, await boxOf(eve, byTestId(TEST_IDS.gameCanvas))) && sideCard.right <= LOW_WINDOW.width / 2,
+    `the card floats over the map, bottom left (it reaches from ${at({ x: sideCard.left, y: sideCard.top })} to ${at({ x: sideCard.right, y: sideCard.bottom })})`,
+  );
+  check(sideCard.height <= 150, `the card is at most 150 pixels tall (it is ${sideCard.height})`);
+  check(sideCard.top >= (await boxOf(eve, '.top-bar')).bottom, 'the card starts below the top bar');
+  await eve.context().close();
+}
+
+/**
+ * Step 22: a build queue that runs empty. The city says so in every place
+ * the player may be looking: a message, the End Turn button, "Show me".
+ *
+ * @param ada   the page of the player who owns `city`; its queue is Warrior, Scout
+ * @param ben   the page of the other player, who must be shown nothing of it
+ */
+async function checkTheQueueRunsEmpty(ada: any, ben: any, city: CityView): Promise<void> {
+  step('22. Ada\'s city completes a unit, its queue runs empty, and the game says so');
+  await ada.keyboard.press('Escape');
+  await tapTileUntil(ada, city.tile, TEST_IDS.cityName, city.name);
+  const saved = ownCity(await viewOf(ada), city.id).productionStored;
+  await ada.click(byTestId(TEST_IDS.queueRemove + 0));
+  const stopped = await waitForQueue(ada, city.id, ['scout']);
+  check(ownCity(stopped, city.id).productionStored === saved, 'stopping the Warrior kept what the city had saved');
+  const building = await textOf(ada, TEST_IDS.cityProduction);
+  check(
+    building.startsWith(`${UNITS.scout.name} ${saved}/${UNITS.scout.cost} `),
+    `the Scout starts with everything the city had saved, ${saved} production (the panel says "${building}")`,
+  );
+
+  let scoutIsThere = false;
+  for (let turns = 0; turns < 12 && !scoutIsThere; turns++) {
+    await bothEndTheTurn(ada, ben);
+    scoutIsThere = (await viewOf(ada)).units.some((unit) => unit.owner === 'p1' && unit.type === 'scout');
+  }
+  check(scoutIsThere, 'Rome completed its Scout within twelve turns');
+  const news = await toastTexts(ada);
+  check(queueOf(await viewOf(ada), city.id).length === 0, 'the Scout has left the queue, which is empty now: the city does not build the same unit again');
+  check(
+    news.some((text) => text.includes('Rome has nothing left to build')),
+    `the message about the Scout says that Rome has nothing left to build (on Ada's screen: ${news.join(' | ')})`,
+  );
+  check((await textOf(ada, TEST_IDS.endTurnButton)).includes('Rome has nothing to build'), 'the End Turn button names the city that builds nothing');
+  await ada.keyboard.press('Escape');
+  check(!(await ada.isVisible(byTestId(TEST_IDS.cityPanel))), 'Escape closed the city panel');
+  await ada.click('.show-next');
+  await waitUntilShown(ada, TEST_IDS.cityPanel);
+  await waitForText(ada, TEST_IDS.cityName, city.name);
+  await ada.click(byTestId(TEST_IDS.buildOption + 'warrior'));
+  await waitForQueue(ada, city.id, ['warrior']);
+  check(await onlyTurnNews(ben), `Ben was shown nothing about it (on his screen: ${(await toastTexts(ben)).join(' | ')})`);
+}
+
+/**
+ * Steps 23 to 31: a Worker is built, walks to a tile of Ada's land and
+ * builds what fits there. Which tile that is, and so whether it becomes a
+ * farm or a mine, is up to the map; the numbers come from the tables.
+ *
+ * @param ada   the page of the player who owns `city`; a Scout may stand in it
+ * @param ben   the page of the other player, who must learn nothing of it
+ */
+async function checkAWorkerImprovesTheLand(ada: any, ben: any, city: CityView): Promise<void> {
+  step('23. Ada queues a Worker and puts it first');
+  await ada.keyboard.press('Escape');
+  await tapTileUntil(ada, city.tile, TEST_IDS.cityName, city.name);
+  await ada.click(byTestId(TEST_IDS.buildOption + 'worker'));
+  await waitForQueue(ada, city.id, ['warrior', 'worker']);
+  await ada.click(byTestId(TEST_IDS.queueUp + 1));
+  await waitForQueue(ada, city.id, ['worker', 'warrior']);
+  check((await textOf(ada, TEST_IDS.queueRow + 0)).includes(UNITS.worker.name), 'the first row of the queue is the Worker');
+
+  step('24. The Worker is built');
+  let built: UnitView | undefined;
+  for (let turns = 0; turns < 15 && built === undefined; turns++) {
+    await bothEndTheTurn(ada, ben);
+    built = (await viewOf(ada)).units.find((unit) => unit.owner === 'p1' && unit.type === 'worker');
+  }
+  if (built === undefined) {
+    const rome = ownCity(await viewOf(ada), city.id);
+    throw new Error(
+      `Check failed: Rome completed its Worker within 15 turns (it makes ${rome.productionPerTurn} production a turn and has ${rome.productionStored} of ${UNITS.worker.cost})`,
+    );
+  }
+  const worker = built;
+  const workerNews = await toastTexts(ada);
+  check(workerNews.some((text) => text.includes('Worker completed')), `a message says that the Worker is completed (on Ada's screen: ${workerNews.join(' | ')})`);
+
+  step('25. In the city nothing can be built');
+  check(worker.tile === city.tile, 'the new Worker stands in the city (if this fails, the city tile was taken: this step needs it there)');
+  await ada.keyboard.press('Escape');
+  await tapTileUntil(ada, worker.tile, TEST_IDS.unitName, UNITS.worker.name);
+  check(await ada.isVisible(byTestId(TEST_IDS.unitJobs)), 'the Worker\'s panel has the block with its jobs');
+  for (const improvement of IMPROVEMENT_IDS) {
+    check(
+      (await ada.isVisible(byTestId(TEST_IDS.jobStart + improvement))) && (await ada.isDisabled(byTestId(TEST_IDS.jobStart + improvement))),
+      `in the city the button for a ${IMPROVEMENTS[improvement].name} is there, greyed out`,
+    );
+  }
+  check(
+    (await ada.isVisible(byTestId(TEST_IDS.unitJobsReason))) && (await textOf(ada, TEST_IDS.unitJobsReason)) === RULE_ERROR_MESSAGES.cityOnTile,
+    `one line says why for all of them (it says "${await textOf(ada, TEST_IDS.unitJobsReason)}")`,
+  );
+  check(
+    !(await ada.isVisible(byTestId(TEST_IDS.unitJob))) && !(await ada.isVisible(byTestId(TEST_IDS.jobStop))),
+    'a Worker without a job shows no progress and no "Stop work"',
+  );
+
+  step('26. The Worker walks to a tile it can improve');
+  const land = await viewOf(ada);
+  let site: TileIndex = -1;
+  let job: ImprovementId = IMPROVEMENT_IDS[0];
+  for (const tile of await reachableOf(ada, worker.id)) {
+    const ground = land.tiles[tile];
+    // A tile with nothing else of Ada's on it, so that one tap selects the Worker there (step 29).
+    if (ground === null || ground.owner !== land.you || ground.improvement !== null || holdsOwnThing(land, tile)) continue;
+    const fitting = IMPROVEMENT_IDS.find((improvement) => improvementFits(improvement, ground));
+    if (fitting === undefined) continue;
+    site = tile;
+    job = fitting;
+    break;
+  }
+  check(site !== -1, 'no tile to improve within one move of Rome: pick another seed');
+  const other = IMPROVEMENT_IDS.find((improvement) => improvement !== job);
+  if (other === undefined) throw new Error('Check failed: there is a second kind of improvement');
+  await showHoverBox(ada, site);
+  const before = linesOf(await shownTile(ada, HOVER_BOX), 'canBuild');
+  check(
+    before.some((line) => line.includes(IMPROVEMENTS[job].name)),
+    `before the Worker walks, the hover box on the tile says that a ${IMPROVEMENTS[job].name} can be built there (it says "${before.join(' / ')}")`,
+  );
+  await tapTile(ada, site);
+  await waitForView(ada, 'the Worker to walk to the tile', (now) => unitOf(now, worker.id).tile === site);
+
+  step(`27. Ada starts the job: a ${IMPROVEMENTS[job].name}`);
+  const startButton = byTestId(TEST_IDS.jobStart + job);
+  const buttonWords = await textOf(ada, TEST_IDS.jobStart + job);
+  check(await ada.isEnabled(startButton), `on a tile that fits, the button for a ${IMPROVEMENTS[job].name} can be pressed`);
+  check(
+    buttonWords.includes('Build') && buttonWords.includes(IMPROVEMENTS[job].name) && buttonWords.includes(String(IMPROVEMENTS[job].turns)),
+    `the button says what it builds and how many turns that takes (it says "${buttonWords}")`,
+  );
+  check(await ada.isDisabled(byTestId(TEST_IDS.jobStart + other)), `the button for a ${IMPROVEMENTS[other].name} is greyed out`);
+  check(
+    (await ada.isVisible(byTestId(TEST_IDS.jobReason + other))) && (await textOf(ada, TEST_IDS.jobReason + other)) !== '',
+    `and a line under it says why a ${IMPROVEMENTS[other].name} cannot be built here`,
+  );
+
+  // The job guard. A double-click starts the job and does not stop it
+  // again; and "Stop work", which appears where the pointer is, does
+  // nothing for the rest of the guard's 0.6 s.
+  await ada.dblclick(startButton);
+  await waitForView(ada, 'the Worker to have a job', (now) => unitOf(now, worker.id).own?.job != null);
+  await ada.click(byTestId(TEST_IDS.jobStop));
+  await ada.waitForTimeout(400); // the answer to "Stop work" would be here by now
+  const atWork = await viewOf(ada);
+  const started = unitOf(atWork, worker.id).own?.job ?? null;
+  check(
+    started !== null && started.improvement === job && started.turnsLeft === IMPROVEMENTS[job].turns,
+    'a double-click on the job button, and a press of "Stop work" right after it, started the job and did not stop it again',
+  );
+  check((await textOf(ada, TEST_IDS.unitJob)).includes('Building a'), `the panel says what is being built (it says "${await textOf(ada, TEST_IDS.unitJob)}")`);
+  check(await ada.isVisible(byTestId(TEST_IDS.jobStop)), '"Stop work" is there');
+  for (const improvement of IMPROVEMENT_IDS) {
+    check(!(await ada.isVisible(byTestId(TEST_IDS.jobStart + improvement))), `the button for a ${IMPROVEMENTS[improvement].name} is gone while the Worker is at work`);
+  }
+  check((await reachableOf(ada, worker.id)).length === 0, 'a Worker at work cannot be sent anywhere');
+  const endTurnWords = await textOf(ada, TEST_IDS.endTurnButton);
+  for (const sentence of todoHints(atWork)) {
+    check(endTurnWords.includes(sentence), `the End Turn button says "${sentence}" (it says "${endTurnWords}")`);
+  }
+  check(!idleUnits(atWork).some((unit) => unit.id === worker.id), 'the Worker at work is not counted among the units that can still move');
+
+  step('28. Stop and start again');
+  await ada.waitForTimeout(GUARD_PAUSE_MS);
+  await ada.click(byTestId(TEST_IDS.jobStop));
+  await waitForView(ada, 'the Worker to have stopped its work', (now) => unitOf(now, worker.id).own?.job === null);
+  check((await ada.isVisible(startButton)) && (await ada.isEnabled(startButton)), 'after "Stop work" the job button is back and can be pressed');
+  await ada.waitForTimeout(GUARD_PAUSE_MS);
+  await ada.click(startButton);
+  await waitForView(ada, 'the Worker to have its job again', (now) => unitOf(now, worker.id).own?.job?.improvement === job);
+
+  step('29. In a low window "Stop work" is in view, and the Worker is not under its own panel');
+  await ada.keyboard.press('Escape');
+  await ada.setViewportSize(LOW_WINDOW);
+  await settled(ada); // as in step 18
+  const under = await bringTileNear(ada, site, PANEL_CORNER);
+  check(
+    isNear(under, PANEL_CORNER),
+    `the tile did not arrive in the bottom-left corner (the camera stops at the map's edge): pick another tile for this step (it is at ${at(under)})`,
+  );
+  await ada.mouse.click(under.x, under.y);
+  await waitUntilShown(ada, TEST_IDS.unitPanel);
+  await waitForText(ada, TEST_IDS.unitName, UNITS.worker.name);
+  const lowPanel = await boxOf(ada, byTestId(TEST_IDS.unitPanel));
+  check(lowPanel.top >= (await boxOf(ada, '.top-bar')).bottom, 'in a low window the unit panel starts below the top bar');
+  check(lowPanel.bottom <= LOW_WINDOW.height, `the unit panel ends on the screen (at ${lowPanel.bottom} of ${LOW_WINDOW.height})`);
+  check(lowPanel.height <= 220, `the unit panel is at most 220 pixels tall (it is ${lowPanel.height})`);
+  const panelScrolledBy: number = await ada.evaluate((selector: string) => document.querySelector(selector).scrollTop, byTestId(TEST_IDS.unitPanel));
+  check(
+    panelScrolledBy === 0 && isInside(await boxOf(ada, byTestId(TEST_IDS.jobStop)), lowPanel),
+    '"Stop work" is in view without scrolling the panel',
+  );
+  check(!(await ada.isVisible(byTestId(TEST_IDS.unitDescription))), 'the unit\'s description is left out in a low window');
+  check(holds(lowPanel, under), `the panel opened on top of the Worker (if not, the next check checks nothing: move the corner; the Worker was at ${at(under)})`);
+  check(await comesOutFromUnder(ada, site, byTestId(TEST_IDS.unitPanel)), 'within a second the map has stepped aside, and the Worker is no longer under its own panel');
+  await ada.keyboard.press('Escape');
+  await ada.setViewportSize(LAPTOP);
+
+  step('30. Ben learns nothing');
+  const benView = await viewOf(ben);
+  check(benView.units.every((unit) => unit.owner === 'p2'), 'every unit in Ben\'s view is his own');
+  check(!JSON.stringify(benView).includes(worker.id), 'the Worker\'s id appears nowhere in what Ben was sent');
+  check(benView.tiles.every((tile) => tile === null || tile.improvement === null), 'no tile Ben knows has anything built on it');
+  check(await onlyTurnNews(ben), `Ben was shown nothing about it (on his screen: ${(await toastTexts(ben)).join(' | ')})`);
+
+  step('31. The improvement is finished, and is still there after a reload');
+  // One turn first. When the job began, the Worker may have used up its
+  // moves on the way, and a unit without moves is passed by anyway. Now it
+  // has its moves back and is still at work: it must still be passed by.
+  let turn = await bothEndTheTurn(ada, ben);
+  const turnLater = await viewOf(ada);
+  const working = unitOf(turnLater, worker.id).own;
+  check(
+    working !== null && working.movesLeft === UNITS.worker.moves && working.job?.turnsLeft === IMPROVEMENTS[job].turns - 1,
+    'a turn later the Worker has its moves back, is still at work, and has one turn less to go',
+  );
+  check((await reachableOf(ada, worker.id)).length === 0, 'with all its moves a Worker at work still cannot be sent anywhere');
+  check(!idleUnits(turnLater).some((unit) => unit.id === worker.id), 'and it is still not counted among the units that can still move');
+  const hintLater = await textOf(ada, TEST_IDS.endTurnButton);
+  for (const sentence of todoHints(turnLater)) {
+    check(hintLater.includes(sentence), `the End Turn button says "${sentence}" (it says "${hintLater}")`);
+  }
+  for (let turns = 1; turns < IMPROVEMENTS[job].turns; turns++) turn = await bothEndTheTurn(ada, ben);
+  const finishedNews = await toastTexts(ada);
+  check(
+    finishedNews.some((text) => text.includes('finished a') && text.includes(`near ${city.name}`)),
+    `a message says that the Worker finished its work near Rome (on Ada's screen: ${finishedNews.join(' | ')})`,
+  );
+  const finished = await viewOf(ada);
+  const rested = unitOf(finished, worker.id);
+  check(finished.tiles[site]?.improvement === job, `the tile has its ${IMPROVEMENTS[job].name}`);
+  check(rested.own?.job === null && rested.own.movesLeft === UNITS.worker.moves, 'the Worker has no job any more, and all its moves');
+  await ada.keyboard.press('Escape');
+  await tapTileUntil(ada, site, TEST_IDS.unitName, UNITS.worker.name);
+  check(
+    (await ada.isVisible(byTestId(TEST_IDS.jobReason + job))) && (await textOf(ada, TEST_IDS.jobReason + job)).includes(`already has a ${IMPROVEMENTS[job].name}`),
+    `the Worker's panel says that the tile already has a ${IMPROVEMENTS[job].name} (it says "${await textOf(ada, TEST_IDS.jobReason + job)}")`,
+  );
+  check((await textOf(ada, TEST_IDS.unitTile)).includes(IMPROVEMENTS[job].name), `the line about the tile names the ${IMPROVEMENTS[job].name} (it says "${await textOf(ada, TEST_IDS.unitTile)}")`);
+  await showHoverBox(ada, site);
+  const improved = await shownTile(ada, HOVER_BOX);
+  const improvedWords = describeTile(await viewOf(ada), site);
+  check(
+    linesOf(improved, 'improvement').some((line) => line.includes(IMPROVEMENTS[job].name)),
+    `the hover box on the tile names the ${IMPROVEMENTS[job].name} (it says "${wordsOf(improved)}")`,
+  );
+  check(
+    saysTheSame(improved, improvedWords),
+    `and prints what describeTile says, so also whether a citizen works the tile (the box: "${wordsOf(improved)}"; describeTile: "${wordsOf(improvedWords)}")`,
+  );
+  await ada.reload();
+  await waitForTurn(ada, turn);
+  check((await viewOf(ada)).tiles[site]?.improvement === job, `after a reload the ${IMPROVEMENTS[job].name} is still there`);
+  const benTile = (await viewOf(ben)).tiles[site];
+  check(benTile === null || benTile.improvement === null, 'Ben\'s view of the tile shows nothing built on it');
+  check(await onlyTurnNews(ben), `Ben was shown nothing about it (on his screen: ${(await toastTexts(ben)).join(' | ')})`);
 }
 
 // ---------------------------------------------------------------------------

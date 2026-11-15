@@ -27,7 +27,7 @@ export function endTurn(state: GameState, playerId: PlayerId): ActionResult {
     return accepted(resolved.state, resolved.events);
   }
 
-  updateKnowledge(draft); // see setProduction: every changed state leaves with fresh memory
+  updateKnowledge(draft); // see setBuildQueue: every changed state leaves with fresh memory
   return accepted(draft, []);
 }
 

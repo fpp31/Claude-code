@@ -7,7 +7,7 @@
  * of net/identity.ts, which are safe to call anywhere.
  */
 
-import { UNITS, applyViewPatch } from '@domination/shared';
+import { IMPROVEMENTS, UNITS, applyViewPatch } from '@domination/shared';
 import type { ClientMessage, GameEvent, PlayerView, ServerMessage } from '@domination/shared';
 import { loadLastGame, reloadPageOnce, saveLastGame, setGameCodeInUrl } from '../net/identity';
 import { toastsWith } from '../ui/toasts';
@@ -37,27 +37,32 @@ const REJOIN_REFUSALS: readonly string[] = ['noSuchGame', 'nameRequired', 'gameA
  *  welcome         nothing. (The connection module has already stored the
  *                  token; see net/connection.ts.)
  *  lobby           lobby = message.lobby, game = null, joining = null,
- *                  joinProblem = null, selection = null, hoverTile = null
- *                  (those two belong to a map, and a lobby has none); put
- *                  the code in the address bar (setGameCodeInUrl) and
- *                  remember it as the last game (saveLastGame).
+ *                  joinProblem = null, and the four things that belong to a
+ *                  map, which a lobby has not ("the map's four" below):
+ *                  selection, inspectedTile, hoverTile, hoverInfoTile =
+ *                  null; put the code in the address bar (setGameCodeInUrl)
+ *                  and remember it as the last game (saveLastGame).
  *  gameSync        game = { code, view, connected, seq, awaitingSync: false },
  *                  lobby = null, joining = null, joinProblem = null, busy =
  *                  false; address bar
  *                  and last game as for `lobby`; re-validate the selection
- *                  (for ANOTHER game than the one on screen: selection and
- *                  hoverTile = null, it is another map); toast the events.
+ *                  and keep the tile card and the hover box (for ANOTHER
+ *                  game than the one on screen: the map's four = null, it
+ *                  is another map); toast the events.
  *  gameUpdate      ignored completely while game.awaitingSync is set (or
  *                  there is no game). If message.seq !== game.seq + 1 (a
  *                  missed update): change nothing except awaitingSync =
  *                  true, and send `resync` (once: the flag stops repeats).
  *                  Otherwise view = applyViewPatch(view, patch), seq =
  *                  message.seq; re-validate the selection; toast the events.
+ *                  The tile card and the hover box stay as they are: they
+ *                  are tile numbers, and what they say is worked out from
+ *                  the new view.
  *  presence        game.connected = message.connected.
  *  actionOk        busy = false.
  *  actionRejected  busy = false; error toast with error.message.
- *  left            lobby = null, game = null, selection = null, hoverTile =
- *                  null, joining = null, joinProblem = null, busy = false;
+ *  left            lobby = null, game = null, the map's four = null,
+ *                  joining = null, joinProblem = null, busy = false;
  *                  remove ?g= from the address bar. If a lobby was on
  *                  screen, the remembered last game is forgotten too: the
  *                  player has just said they are done with it, and the home
@@ -83,8 +88,8 @@ const REJOIN_REFUSALS: readonly string[] = ['noSuchGame', 'nameRequired', 'gameA
  *                  the game it names cannot be joined.
  *                  Each of these four, arriving while a lobby or a game is
  *                  on screen, also takes that screen down (lobby = null,
- *                  game = null, selection = null, hoverTile = null). See
- *                  "refused while in a game" below.
+ *                  game = null, the map's four = null). See "refused while
+ *                  in a game" below.
  *  pong            nothing (the connection module tracks liveness).
  *
  * Refused while in a game. 'noSuchGame', 'nameRequired', 'gameAlreadyStarted'
@@ -134,24 +139,31 @@ export function handleServerMessage(store: Store, message: ServerMessage, send: 
     case 'lobby': {
       setGameCodeInUrl(message.lobby.code);
       saveLastGame(message.lobby.code);
-      // The selection and the hovered tile belong to a game's map; without a game they mean nothing.
-      store.set({ lobby: message.lobby, game: null, joining: null, joinProblem: null, selection: null, hoverTile: null });
+      // The selection, the tile card, the hovered tile and the hover box belong to a game's map; without a game they mean nothing.
+      store.set({ lobby: message.lobby, game: null, joining: null, joinProblem: null, ...NOTHING_ON_THE_MAP });
       return;
     }
 
     case 'gameSync': {
       setGameCodeInUrl(message.code);
       saveLastGame(message.code);
-      // Another game means another map: nothing selected or hovered there carries over.
+      // Another game means another map: nothing selected, inspected or hovered there carries over.
       const sameGame = state.game !== null && state.game.code === message.code;
+      const onTheMap: Pick<AppState, 'selection' | 'inspectedTile' | 'hoverTile' | 'hoverInfoTile'> = sameGame
+        ? {
+            selection: validSelection(state.selection, message.view),
+            inspectedTile: state.inspectedTile,
+            hoverTile: state.hoverTile,
+            hoverInfoTile: state.hoverInfoTile,
+          }
+        : NOTHING_ON_THE_MAP;
       store.set({
         game: { code: message.code, view: message.view, connected: message.connected, seq: message.seq, awaitingSync: false },
         lobby: null,
         joining: null,
         joinProblem: null,
         busy: false,
-        selection: sameGame ? validSelection(state.selection, message.view) : null,
-        hoverTile: sameGame ? state.hoverTile : null,
+        ...onTheMap,
         toasts: toastsWith(store, eventToasts(message.events, message.view)),
       });
       return;
@@ -201,7 +213,7 @@ export function handleServerMessage(store: Store, message: ServerMessage, send: 
       }
       if (state.lobby !== null) saveLastGame(null);
       setGameCodeInUrl(null);
-      store.set({ lobby: null, game: null, selection: null, hoverTile: null, joining: null, joinProblem: null, busy: false });
+      store.set({ lobby: null, game: null, ...NOTHING_ON_THE_MAP, joining: null, joinProblem: null, busy: false });
       return;
     }
 
@@ -226,7 +238,7 @@ export function handleServerMessage(store: Store, message: ServerMessage, send: 
       if (message.code !== 'nameRequired') toasts = toastsWith(store, [{ text: message.message, kind: 'error' }]);
       else if (lostCode !== null) toasts = toastsWith(store, [{ text: NO_LONGER_IN_GAME_MESSAGE, kind: 'error' }]);
       const changes: Partial<AppState> = { busy: false, joining: null, joinProblem: joinProblemAfter(state.joinProblem, message.code), toasts };
-      if (lostCode !== null) Object.assign(changes, { lobby: null, game: null, selection: null, hoverTile: null });
+      if (lostCode !== null) Object.assign(changes, { lobby: null, game: null, ...NOTHING_ON_THE_MAP });
       store.set(changes);
       // The address is cleared AFTER the store change, on purpose. If that
       // change took a lobby or game down, the home screen was put up by it
@@ -245,6 +257,19 @@ export function handleServerMessage(store: Store, message: ServerMessage, send: 
     }
   }
 }
+
+/**
+ * "The map's four": what the player has selected, inspected and hovered on
+ * a game's map, all cleared. Stored whenever the map they belong to goes
+ * away (a lobby, another game, the home screen), so that a tile card or a
+ * hover box of the old map can never come up on the next one.
+ */
+const NOTHING_ON_THE_MAP: Pick<AppState, 'selection' | 'inspectedTile' | 'hoverTile' | 'hoverInfoTile'> = {
+  selection: null,
+  inspectedTile: null,
+  hoverTile: null,
+  hoverInfoTile: null,
+};
 
 /**
  * What the home screen should say about the game it names, after an error:
@@ -288,7 +313,13 @@ function eventToasts(events: GameEvent[], view: PlayerView): NewToast[] {
 /**
  * A short sentence for a toast, or null for events that need none
  * (for example 'unitMoved'): "Rome grew to 2.", "Warrior completed in Rome.",
- * "Turn 8 has begun.", "You founded Ostia.".
+ * "Turn 8 has begun.", "You founded Ostia.", "Your Worker finished a Farm
+ * near Rome.".
+ *
+ * A unit that was the last entry of its city's build queue gets a second
+ * sentence, "Warrior completed in Rome. Rome has nothing left to build.":
+ * from now on that city's production is lost every turn, and this toast is
+ * the first place that says so.
  *
  * One kind of move does get a sentence: the player's own unit stopping
  * before the tile they sent it to (something they could not see was in the
@@ -308,8 +339,16 @@ export function describeEvent(event: GameEvent, view: PlayerView): string | null
         : `${playerName(view, event.playerId)} founded ${event.name}.`;
     case 'cityGrew':
       return `${event.name} grew to ${event.population}.`;
-    case 'unitBuilt':
-      return `${UNITS[event.unitType].name} completed in ${event.cityName}.`;
+    case 'unitBuilt': {
+      const completed = `${UNITS[event.unitType].name} completed in ${event.cityName}.`;
+      return event.queueEmpty ? `${completed} ${event.cityName} has nothing left to build.` : completed;
+    }
+    case 'improvementBuilt': {
+      const unit = view.units.find((candidate) => candidate.id === event.unitId);
+      const name = unit === undefined ? 'unit' : UNITS[unit.type].name;
+      const where = event.cityName === '' ? '' : ` near ${event.cityName}`;
+      return `Your ${name} finished a ${IMPROVEMENTS[event.improvement].name}${where}.`;
+    }
     case 'turnStarted':
       return `Turn ${event.turn} has begun.`;
     default: {

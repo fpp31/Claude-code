@@ -29,10 +29,10 @@
  * Facts that are deliberately public to every player in a game (the complete
  * list; nothing else may cross between players): player names, civilizations,
  * seat order, who is host, the map size, who has ended their turn, who is
- * connected, the turn number, whatever stands on tiles a player can see, and
- * what a city's name gives away: names are handed out in list order
- * (data/civs.ts), so a city's name tells how many cities its owner had
- * founded before it.
+ * connected, the turn number, whatever stands on, or is built on, tiles a
+ * player can see, and what a city's name gives away: names are handed out in
+ * list order (data/civs.ts), so a city's name tells how many cities its owner
+ * had founded before it.
  *
  * Text sent to clients: every message with the code 'serverError' carries
  * the constant SERVER_ERROR_MESSAGE and nothing else. The text of a caught
@@ -47,7 +47,7 @@ import type { GameCode, PlayerId } from './types';
 import type { PlayerView, ViewPatch } from './viewTypes';
 
 /** Bump when a message changes shape. A client with another version is told to reload. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** URL path of the WebSocket endpoint. */
 export const WS_PATH = '/ws';

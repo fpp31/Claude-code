@@ -15,10 +15,16 @@ export interface UnitDrawing {
   /** How far the sprite is moved away from its tile's normal unit position, in art pixels. */
   dx: number;
   dy: number;
-  /** 'spent' for an own unit with no moves left, otherwise 'normal'. */
+  /** 'spent' for an own unit that will not move this turn: no moves left, or at work. Otherwise 'normal'. */
   look: SpriteLook;
   /** True if the unit stands among trees: it is then drawn with a pale line around it, so it does not get lost (sprites/rim.ts). */
   rim: boolean;
+  /**
+   * True for an own unit with a job: the frame draws the "at work" sign
+   * (marker.working) for it. Never true for another player's unit: their
+   * jobs are not in the view.
+   */
+  working: boolean;
 }
 
 /** The features a unit is hard to make out on. (Hills are low and mountains cannot be entered.) */
@@ -74,11 +80,33 @@ export function unitDrawings(view: PlayerView, selectedUnitId: UnitId | null): U
       unit,
       dx: place.dx,
       dy: place.dy,
-      look: unit.own !== null && unit.own.movesLeft === 0 ? 'spent' : 'normal',
+      look: unit.own !== null && (unit.own.movesLeft === 0 || unit.own.job !== null) ? 'spent' : 'normal',
       rim: FEATURES_THAT_HIDE_UNITS.some((feature) => view.tiles[unit.tile]?.feature === feature),
+      working: unit.own !== null && unit.own.job !== null,
     });
   }
   return drawings;
+}
+
+/**
+ * Where the "at work" sign of a unit is drawn, as an offset from the unit's
+ * tile box: the unit's own offset, but never so far that the 7 x 7 sign
+ * (which sits at x 1, y 7 of the box) leaves the full-width rows of the
+ * tile's hexagon. So the sign of a unit that stands behind another (dx -5,
+ * dy -3) stays on its own tile.
+ */
+export function workingSignOffset(drawing: UnitDrawing): { dx: number; dy: number } {
+  return { dx: Math.min(18, Math.max(-1, drawing.dx)), dy: Math.min(8, Math.max(-1, drawing.dy)) };
+}
+
+/**
+ * Is this one of the viewer's own cities with nothing to build (an empty
+ * build queue)? The frame draws the "builds nothing" sign (marker.idle)
+ * over such a city. Never true for another player's city: their queues are
+ * not in the view.
+ */
+export function cityIsIdle(city: CityView): boolean {
+  return city.own !== null && city.own.buildQueue.length === 0;
 }
 
 /** The cities of a view in drawing order: row by row from the top. */

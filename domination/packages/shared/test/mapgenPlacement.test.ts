@@ -223,7 +223,7 @@ describe('starts: placing the players', () => {
     const map = mapFromAscii(rows.map((row) => row.join(' ')));
     const starts = placeStarts(gridFor(map), map, 2, false, rng()) as TileIndex[];
     expect(starts).toHaveLength(2);
-    for (const start of starts) expect(map.tiles[start]).toEqual({ terrain: 'grassland', feature: null, cityId: null });
+    for (const start of starts) expect(map.tiles[start]).toEqual({ terrain: 'grassland', feature: null, improvement: null, cityId: null });
   });
 
   /** The largest distance between two tiles that would each be a legal start on their own. */

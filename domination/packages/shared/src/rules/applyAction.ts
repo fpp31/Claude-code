@@ -12,7 +12,8 @@ import { cancelEndTurn, endTurn } from './endTurn';
 import { foundCity } from './foundCity';
 import { moveUnit } from './moveUnit';
 import { noChange, rejected } from './results';
-import { setProduction } from './setProduction';
+import { setBuildQueue } from './setBuildQueue';
+import { startJob, stopJob } from './unitJob';
 
 /**
  * Validates one action of one player and, if it is legal, returns the state
@@ -31,10 +32,10 @@ import { setProduction } from './setProduction';
  * Checks, in this order (first failure wins):
  *  1. `playerId` is not a player of this game, the action type is unknown,
  *     or a field of the action is of the wrong basic kind (`unitId` or
- *     `cityId` is not a string, `path` is not a list, `item` is not an
- *     object) -> 'badAction'. Fields of the right kind with a wrong VALUE
- *     get the code of their own check further down ('badPath',
- *     'noSuchUnit', 'cannotBuild', ...).
+ *     `cityId` is not a string, `path` is not a list, `queue` is not a list,
+ *     `improvement` is not a string) -> 'badAction'. Fields of the right
+ *     kind with a wrong VALUE get the code of their own check further down
+ *     ('badPath', 'noSuchUnit', 'cannotBuild', 'cannotImprove', ...).
  *  2. `turn !== state.turn` -> 'staleTurn'. (A late End Turn must never end
  *     the following turn.)
  *  3. The player has already ended their turn:
@@ -45,7 +46,8 @@ import { setProduction } from './setProduction';
  *
  * Accepted no-ops return `{ ok: true, state: <the input object>, events: [],
  * changed: false }`: endTurn when already ended, cancelEndTurn when not
- * ended, setProduction to the item the city is already building.
+ * ended, setBuildQueue with the queue the city already has, startJob for the
+ * job the unit is already doing, stopJob for a unit without a job.
  *
  * moveUnit { unitId, path }
  *  - Unit missing or not owned by the player -> 'noSuchUnit' (same code for
@@ -54,6 +56,8 @@ import { setProduction } from './setProduction';
  *    not a tile of this map, or with a step that is not adjacent to the tile
  *    before it (the first step is measured from the unit's tile) -> 'badPath'.
  *    This is pure geometry and is checked for the whole path up front.
+ *  - Unit has a job -> 'unitBusy'. (It must be stopped first: a tap must
+ *    never throw away turns of work.)
  *  - Unit has 0 moves left -> 'noMovesLeft'.
  *  - Then the path is WALKED on the true state, one step at a time:
  *      * stop if the unit has no moves left;
@@ -88,19 +92,39 @@ import { setProduction } from './setProduction';
  *  - Unit missing or not owned -> 'noSuchUnit'.
  *  - foundCityError(state, unit) (rules/city.ts) is not null -> that code.
  *  - Otherwise, in this order: make the city (id from newCityId, name from
- *    cityNameFor(civ, citiesFounded), population 1, foodStored 0, production
- *    null, productionStored 0) on the unit's tile; set the city tile's
+ *    cityNameFor(civ, citiesFounded), population 1, foodStored 0, an empty
+ *    build queue, productionStored 0) on the unit's tile; set the city tile's
  *    `cityId` to the new city (even if another of the player's own cities
- *    owned it); set `cityId` on every tile within RULES.cityClaimRadius whose
- *    `cityId` is null (water and mountains included); delete the unit;
- *    citiesFounded += 1; updateKnowledge. One 'cityFounded' event.
+ *    owned it) and its `improvement` to null; set `cityId` on every tile
+ *    within RULES.cityClaimRadius whose `cityId` is null (water and
+ *    mountains included); delete the unit; citiesFounded += 1;
+ *    updateKnowledge. One 'cityFounded' event.
  *
- * setProduction { cityId, item }
+ * setBuildQueue { cityId, queue }
  *  - City missing or not owned -> 'noSuchCity'.
- *  - `item` is not something the city can build (phase 1: `kind` must be
- *    'unit' and `unitType` a key of UNITS) -> 'cannotBuild'.
- *  - Same item as now -> no-op. Otherwise set it; productionStored is kept.
- *    No event.
+ *  - `queue` has more than RULES.maxQueueLength entries -> 'queueFull'
+ *    (judged before any entry is looked at).
+ *  - Any entry is not something a city can build (not an object, `kind` not
+ *    'unit', `unitType` not a key of UNITS) -> 'cannotBuild'; nothing is stored.
+ *  - The same queue as now -> no-op. Otherwise the city's queue becomes a new
+ *    list of new { kind, unitType } objects; productionStored is kept. No event.
+ *
+ * startJob { unitId, improvement }
+ *  - Unit missing or not owned -> 'noSuchUnit'.
+ *  - The unit already has a job for this improvement -> no-op.
+ *  - startJobError(state, unit, improvement) (rules/improvements.ts) is not
+ *    null -> that code: 'cannotImprove', 'unitBusy', 'notYourLand',
+ *    'cityOnTile', 'badImprovementTile', 'alreadyImproved', in this order.
+ *  - Otherwise the unit's job becomes { improvement, turnsWorked: 0 }. Its
+ *    moves are not touched. No event. The work itself is done by
+ *    resolveTurn (step runJobs).
+ *  - Every fact these checks read is about the player's own unit and the
+ *    tile it stands on, which the player sees. A refusal reveals nothing.
+ *
+ * stopJob { unitId }
+ *  - Unit missing or not owned -> 'noSuchUnit'.
+ *  - No job -> no-op. Otherwise the job is removed; the turns worked are
+ *    lost; the unit's moves are not touched. No event.
  *
  * endTurn
  *  - Sets endedTurn. If every player has now ended (isTurnComplete), the turn
@@ -138,8 +162,12 @@ export function applyAction(state: GameState, playerId: PlayerId, turn: number, 
       return moveUnit(state, playerId, action);
     case 'foundCity':
       return foundCity(state, playerId, action);
-    case 'setProduction':
-      return setProduction(state, playerId, action);
+    case 'setBuildQueue':
+      return setBuildQueue(state, playerId, action);
+    case 'startJob':
+      return startJob(state, playerId, action);
+    case 'stopJob':
+      return stopJob(state, playerId, action);
     case 'endTurn':
       return endTurn(state, playerId);
     case 'cancelEndTurn':
@@ -155,7 +183,8 @@ export function applyAction(state: GameState, playerId: PlayerId, turn: number, 
 
 /**
  * Is this one of the known actions, with fields of the right basic kind (an
- * id is a string, a path is a list, an item is an object)?
+ * id is a string, a path is a list, a queue is a list, an improvement is a
+ * string)?
  *
  * The server checks the shape of every message before it gets here; this is
  * the engine's own safety net, so that nothing malformed can reach the
@@ -173,8 +202,12 @@ function isWellFormedAction(action: Action): boolean {
       return typeof fields.unitId === 'string' && Array.isArray(fields.path);
     case 'foundCity':
       return typeof fields.unitId === 'string';
-    case 'setProduction':
-      return typeof fields.cityId === 'string' && typeof fields.item === 'object' && fields.item !== null;
+    case 'setBuildQueue':
+      return typeof fields.cityId === 'string' && Array.isArray(fields.queue);
+    case 'startJob':
+      return typeof fields.unitId === 'string' && typeof fields.improvement === 'string';
+    case 'stopJob':
+      return typeof fields.unitId === 'string';
     case 'endTurn':
     case 'cancelEndTurn':
       return true;

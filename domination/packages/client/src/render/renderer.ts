@@ -14,14 +14,14 @@ import type { CityView, CivId, PlayerId, PlayerView } from '@domination/shared';
 import { context2d } from '../sprites/canvas';
 import { createTextSpriteSheet } from '../sprites/spriteSheet';
 import { EMPTY_OVERLAY } from './api';
-import type { MapOverlay, MapRenderer, ScreenPoint } from './api';
+import type { MapOverlay, MapRenderer, ScreenPoint, ScreenRect } from './api';
 import { backingStoreSize } from './backingStore';
 import type { PixelSize } from './backingStore';
 import { createBannerCache } from './bannerCache';
 import { artToDevice, clampCamera, deviceToArt, snapCamera, startZoom, zoomCamera, zoomRange, zoomStep } from './camera';
 import type { Camera, Viewport } from './camera';
 import { drawFrame } from './frame';
-import { pixelToTile, tileCenter } from './geometry';
+import { TILE_HEIGHT, TILE_WIDTH, pixelToTile, tileCenter, tileOrigin } from './geometry';
 import { civsByPlayer } from './owners';
 import { citiesInDrawingOrder, unitDrawings } from './scene';
 import type { UnitDrawing } from './scene';
@@ -59,11 +59,11 @@ import { createTerrainLayer } from './terrainLayer';
  *    reports a new size (ResizeObserver) it paints right afterwards, and a
  *    resized canvas is empty. The frame is drawn in that moment, so the map
  *    never blinks while a window is being resized.
- *  - Draw only what is on screen. Ground, borders and features (steps 2-4
- *    below) are painted once per view onto an offscreen picture
- *    (terrainLayer.ts), and a frame copies only the visible part of it;
- *    highlights, cities and units on tiles outside the screen are skipped
- *    (camera.ts `visibleTileRange`).
+ *  - Draw only what is on screen. Ground, borders, features and
+ *    improvements (steps 2-4 below) are painted once per view onto an
+ *    offscreen picture (terrainLayer.ts), and a frame copies only the
+ *    visible part of it; highlights, cities, units and signs on tiles
+ *    outside the screen are skipped (camera.ts `visibleTileRange`).
  *
  * THE FOG LOOK. A tile that is explored but not `visible` is "fogged":
  * everything drawn for it is blended 45% towards '#22223a'. Sprites may
@@ -78,7 +78,8 @@ import { createTerrainLayer } from './terrainLayer';
  *  2. Ground of every explored tile: the terrain's ground sprite (fogged
  *     twin on fogged tiles), with the hex grid only faintly hinted (as in
  *     the reference picture). A terrain has a few variants, picked by tile
- *     index; under a feature the ground is bare, as in the reference.
+ *     index; under a feature the ground is bare, as in the reference, and
+ *     under an improvement too (no tuft pokes out between a farm's fields).
  *  3. Territory borders (borders.ts): along each edge of an owned tile whose
  *     neighbor has a different owner, a strip INSIDE the tile: 2 px of the
  *     owner's primary colour at the edge and 1 px of the secondary colour
@@ -86,9 +87,13 @@ import { createTerrainLayer } from './terrainLayer';
  *     no owner, a never-seen neighbor (null), and NO neighbor at all (the
  *     edge of the map), so every territory is closed all the way round. On
  *     fogged tiles the strip gets the fog look too.
- *  4. Features (forest, hills, mountains), row by row from the top, so that
- *     tall things overlap the row behind them (fogged twin on fogged tiles).
- *     Hills and mountains come in a version for the ground they stand on.
+ *  4. Features (forest, hills, mountains) and improvements (farm, mine),
+ *     row by row from the top, so that tall things overlap the row behind
+ *     them (fogged twin on fogged tiles). On one tile the feature comes
+ *     first and the improvement on top of it: a mine stands on its hills.
+ *     Hills and mountains come in a version for the ground they stand on,
+ *     and so does a farm (its crop differs). An improvement on a fogged
+ *     tile is the one the player last saw there (TileView.improvement).
  *  5. Highlights from the overlay (sprites/art/markers.ts), in this order:
  *     reachable tiles (a white ring and a light wash: unmistakable on every
  *     ground), the path preview (a dotted line from the selected tile, with
@@ -100,7 +105,18 @@ import { createTerrainLayer } from './terrainLayer';
  *     fogged tile and is drawn with its fogged twin. On a tile with two
  *     units the civilian stands offset behind the military unit, unless
  *     overlay.selectedUnitId says otherwise; on a city tile units stand
- *     beside the hall. Own units with no moves left are drawn dimmed.
+ *     beside the hall. Own units that will not move this turn are drawn
+ *     dimmed: those with no moves left and those at work. Two small signs
+ *     are drawn from the view alone (the overlay knows nothing of them):
+ *     - "at work", a white square with a dark hammer, left of an own unit
+ *       that has a job (UnitView.own.job), right after the unit itself and
+ *       always inside the unit's own tile (scene.ts `workingSignOffset`);
+ *     - "builds nothing", a gold sign with a dark exclamation mark, at the
+ *       upper left of the hall of an own city whose build queue is empty
+ *       (scene.ts `cityIsIdle`), right under the name banner; after all
+ *       units, so that a unit standing in the city never hides it.
+ *     Neither is ever drawn for another player's unit or city: their jobs
+ *     and queues are not in the view.
  *  7. City banners in the pixel font (banner.ts): the name (upper case) and
  *     the population, written in the owner's SECONDARY colour
  *     (CIVS[civ].secondary) on a plate of the owner's PRIMARY colour with a
@@ -151,6 +167,12 @@ export function createMapRenderer(canvas: HTMLCanvasElement): MapRenderer {
 
   let frameRequest: number | null = null;
   let destroyed = false;
+
+  // ---- Telling the app shell when tiles have moved on screen -------------
+  /** Who wants to be told (onCameraChange). Replaced, never edited, so a listener may remove itself while being called. */
+  let cameraListeners: (() => void)[] = [];
+  /** Where tiles were on screen when the listeners were last told (`placement`), as one string. */
+  let reportedPlacement = '';
 
   /** Reads where the canvas is on screen. Cheap. */
   function locate(): void {
@@ -221,6 +243,37 @@ export function createMapRenderer(canvas: HTMLCanvasElement): MapRenderer {
     return { x: (point.x - box.left) * scale, y: (point.y - box.top) * scale };
   }
 
+  /**
+   * Everything that decides where a tile is on screen, as one string: the
+   * canvas box, the camera as drawn, the pixel scale and the size of the
+   * map (0 x 0 without a view). Two equal strings mean no tile has moved.
+   */
+  function placement(): string {
+    const drawn = snapCamera(camera);
+    return [
+      box.left, box.top, box.width, box.height,
+      drawn.x, drawn.y, drawn.zoom,
+      pixelsPerCss(),
+      view === null ? 0 : view.width, view === null ? 0 : view.height,
+    ].join(',');
+  }
+
+  /**
+   * Tells the listeners of onCameraChange if tiles are somewhere else on
+   * screen than when they were last told, and only then. The last thing in
+   * every call that can move the camera (setView, panBy, zoomBy, centerOn)
+   * and in the size report of the browser. The questions (tileAt,
+   * tileToScreen, tileScreenRect) never call it: a question must not fire
+   * call-backs. If one of them notices a new canvas size, the browser's
+   * report in the same frame tells the listeners.
+   */
+  function reportCamera(): void {
+    const now = placement();
+    if (now === reportedPlacement) return;
+    reportedPlacement = now;
+    for (const listener of cameraListeners.slice()) listener();
+  }
+
   // ---- Drawing: at most once per animation frame, and only when asked ----
 
   function requestDraw(): void {
@@ -289,6 +342,7 @@ export function createMapRenderer(canvas: HTMLCanvasElement): MapRenderer {
     // given a new size is empty. Draw it now: at the next animation frame
     // the map would already have been missing from the screen for a frame.
     drawWithoutWaiting();
+    reportCamera();
   });
   try {
     // The size in real device pixels, where the browser can report it: the
@@ -298,6 +352,8 @@ export function createMapRenderer(canvas: HTMLCanvasElement): MapRenderer {
     observer.observe(canvas);
   }
   measure();
+  // Where things are at the start: only a change from here on is reported.
+  reportedPlacement = placement();
 
   return {
     setView(next) {
@@ -319,6 +375,7 @@ export function createMapRenderer(canvas: HTMLCanvasElement): MapRenderer {
         if (!sameMap) keepCameraOnMap();
       }
       requestDraw();
+      reportCamera();
     },
 
     setOverlay(next) {
@@ -335,6 +392,7 @@ export function createMapRenderer(canvas: HTMLCanvasElement): MapRenderer {
       camera = { ...camera, x: camera.x - dx * scale, y: camera.y - dy * scale };
       keepCameraOnMap();
       requestDraw();
+      reportCamera();
     },
 
     zoomBy(steps, anchor) {
@@ -345,6 +403,7 @@ export function createMapRenderer(canvas: HTMLCanvasElement): MapRenderer {
       const deviceSteps = Math.round(steps) * zoomStep(pixelRatio);
       camera = zoomCamera(snapCamera(camera), deviceSteps, fixed, zoomRange(pixelRatio), viewport, view);
       requestDraw();
+      reportCamera();
     },
 
     centerOn(tile) {
@@ -358,6 +417,7 @@ export function createMapRenderer(canvas: HTMLCanvasElement): MapRenderer {
       };
       keepCameraOnMap();
       requestDraw();
+      reportCamera();
     },
 
     tileAt(point) {
@@ -380,8 +440,32 @@ export function createMapRenderer(canvas: HTMLCanvasElement): MapRenderer {
       return { x: box.left + device.x / scale, y: box.top + device.y / scale };
     },
 
+    tileScreenRect(tile): ScreenRect {
+      if (view === null) throw new Error('tileScreenRect: there is no view yet');
+      if (!isValidTile(tile, view)) throw new Error(`tileScreenRect: ${tile} is not a tile of this map`);
+      measure();
+      const topLeft = artToDevice(snapCamera(camera), tileOrigin(tileCoord(tile, view)));
+      const scale = pixelsPerCss();
+      const left = box.left + topLeft.x / scale;
+      const top = box.top + topLeft.y / scale;
+      return {
+        left,
+        top,
+        right: left + (TILE_WIDTH * camera.zoom) / scale,
+        bottom: top + (TILE_HEIGHT * camera.zoom) / scale,
+      };
+    },
+
+    onCameraChange(listener) {
+      cameraListeners = [...cameraListeners, listener];
+      return () => {
+        cameraListeners = cameraListeners.filter((other) => other !== listener);
+      };
+    },
+
     destroy() {
       destroyed = true;
+      cameraListeners = [];
       observer.disconnect();
       if (frameRequest !== null) cancelAnimationFrame(frameRequest);
       frameRequest = null;

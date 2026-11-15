@@ -32,7 +32,7 @@ function landView(width: number, height: number, ownerAt: (x: number, y: number)
   const tiles: (TileView | null)[] = [];
   for (let tile = 0; tile < width * height; tile++) {
     const { x, y } = tileCoord(tile, { width, height });
-    tiles.push({ terrain: 'grassland', feature: null, owner: ownerAt(x, y), visible: true });
+    tiles.push({ terrain: 'grassland', feature: null, improvement: null, owner: ownerAt(x, y), visible: true });
   }
   return {
     you: 'p1', turn: 1, width, height, tiles, units: [], cities: [],

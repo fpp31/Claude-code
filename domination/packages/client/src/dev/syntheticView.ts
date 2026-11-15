@@ -7,15 +7,20 @@
  * The land is simple smoothed noise, not the real map generator, and the
  * cities and units are placed without asking the rules. It only has to
  * LOOK like a game in full swing: every terrain and feature, six
- * civilizations with territory, all three unit types, some fog.
+ * civilizations with territory, farms and mines on their land, all four
+ * unit types, some fog. Player 1 is the viewer: some of their Workers are
+ * at work, and their first city has nothing to build, so both small signs
+ * of the map can be looked at.
  * The same options always give the same view.
  */
 
 import {
-  CIV_IDS, cityNameFor, distance, nextFloat, nextInt, seedRng, tileCoord, tileCount, tileIndex, tilesInRange,
+  CIV_IDS, IMPROVEMENTS, IMPROVEMENT_IDS, UNITS, UNIT_TYPE_IDS, cityNameFor, distance, foodToGrow, improvementFits,
+  nextFloat, nextInt, seedRng, tileCoord, tileCount, tileIndex, tilesInRange,
 } from '@domination/shared';
 import type {
-  CityView, FeatureId, GridSize, PlayerId, PlayerView, RngState, TerrainId, TileIndex, TileView, UnitTypeId, UnitView,
+  CityView, FeatureId, GridSize, ImprovementId, OwnCityDetail, OwnUnitDetail, PlayerId, PlayerView, RngState, TerrainId,
+  TileIndex, TileView, UnitTypeId, UnitView,
 } from '@domination/shared';
 
 export interface SyntheticViewOptions {
@@ -109,23 +114,96 @@ export function syntheticView(options: SyntheticViewOptions): PlayerView {
         population: 1 + nextInt(rng, 12), visible: true, own: null,
       });
       // Units in and around the city, so that every way of standing on a tile
-      // shows up: alone, two in a city, two on open ground.
+      // shows up: alone, two in a city, two on open ground (a Worker behind
+      // a Scout among them).
       const near = tilesInRange(tile, 2, size).filter((candidate) => candidate !== tile && openLand(candidate));
       const wanted: [spot: TileIndex | undefined, type: UnitTypeId][] = [
         [tile, founded % 2 === 0 ? 'warrior' : 'scout'],
         [near[0], 'warrior'],
         [near[1], 'scout'],
         [founded % 2 === 0 ? tile : near[0], 'settler'],
+        [near[1], 'worker'],
+        [near[2], 'worker'],
       ];
       for (const [spot, type] of wanted) {
         if (spot === undefined) continue;
         units.push({
           id: `u${playerIndex + 1}_${units.length}`, type, owner: player.id, tile: spot,
-          own: playerIndex === 0 ? { movesLeft: units.length % 3 === 0 ? 0 : 2, foundCityError: 'cannotFoundCity' } : null,
+          own:
+            playerIndex === 0
+              ? { movesLeft: units.length % 3 === 0 ? 0 : 2, foundCityError: 'cannotFoundCity', job: null, jobOptions: [] }
+              : null,
         });
       }
       founded += 1;
     }
+  });
+
+  // ---- Farms and mines on owned land; the viewer's Workers and cities -----
+  // A stream of its own, so the land and the cities above stay exactly as
+  // they were before there were improvements.
+  const improvementRng = seedRng('wp5-big-map', `${size.width}x${size.height} improvements`);
+  const cityTiles = new Set(cities.map((city) => city.tile));
+  const fits = (tile: TileIndex, improvement: ImprovementId): boolean =>
+    isLand(tile) && improvementFits(improvement, { terrain: terrains[tile], feature: features[tile] });
+  const improvements: (ImprovementId | null)[] = [];
+  for (let tile = 0; tile < count; tile++) {
+    const chance = nextFloat(improvementRng);
+    let improvement: ImprovementId | null = null;
+    if (owners[tile] !== null && !cityTiles.has(tile)) {
+      if (fits(tile, 'mine') && chance < 0.6) improvement = 'mine';
+      else if (fits(tile, 'farm') && chance < 0.35) improvement = 'farm';
+    }
+    improvements.push(improvement);
+  }
+
+  // Every other Worker of the viewer that stands where something can be built is building it.
+  let workersSeen = 0;
+  for (const unit of units) {
+    if (unit.own === null || !UNITS[unit.type].canImprove) continue;
+    const site = unit.tile;
+    const possible = IMPROVEMENT_IDS.filter(
+      (improvement) => owners[site] === unit.owner && !cityTiles.has(site) && improvements[site] === null && fits(site, improvement),
+    );
+    const job = possible.length > 0 && workersSeen % 2 === 0 ? possible[0] : null;
+    workersSeen += 1;
+    const turnsTotal = job === null ? 0 : IMPROVEMENTS[job].turns;
+    const own: OwnUnitDetail = {
+      // At work it is dimmed whatever its moves; without a job it is bright here.
+      movesLeft: UNITS[unit.type].moves,
+      foundCityError: 'cannotFoundCity',
+      job: job === null ? null : { improvement: job, turnsWorked: 1, turnsTotal, turnsLeft: turnsTotal - 1 },
+      jobOptions: IMPROVEMENT_IDS.map((improvement) => ({
+        improvement,
+        turns: IMPROVEMENTS[improvement].turns,
+        error: job !== null ? 'unitBusy' : possible.includes(improvement) ? null : 'badImprovementTile',
+      })),
+    };
+    unit.own = own;
+  }
+
+  // The viewer's cities get the facts only an owner is shown. The first one has an empty build queue.
+  cities.forEach((city, index) => {
+    if (city.owner !== 'p1') return;
+    const land = tilesInRange(city.tile, 2, size).filter((tile) => tile !== city.tile && owners[tile] === city.owner && isLand(tile));
+    // Improved tiles first, so that the worked-tile tokens can be seen on farms and mines.
+    const worked = [...land.filter((tile) => improvements[tile] !== null), ...land.filter((tile) => improvements[tile] === null)]
+      .slice(0, city.population);
+    const idle = index === cities.findIndex((candidate) => candidate.owner === 'p1');
+    const own: OwnCityDetail = {
+      foodStored: 3,
+      foodToGrow: foodToGrow(city.population),
+      foodPerTurn: 2,
+      buildQueue: idle ? [] : [{ item: { kind: 'unit', unitType: 'warrior' }, cost: UNITS.warrior.cost, turns: 3, wait: null }],
+      held: null,
+      productionStored: 4,
+      productionPerTurn: 4,
+      worked,
+      buildOptions: UNIT_TYPE_IDS.map((unitType, place) => ({
+        item: { kind: 'unit', unitType }, cost: UNITS[unitType].cost, turns: 6 + 2 * place, wait: null, addError: null,
+      })),
+    };
+    city.own = own;
   });
 
   // ---- Fog ---------------------------------------------------------------
@@ -144,7 +222,11 @@ export function syntheticView(options: SyntheticViewOptions): PlayerView {
 
   const tiles: (TileView | null)[] = [];
   for (let tile = 0; tile < count; tile++) {
-    tiles.push(explored[tile] ? { terrain: terrains[tile], feature: features[tile], owner: owners[tile], visible: visible[tile] } : null);
+    tiles.push(
+      explored[tile]
+        ? { terrain: terrains[tile], feature: features[tile], improvement: improvements[tile], owner: owners[tile], visible: visible[tile] }
+        : null,
+    );
   }
 
   return {

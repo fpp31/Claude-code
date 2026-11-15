@@ -58,6 +58,20 @@ describe('handleServerMessage (WP4)', () => {
     expect(store.get().joining).toBeNull();
   });
 
+  it('lobby: nothing of a map is carried along (selection, tile card, hovered tile, hover box)', () => {
+    // A selection and a tile card are never set together; two stores, so that each is seen to go.
+    const selecting = storeInGame({ selection: { kind: 'unit', unitId: SAMPLE.warriorId }, hoverTile: 9, hoverInfoTile: 9 });
+    const inspecting = storeInGame({ inspectedTile: SAMPLE.emptyTile, hoverTile: 9, hoverInfoTile: 9 });
+    for (const store of [selecting, inspecting]) {
+      deliver(store, { type: 'lobby', lobby: sampleLobby() });
+      expect(currentScreen(store.get())).toBe('lobby');
+      expect(store.get().selection).toBeNull();
+      expect(store.get().inspectedTile).toBeNull();
+      expect(store.get().hoverTile).toBeNull();
+      expect(store.get().hoverInfoTile).toBeNull();
+    }
+  });
+
   it('gameSync: sets the game session with its seq, awaitingSync false, and clears the lobby, joining and busy', () => {
     const store = createStore(initialState('Ada', SAMPLE.code));
     store.set({ lobby: sampleLobby(), busy: true });
@@ -210,6 +224,7 @@ describe('handleServerMessage (WP4)', () => {
         busy: true,
         selection: { kind: 'unit', unitId: SAMPLE.warriorId },
         hoverTile: SAMPLE.emptyTile,
+        hoverInfoTile: SAMPLE.emptyTile,
       });
       expect(currentScreen(store.get())).toBe('game');
 
@@ -221,10 +236,17 @@ describe('handleServerMessage (WP4)', () => {
       expect(state.joinProblem, code).toBe(problem);
       expect(state.selection, code).toBeNull();
       expect(state.hoverTile, code).toBeNull();
+      expect(state.hoverInfoTile, code).toBeNull();
       expect(state.joining, code).toBeNull();
       expect(state.busy, code).toBe(false);
       expect(state.toasts.map((shown) => [shown.kind, shown.text]), code).toEqual([['error', toast]]);
       expect(replies, code).toEqual([]);
+
+      // The same with a tile card open instead of a selection: the card goes down with the game.
+      const inspecting = storeInGame({ inspectedTile: SAMPLE.emptyTile });
+      deliver(inspecting, { type: 'error', code, message: 'the server text' });
+      expect(inspecting.get().game, code).toBeNull();
+      expect(inspecting.get().inspectedTile, code).toBeNull();
     }
   });
 
@@ -258,11 +280,16 @@ describe('handleServerMessage (WP4)', () => {
 
   it('an error that says nothing about membership leaves the game or lobby on screen', () => {
     for (const code of ['serverError', 'rateLimited', 'notInGame', 'badMessage', 'notHost', 'civTaken', 'badName'] as const) {
-      const inGame = storeInGame({ selection: { kind: 'unit', unitId: SAMPLE.warriorId } });
+      const inGame = storeInGame({ selection: { kind: 'unit', unitId: SAMPLE.warriorId }, hoverInfoTile: 9 });
       const game = inGame.get().game;
       deliver(inGame, { type: 'error', code, message: 'the server text' });
       expect(inGame.get().game, code).toBe(game);
       expect(inGame.get().selection, code).toEqual({ kind: 'unit', unitId: SAMPLE.warriorId });
+      expect(inGame.get().hoverInfoTile, code).toBe(9);
+
+      const inspecting = storeInGame({ inspectedTile: SAMPLE.emptyTile });
+      deliver(inspecting, { type: 'error', code, message: 'the server text' });
+      expect(inspecting.get().inspectedTile, code).toBe(SAMPLE.emptyTile);
 
       const inLobby = createStore(initialState('Ada'));
       inLobby.set({ lobby: sampleLobby() });
@@ -335,16 +362,19 @@ describe('handleServerMessage (WP4)', () => {
   });
 
   it('left: clears lobby, game, selection and joining', () => {
-    // (The page left a lobby. A selection and a hovered tile cannot exist
-    // there; they are set here to see that nothing of a map is carried along.)
+    // (The page left a lobby. A selection, a tile card, a hovered tile and a
+    // hover box cannot exist there; they are set here to see that nothing of
+    // a map is carried along.)
     const store = createStore(initialState('Ada'));
     store.set({
       connection: 'online',
       lobby: sampleLobby(),
       selection: { kind: 'city', cityId: SAMPLE.romeId },
+      inspectedTile: 4,
       joining: SAMPLE.code,
       busy: true,
       hoverTile: 3,
+      hoverInfoTile: 3,
     });
 
     const replies = deliver(store, { type: 'left' });
@@ -357,6 +387,8 @@ describe('handleServerMessage (WP4)', () => {
     expect(state.joining).toBeNull();
     expect(state.busy).toBe(false);
     expect(state.hoverTile).toBeNull();
+    expect(state.inspectedTile).toBeNull();
+    expect(state.hoverInfoTile).toBeNull();
     expect(state.toasts).toEqual([]);
     expect(replies).toEqual([]);
 
@@ -379,10 +411,13 @@ describe('handleServerMessage (WP4)', () => {
     expect(state.toasts.map((toast) => [toast.kind, toast.text])).toEqual([['info', STARTED_BEFORE_LEAVE_MESSAGE]]);
 
     // Nothing the player had on the map is thrown away while the page waits for the server's answer.
-    const playing = storeInGame({ selection: { kind: 'unit', unitId: SAMPLE.warriorId }, hoverTile: SAMPLE.emptyTile });
+    const playing = storeInGame({ selection: { kind: 'unit', unitId: SAMPLE.warriorId }, hoverTile: SAMPLE.emptyTile, hoverInfoTile: SAMPLE.emptyTile });
     const before = playing.get();
     deliver(playing, { type: 'left' });
     expect({ ...playing.get(), toasts: [] }).toEqual({ ...before, toasts: [] });
+    const reading = storeInGame({ inspectedTile: SAMPLE.thebesTile });
+    deliver(reading, { type: 'left' });
+    expect(reading.get().inspectedTile).toBe(SAMPLE.thebesTile);
     // The server's answer is a full view, which puts the page back in step.
     deliver(playing, gameSync(9));
     expect(playing.get().game?.seq).toBe(9);
@@ -424,6 +459,63 @@ describe('handleServerMessage (WP4)', () => {
     expect(store.get().game?.code).toBe('ZZZZZ');
     expect(store.get().selection).toBeNull();
     expect(store.get().hoverTile).toBeNull();
+    expect(store.get().inspectedTile).toBeNull();
+    expect(store.get().hoverInfoTile).toBeNull();
+  });
+
+  it('a gameUpdate keeps the tile card open; a gameSync for the same game keeps it; for another game it is closed and the hover box is gone', () => {
+    const store = storeInGame({ inspectedTile: SAMPLE.foreignWarriorTile, hoverTile: SAMPLE.thebesTile, hoverInfoTile: SAMPLE.thebesTile });
+
+    // The foreign Warrior walks off the inspected tile, and the turn goes on: the card and the box stay where they are.
+    const units = cloneJson(viewOf(store).units);
+    const walker = units.find((unit) => unit.id === SAMPLE.foreignWarriorId);
+    if (walker === undefined) throw new Error('the sample view has no foreign warrior');
+    walker.tile += 1;
+    deliver(store, { type: 'gameUpdate', seq: 6, patch: { units, turn: 8 }, events: [{ type: 'turnStarted', turn: 8 }] });
+    expect(store.get().inspectedTile).toBe(SAMPLE.foreignWarriorTile);
+    expect(store.get().hoverInfoTile).toBe(SAMPLE.thebesTile);
+    expect(store.get().hoverTile).toBe(SAMPLE.thebesTile);
+    expect(store.get().selection).toBeNull();
+    expect(viewOf(store).turn).toBe(8); // (the update itself was applied)
+
+    // An update that takes the tile out of sight closes nothing either: the card is rewritten from the new view.
+    const seen = viewOf(store).tiles[SAMPLE.foreignWarriorTile];
+    if (seen === null) throw new Error('the sample view does not know the foreign warrior\'s tile');
+    deliver(store, { type: 'gameUpdate', seq: 7, patch: { tiles: [[SAMPLE.foreignWarriorTile, { ...seen, visible: false }]] }, events: [] });
+    expect(viewOf(store).tiles[SAMPLE.foreignWarriorTile]?.visible).toBe(false);
+    expect(store.get().inspectedTile).toBe(SAMPLE.foreignWarriorTile);
+
+    // A full view of the same game (after a reconnect, a resync, or with patches switched off).
+    deliver(store, gameSync(20));
+    expect(store.get().inspectedTile).toBe(SAMPLE.foreignWarriorTile);
+    expect(store.get().hoverInfoTile).toBe(SAMPLE.thebesTile);
+    expect(store.get().hoverTile).toBe(SAMPLE.thebesTile);
+
+    // A gameUpdate that is ignored (a gap: the page asks for a resync) leaves them alone too.
+    deliver(store, { type: 'gameUpdate', seq: 99, patch: { turn: 12 }, events: [] });
+    expect(store.get().inspectedTile).toBe(SAMPLE.foreignWarriorTile);
+    expect(store.get().hoverInfoTile).toBe(SAMPLE.thebesTile);
+
+    // Another game is another map: its tile numbers mean other tiles.
+    deliver(store, gameSync(1, { code: 'ZZZZZ' }));
+    expect(store.get().game?.code).toBe('ZZZZZ');
+    expect(store.get().inspectedTile).toBeNull();
+    expect(store.get().hoverInfoTile).toBeNull();
+    expect(store.get().hoverTile).toBeNull();
+  });
+
+  it('presence, actionOk and actionRejected leave the tile card and the hover box alone', () => {
+    const store = storeInGame({ inspectedTile: SAMPLE.emptyTile, hoverInfoTile: 9, busy: true });
+    deliver(
+      store,
+      { type: 'presence', connected: ['p1'] },
+      { type: 'actionOk', requestId: 1 },
+      { type: 'actionRejected', requestId: 2, error: { code: 'unitBusy', message: RULE_ERROR_MESSAGES.unitBusy } },
+    );
+    expect(store.get().inspectedTile).toBe(SAMPLE.emptyTile);
+    expect(store.get().hoverInfoTile).toBe(9);
+    // What the server says about a unit at work reaches the player as it is.
+    expect(store.get().toasts.map((toast) => toast.text)).toEqual(['This unit is at work. Stop the work first.']);
   });
 
   it('events become info toasts, in order; events that need no words add none', () => {
@@ -491,7 +583,8 @@ describe('handleServerMessage (WP4)', () => {
         type: 'gameUpdate', seq: 4, patch: { turn: 8 },
         events: [
           { type: 'cityGrew', playerId: 'p1', cityId: SAMPLE.romeId, name: 'Rome', population: 3 },
-          { type: 'unitBuilt', playerId: 'p1', cityId: SAMPLE.romeId, cityName: 'Rome', unitId: 'u1_new', unitType: 'warrior' },
+          { type: 'unitBuilt', playerId: 'p1', cityId: SAMPLE.romeId, cityName: 'Rome', unitId: 'u1_new', unitType: 'warrior', queueEmpty: true },
+          { type: 'improvementBuilt', playerId: 'p1', unitId: SAMPLE.workerId, improvement: 'farm', tile: SAMPLE.workerTile, cityName: 'Rome' },
           { type: 'turnStarted', turn: 8 },
         ],
       },
@@ -528,11 +621,40 @@ describe('describeEvent (WP4)', () => {
     // The exact wording is free to change (edit the expectations with it);
     // what matters is that each sentence names the right thing.
     expect(describeEvent({ type: 'cityGrew', playerId: 'p1', cityId: SAMPLE.romeId, name: 'Rome', population: 2 }, view)).toBe('Rome grew to 2.');
-    expect(
-      describeEvent({ type: 'unitBuilt', playerId: 'p1', cityId: SAMPLE.romeId, cityName: 'Rome', unitId: 'u1_new', unitType: 'warrior' }, view),
-    ).toBe('Warrior completed in Rome.');
     expect(describeEvent({ type: 'turnStarted', turn: 8 }, view)).toBe('Turn 8 has begun.');
     expect(describeEvent({ type: 'cityFounded', playerId: 'p1', cityId: 'c1_new', name: 'Ostia', tile: 5 }, view)).toBe('You founded Ostia.');
+  });
+
+  it('a completed unit gets its sentence, and a second one when the queue has run empty', () => {
+    const built: GameEvent = {
+      type: 'unitBuilt', playerId: 'p1', cityId: SAMPLE.romeId, cityName: 'Rome', unitId: 'u1_new', unitType: 'warrior', queueEmpty: false,
+    };
+    expect(describeEvent(built, view)).toBe('Warrior completed in Rome.');
+    expect(describeEvent({ ...built, unitType: 'worker' }, view)).toBe('Worker completed in Rome.');
+
+    // The last entry of the queue: from now on the city builds nothing, and this toast is the first to say so.
+    expect(describeEvent({ ...built, unitType: 'scout', queueEmpty: true }, view)).toBe('Scout completed in Rome. Rome has nothing left to build.');
+    expect(describeEvent({ ...built, cityName: 'Ostia', queueEmpty: true }, view)).toBe('Warrior completed in Ostia. Ostia has nothing left to build.');
+
+    // Both sentences travel in one toast.
+    const store = storeInGame();
+    deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 8 }, events: [{ ...built, queueEmpty: true }] });
+    expect(store.get().toasts.map((toast) => [toast.kind, toast.text])).toEqual([['info', 'Warrior completed in Rome. Rome has nothing left to build.']]);
+  });
+
+  it('describeEvent for improvementBuilt: "Your Worker finished a Farm near Rome."; without a city name the words "near ..." are left out', () => {
+    const finished: GameEvent = {
+      type: 'improvementBuilt', playerId: 'p1', unitId: SAMPLE.workerId, improvement: 'farm', tile: SAMPLE.workerTile, cityName: 'Rome',
+    };
+    expect(describeEvent(finished, view)).toBe('Your Worker finished a Farm near Rome.');
+    expect(describeEvent({ ...finished, improvement: 'mine' }, view)).toBe('Your Worker finished a Mine near Rome.');
+    expect(describeEvent({ ...finished, cityName: '' }, view)).toBe('Your Worker finished a Farm.');
+    // A unit the view does not hold (any more) is still "your unit".
+    expect(describeEvent({ ...finished, unitId: 'u1_gone' }, view)).toBe('Your unit finished a Farm near Rome.');
+
+    const store = storeInGame();
+    deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 8 }, events: [finished] });
+    expect(store.get().toasts.map((toast) => [toast.kind, toast.text])).toEqual([['info', 'Your Worker finished a Farm near Rome.']]);
   });
 
   it('names the other player when somebody else founds a city', () => {

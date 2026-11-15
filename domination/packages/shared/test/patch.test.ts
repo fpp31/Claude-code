@@ -48,7 +48,7 @@ describe('diffViews', () => {
     expect(fogged).toBeGreaterThanOrEqual(0);
     expect(seen).toBeGreaterThanOrEqual(0);
 
-    b.tiles[hidden] = { terrain: 'ocean', feature: null, owner: null, visible: true }; // newly explored
+    b.tiles[hidden] = { terrain: 'ocean', feature: null, improvement: null, owner: null, visible: true }; // newly explored
     b.tiles[fogged] = { ...a.tiles[fogged]!, visible: true };                          // back in sight
     b.tiles[seen] = { ...a.tiles[seen]!, owner: 'p2' };                                // changed hands
 
@@ -69,11 +69,12 @@ describe('diffViews', () => {
       { ...original, feature: 'hills' },
       { ...original, owner: original.owner === 'p2' ? null : 'p2' },
       { ...original, visible: !original.visible },
-      // A field that does not exist yet (phase 2: improvements, roads...).
-      { ...original, improvement: 'farm' },
+      { ...original, improvement: original.improvement === 'farm' ? null : 'farm' },
+      // A field that does not exist yet (a later phase: roads, resources...).
+      { ...original, road: true },
     ];
     // If TileView gains a field, add a variant for it above.
-    expect(Object.keys(original).sort()).toEqual(['feature', 'owner', 'terrain', 'visible']);
+    expect(Object.keys(original).sort()).toEqual(['feature', 'improvement', 'owner', 'terrain', 'visible']);
 
     for (const variant of variants) {
       const b = sampleView();
@@ -89,8 +90,18 @@ describe('diffViews', () => {
       (view) => { view.turn += 1; },
       (view) => { view.players[1].name = 'Benedict'; },
       (view) => { view.units[0].own!.movesLeft = 0; },
-      (view) => { view.cities[0].own!.productionBlocked = 'noRoom'; },
-      (view) => { view.tiles[0] = { terrain: 'ocean', feature: null, owner: null, visible: false }; },
+      (view) => { view.units.find((unit) => unit.own !== null && unit.own.job !== null)!.own!.job!.turnsLeft -= 1; },
+      (view) => { view.units.find((unit) => unit.own !== null && unit.own.job !== null)!.own!.job = null; },
+      (view) => { view.units[0].own!.jobOptions = [{ improvement: 'farm', turns: 4, error: 'cannotImprove' }]; },
+      (view) => { view.cities[0].own!.buildQueue[0].wait = 'noRoom'; },
+      (view) => { view.cities[0].own!.buildQueue.pop(); },
+      (view) => { view.cities[0].own!.held = 'needsPopulation'; },
+      (view) => { view.cities[0].own!.buildOptions[0].addError = 'queueFull'; },
+      (view) => { view.tiles[0] = { terrain: 'ocean', feature: null, improvement: null, owner: null, visible: false }; },
+      (view) => {
+        const farm = view.tiles.findIndex((tile) => tile !== null && tile.improvement !== null);
+        view.tiles[farm] = { ...view.tiles[farm]!, improvement: null };
+      },
     ];
     // If PlayerView gains a section, diffViews, applyViewPatch and this list must learn about it.
     expect(Object.keys(a).sort()).toEqual(['cities', 'height', 'players', 'tiles', 'turn', 'units', 'width', 'you']);
@@ -124,7 +135,7 @@ describe('applyViewPatch', () => {
     b.units[0].own!.movesLeft = 0;
     b.cities[0].own!.foodStored += 2;
     const hidden = b.tiles.findIndex((tile) => tile === null);
-    b.tiles[hidden] = { terrain: 'coast', feature: null, owner: null, visible: true };
+    b.tiles[hidden] = { terrain: 'coast', feature: null, improvement: null, owner: null, visible: true };
     const seen = b.tiles.findIndex((tile) => tile !== null && tile.visible);
     b.tiles[seen] = { ...b.tiles[seen]!, visible: false };
     expectRoundTrip(a, b);
@@ -136,7 +147,7 @@ describe('applyViewPatch', () => {
     const b = sampleView();
     b.turn += 1;
     b.units = [];
-    b.tiles[0] = { terrain: 'ocean', feature: null, owner: null, visible: true };
+    b.tiles[0] = { terrain: 'ocean', feature: null, improvement: null, owner: null, visible: true };
     const result = applyViewPatch(a, diffViews(a, b)!);
     expect(a).toEqual(untouched);
     expect(result).not.toBe(a);
@@ -163,8 +174,8 @@ describe('applyViewPatch', () => {
         const old = changed.tiles[tile];
         changed.tiles[tile] =
           old === null
-            ? { terrain: 'plains', feature: null, owner: null, visible: true }
-            : { ...old, visible: !old.visible, owner: next(2) === 0 ? null : 'p1' };
+            ? { terrain: 'plains', feature: null, improvement: next(3) === 0 ? 'farm' : null, owner: null, visible: true }
+            : { ...old, visible: !old.visible, owner: next(2) === 0 ? null : 'p1', improvement: next(4) === 0 ? 'farm' : old.improvement };
       }
       if (next(3) === 0) changed.turn += 1;
       if (next(3) === 0 && changed.units.length > 0) changed.units[next(changed.units.length)].tile = next(100);

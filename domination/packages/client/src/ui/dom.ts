@@ -90,3 +90,9 @@ export function setDisabled(control: HTMLButtonElement | HTMLInputElement | HTML
   if (disabled && document.activeElement === control) control.blur();
   control.disabled = disabled;
 }
+
+/** Fills a progress bar (`div.bar > div.bar-fill`) to a fraction from 0 to 1. */
+export function setBar(fill: HTMLElement, fraction: number): void {
+  const width = `${Math.round(fraction * 100)}%`;
+  if (fill.style.width !== width) fill.style.width = width;
+}

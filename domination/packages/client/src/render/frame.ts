@@ -14,7 +14,7 @@ import type { BannerCache } from './bannerCache';
 import { visibleTileRange } from './camera';
 import type { Camera, Viewport } from './camera';
 import { TILE_WIDTH, tileOrigin } from './geometry';
-import { pathMarks } from './scene';
+import { cityIsIdle, pathMarks, workingSignOffset } from './scene';
 import type { UnitDrawing } from './scene';
 import { LAYER_PADDING } from './terrainLayer';
 
@@ -31,7 +31,7 @@ export interface FrameInput {
   camera: Camera;
   view: PlayerView | null;
   overlay: MapOverlay;
-  /** The finished picture of ground, borders and features (terrainLayer.ts). */
+  /** The finished picture of ground, borders, features and improvements (terrainLayer.ts). */
   terrain: HTMLCanvasElement;
   sheet: SpriteSheet;
   banners: BannerCache;
@@ -84,7 +84,7 @@ export function drawFrame(context: CanvasRenderingContext2D, frame: FrameInput):
     drawSprite(sheet.get(id), origin.px, origin.py);
   };
 
-  // 2-4. Ground, borders and features: the part of the finished picture that is on screen.
+  // 2-4. Ground, borders, features and improvements: the part of the finished picture that is on screen.
   drawTerrain(context, frame.terrain, viewport, zoom, originX, originY);
 
   // 5. Highlights from the overlay.
@@ -96,7 +96,8 @@ export function drawFrame(context: CanvasRenderingContext2D, frame: FrameInput):
   if (overlay.selectedTile !== null) drawOnTile('marker.selection', overlay.selectedTile);
   if (overlay.hoverTile !== null && overlay.hoverTile !== overlay.selectedTile) drawOnTile('marker.hover', overlay.hoverTile);
 
-  // 6. Cities, then units.
+  // 6. Cities, then units, then the "builds nothing" signs. Both signs are
+  // drawn from the view alone: the overlay knows nothing about them.
   for (const city of frame.cities) {
     if (!onScreen(city.tile)) continue;
     const origin = tileOrigin(tileCoord(city.tile, view));
@@ -114,6 +115,18 @@ export function drawFrame(context: CanvasRenderingContext2D, frame: FrameInput):
       origin.px + drawing.dx + (slide?.dx ?? 0),
       origin.py + drawing.dy + (slide?.dy ?? 0),
     );
+    if (drawing.working) {
+      // The "at work" sign, right after its unit, so a unit in front of this
+      // one covers both. It is drawn at the unit's real place: a unit at
+      // work stays on its tile, so it never slides.
+      const sign = workingSignOffset(drawing);
+      drawSprite(sheet.get('marker.working'), origin.px + sign.dx, origin.py + sign.dy);
+    }
+  }
+  // After the units, so that a unit standing in the city never hides the
+  // sign; before the banners, which lie on top of everything.
+  for (const city of frame.cities) {
+    if (cityIsIdle(city)) drawOnTile('marker.idle', city.tile);
   }
 
   // 7. City banners, on top of everything. Zoomed out, a banner is much

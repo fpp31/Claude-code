@@ -4,6 +4,8 @@ import {
   CIV_IDS,
   FEATURES,
   FEATURE_IDS,
+  IMPROVEMENTS,
+  IMPROVEMENT_IDS,
   MAP_SIZES,
   MAP_SIZE_IDS,
   RULES,
@@ -14,6 +16,7 @@ import {
   UNIT_TYPE_IDS,
   cityNameFor,
   foodToGrow,
+  improvementFits,
   maxPlayers,
   ruleError,
   tileAllowsCity,
@@ -34,6 +37,7 @@ describe('id lists match the tables', () => {
     expect([...TERRAIN_IDS].sort()).toEqual(Object.keys(TERRAIN).sort());
     expect([...FEATURE_IDS].sort()).toEqual(Object.keys(FEATURES).sort());
     expect([...UNIT_TYPE_IDS].sort()).toEqual(Object.keys(UNITS).sort());
+    expect([...IMPROVEMENT_IDS].sort()).toEqual(Object.keys(IMPROVEMENTS).sort());
     expect([...CIV_IDS].sort()).toEqual(Object.keys(CIVS).sort());
     expect([...MAP_SIZE_IDS].sort()).toEqual(Object.keys(MAP_SIZES).sort());
   });
@@ -144,6 +148,147 @@ describe('units', () => {
     for (const id of UNIT_TYPE_IDS) {
       expect(UNITS[id].moves, `${id}: moves must not be larger than sight`).toBeLessThanOrEqual(UNITS[id].sight);
     }
+  });
+});
+
+/** What every one-line description for players must be: one line, at most 45 characters, no digit, ending with a full stop. */
+function expectOneLineDescription(description: string, what: string): void {
+  expect(description.length, `${what}: at most 45 characters, so that it is one line in a panel`).toBeLessThanOrEqual(45);
+  expect(description.length, what).toBeGreaterThan(10);
+  expect(description, `${what}: one line`).not.toMatch(/[\n\r]/);
+  expect(description, `${what}: no digit (the numbers are in the other columns and would go stale here)`).not.toMatch(/[0-9]/);
+  expect(description.endsWith('.'), `${what}: ends with a full stop`).toBe(true);
+  expect(description, `${what}: no space at either end`).toBe(description.trim());
+}
+
+describe('descriptions for players', () => {
+  it('every unit has a description: one line, at most 45 characters, no digit, ending with a full stop', () => {
+    for (const id of UNIT_TYPE_IDS) expectOneLineDescription(UNITS[id].description, id);
+    // No two units are described with the same words.
+    expect(new Set(UNIT_TYPE_IDS.map((id) => UNITS[id].description)).size).toBe(UNIT_TYPE_IDS.length);
+  });
+
+  it('the improvement ids match the table, and every improvement has a name, a "needs" phrase, at least 1 turn, and a description of one line, at most 45 characters, no digit, ending with a full stop', () => {
+    expect([...IMPROVEMENT_IDS].sort()).toEqual(Object.keys(IMPROVEMENTS).sort());
+    expect(new Set(IMPROVEMENT_IDS).size).toBe(IMPROVEMENT_IDS.length);
+    expect(IMPROVEMENT_IDS.length).toBeGreaterThan(0);
+    for (const id of IMPROVEMENT_IDS) {
+      const improvement = IMPROVEMENTS[id];
+      expect(improvement.name).toMatch(/^[A-Z][a-z]+( [A-Za-z]+)*$/);
+      // "A <name> needs <needs>." is printed next to a greyed-out button: a phrase, not a sentence.
+      expect(improvement.needs.length, id).toBeGreaterThan(3);
+      expect(improvement.needs, id).not.toMatch(/[.\n\r]/);
+      expect(improvement.needs, id).toBe(improvement.needs.trim());
+      expect(Number.isInteger(improvement.turns) && improvement.turns >= 1, `${id}: turns`).toBe(true);
+      expectOneLineDescription(improvement.description, id);
+    }
+    expect(new Set(IMPROVEMENT_IDS.map((id) => IMPROVEMENTS[id].name)).size).toBe(IMPROVEMENT_IDS.length);
+  });
+});
+
+describe('improvements', () => {
+  /** Every kind of tile the game has: each ground, and each feature on each ground it may stand on. */
+  const grounds = TERRAIN_IDS.flatMap((terrain) => [
+    { terrain, feature: null },
+    ...FEATURE_IDS.filter((feature) => FEATURES[feature].allowedOn.includes(terrain)).map((feature) => ({ terrain, feature })),
+  ]);
+
+  it('an improvement only fits land a unit can stand on and a citizen can work', () => {
+    for (const id of IMPROVEMENT_IDS) {
+      const fitting = grounds.filter((ground) => improvementFits(id, ground));
+      // It can be built somewhere at all...
+      expect(fitting.length, id).toBeGreaterThan(0);
+      for (const ground of fitting) {
+        const what = `${id} on ${ground.feature ?? 'open'} ${ground.terrain}`;
+        // ...and only where a Worker can walk to and where the yield is of use to a city.
+        expect(tileMoveCost(ground), what).not.toBeNull();
+        expect(tileIsWater(ground), what).toBe(false);
+        expect(tileIsWorkable(ground), what).toBe(true);
+      }
+      // The two lists of the table name real grounds and real features (or null for open ground).
+      expect(IMPROVEMENTS[id].terrains.length, id).toBeGreaterThan(0);
+      expect(IMPROVEMENTS[id].features.length, id).toBeGreaterThan(0);
+      for (const terrain of IMPROVEMENTS[id].terrains) expect(TERRAIN_IDS, id).toContain(terrain);
+      for (const feature of IMPROVEMENTS[id].features) if (feature !== null) expect(FEATURE_IDS, id).toContain(feature);
+    }
+
+    // improvementFits wants the ground AND what stands on it to be listed.
+    expect(improvementFits('farm', { terrain: 'grassland', feature: null })).toBe(true);
+    expect(improvementFits('farm', { terrain: 'plains', feature: null })).toBe(true);
+    expect(improvementFits('farm', { terrain: 'desert', feature: null })).toBe(true);
+    expect(improvementFits('farm', { terrain: 'grassland', feature: 'hills' })).toBe(false);
+    expect(improvementFits('farm', { terrain: 'grassland', feature: 'forest' })).toBe(false);
+    expect(improvementFits('farm', { terrain: 'coast', feature: null })).toBe(false);
+    expect(improvementFits('mine', { terrain: 'grassland', feature: 'hills' })).toBe(true);
+    expect(improvementFits('mine', { terrain: 'plains', feature: 'hills' })).toBe(true);
+    expect(improvementFits('mine', { terrain: 'desert', feature: 'hills' })).toBe(true);
+    expect(improvementFits('mine', { terrain: 'desert', feature: null })).toBe(false);
+    expect(improvementFits('mine', { terrain: 'plains', feature: 'forest' })).toBe(false);
+    expect(improvementFits('mine', { terrain: 'grassland', feature: 'mountains' })).toBe(false);
+    // What is already built there is not its business (improvementSiteError judges that).
+    expect(improvementFits('farm', { terrain: 'grassland', feature: null, improvement: 'farm' })).toBe(true);
+  });
+
+  it('an improvement adds whole, non-negative yields, and at least one of them is more than 0', () => {
+    for (const id of IMPROVEMENT_IDS) {
+      const yields = IMPROVEMENTS[id].yields;
+      expect(Number.isInteger(yields.food) && yields.food >= 0, `${id}: food`).toBe(true);
+      expect(Number.isInteger(yields.production) && yields.production >= 0, `${id}: production`).toBe(true);
+      expect(yields.food + yields.production, `${id}: it must be worth building`).toBeGreaterThan(0);
+      expect(Object.keys(yields).sort()).toEqual(['food', 'production']);
+    }
+  });
+
+  it('tileYields adds the improvement to what the tile yields; without one, and with null, nothing changes; the result is a copy', () => {
+    // Added, where a feature replaces.
+    expect(tileYields({ terrain: 'grassland', feature: null, improvement: 'farm' })).toEqual({ food: 3, production: 1 });
+    expect(tileYields({ terrain: 'plains', feature: null, improvement: 'farm' })).toEqual({ food: 2, production: 2 });
+    expect(tileYields({ terrain: 'desert', feature: null, improvement: 'farm' })).toEqual({ food: 1, production: 1 });
+    expect(tileYields({ terrain: 'grassland', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 3 });
+    expect(tileYields({ terrain: 'desert', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 3 });
+
+    // In general: the tile's own yields plus the table's, for every improvement on every ground it fits.
+    for (const id of IMPROVEMENT_IDS) {
+      for (const ground of grounds.filter((candidate) => improvementFits(id, candidate))) {
+        const bare = tileYields(ground);
+        expect(tileYields({ ...ground, improvement: id }), `${id} on ${ground.feature ?? 'open'} ${ground.terrain}`).toEqual({
+          food: bare.food + IMPROVEMENTS[id].yields.food,
+          production: bare.production + IMPROVEMENTS[id].yields.production,
+        });
+      }
+    }
+
+    // A caller that only knows the land leaves the field out; null says "nothing built". Both give the land's numbers.
+    for (const ground of grounds) {
+      const source = ground.feature === null ? TERRAIN[ground.terrain].yields : FEATURES[ground.feature].yields;
+      expect(tileYields(ground)).toEqual(source);
+      expect(tileYields({ ...ground, improvement: null })).toEqual(source);
+      expect(tileYields({ ...ground, improvement: undefined })).toEqual(source);
+    }
+
+    // The result is a copy: scribbling on it damages neither table.
+    const yields = tileYields({ terrain: 'grassland', feature: null, improvement: 'farm' });
+    yields.food = 99;
+    yields.production = 99;
+    expect(tileYields({ terrain: 'grassland', feature: null, improvement: 'farm' })).toEqual({ food: 3, production: 1 });
+    expect(IMPROVEMENTS.farm.yields).toEqual({ food: 1, production: 0 });
+    expect(TERRAIN.grassland.yields).toEqual({ food: 2, production: 1 });
+    // The other tile helpers do not look at what is built.
+    expect(tileMoveCost({ terrain: 'grassland', feature: 'hills', improvement: 'mine' })).toBe(FEATURES.hills.moveCost);
+    expect(tileIsWorkable({ terrain: 'grassland', feature: null, improvement: 'farm' })).toBe(true);
+    expect(tileAllowsCity({ terrain: 'grassland', feature: null, improvement: 'farm' })).toBe(true);
+  });
+
+  it('at least one unit type can build improvements, and every such unit is a civilian', () => {
+    const builders = UNIT_TYPE_IDS.filter((id) => UNITS[id].canImprove);
+    expect(builders.length).toBeGreaterThan(0);
+    for (const id of builders) {
+      // A tile holds one civilian: that is what keeps two units from sharing a job.
+      expect(UNITS[id].unitClass, id).toBe('civilian');
+    }
+    for (const id of UNIT_TYPE_IDS) expect(typeof UNITS[id].canImprove, id).toBe('boolean');
+    // A city can build one, so the column is of use.
+    expect(builders.some((id) => UNITS[id].cost > 0)).toBe(true);
   });
 });
 
@@ -268,6 +413,17 @@ describe('map sizes and balance constants', () => {
     // is changed, change the generator and its doc comment with it, then
     // this number.
     expect(RULES.cityClaimRadius, 'see the comment above this line').toBe(2);
+  });
+
+  it('maxQueueLength, forecastTurns and minFoodSurplus are whole numbers of at least 1, and maxQueueLength is at most 64', () => {
+    for (const name of ['maxQueueLength', 'forecastTurns', 'minFoodSurplus'] as const) {
+      expect(Number.isInteger(RULES[name]), name).toBe(true);
+      expect(RULES[name], name).toBeGreaterThanOrEqual(1);
+    }
+    expect(
+      RULES.maxQueueLength,
+      "the server's message check lets 64 queue entries through: change MAX_QUEUE_INPUT_LENGTH in server/src/parseMessage.ts with it",
+    ).toBeLessThanOrEqual(64);
   });
 
   it('growth needs more food each time', () => {

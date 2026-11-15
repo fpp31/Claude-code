@@ -8,7 +8,7 @@
 
 import type { PlayerView, TileIndex, UnitId } from '@domination/shared';
 import { reachableFor } from './game/selectors';
-import type { MapRenderer, ScreenPoint } from './render/api';
+import type { MapRenderer, ScreenPoint, ScreenRect } from './render/api';
 import type { Store } from './state/store';
 
 export interface DebugHook {
@@ -20,6 +20,8 @@ export interface DebugHook {
    * or the tile is not on the map (as renderer.tileToScreen does).
    */
   tileToScreen(tile: TileIndex): ScreenPoint;
+  /** Where this tile's box is on the screen (renderer.tileScreenRect). Throws as tileToScreen does. */
+  tileScreenRect(tile: TileIndex): ScreenRect;
   /** The tiles an own unit can reach this turn (the highlighted ones), ascending. */
   reachable(unitId: UnitId): TileIndex[];
   /** Scrolls the map so the tile is in the middle of the screen. */
@@ -42,6 +44,10 @@ export function installDebugHook(store: Store, renderer: MapRenderer): () => voi
 
     tileToScreen(tile) {
       return renderer.tileToScreen(tile);
+    },
+
+    tileScreenRect(tile) {
+      return renderer.tileScreenRect(tile);
     },
 
     reachable(unitId) {

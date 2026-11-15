@@ -12,21 +12,30 @@ import { clickWasByPointer } from '../input/keys';
 import { attachMapInput } from '../input/mapInput';
 import type { Connection } from '../net/connection';
 import { EMPTY_OVERLAY } from '../render/api';
-import type { MapOverlay, MapRenderer } from '../render/api';
+import type { MapOverlay, MapRenderer, ScreenPoint } from '../render/api';
 import { createMapRenderer } from '../render/renderer';
 import type { AppState, Store } from '../state/store';
 import { mountCityPanel } from './cityPanel';
 import { h } from './dom';
 import type { Unmount } from './dom';
 import { mountEndTurnButton } from './endTurnButton';
+import { mountHoverBox } from './hoverBox';
 import { mountStartHint } from './startHint';
 import { TEST_IDS } from './testIds';
 import { tabTitleText } from './texts';
+import { mountTileCard } from './tileCard';
 import { mountTopBar } from './topBar';
 import { mountUnitPanel } from './unitPanel';
 
-/** A selected tile is kept at least this far (in CSS pixels, about one tile) clear of the panels. */
+/** The marked tile is kept at least this far (in CSS pixels, about one tile) clear of the panels and of the map's edges. */
 const REVEAL_MARGIN = 44;
+/**
+ * When the map steps aside it aims this much further than the margin asks
+ * for. The camera is drawn on whole device pixels, so a tile can land a
+ * fraction of a pixel short of where it was sent; with this to spare it is
+ * in the open for certain afterwards.
+ */
+const REVEAL_SLACK = 1;
 
 /**
  * Builds the game screen and keeps it in step with the store.
@@ -41,9 +50,9 @@ const REVEAL_MARGIN = 44;
  *  3. controller = createController(store, connection) (game/controller.ts)
  *  4. detachInput = attachMapInput(canvas, renderer, controller)
  *  5. Mount the panels over the canvas: top bar (top), End Turn button
- *     (bottom right), unit panel, city panel and the "First steps" note
- *     (bottom left; only one of the three is visible at a time), zoom
- *     buttons (+ / -, calling renderer.zoomBy(1) / zoomBy(-1)).
+ *     (bottom right), the "First steps" note, unit panel, city panel and
+ *     tile card (bottom left; only one of the four is visible at a time),
+ *     zoom buttons (+ / -, calling renderer.zoomBy(1) / zoomBy(-1)).
  *  6. installDebugHook(store, renderer)                (debugHook.ts)
  *  7. Subscribe to the store, and run the same code once right away for the
  *     state that is already there. On every change:
@@ -53,6 +62,17 @@ const REVEAL_MARGIN = 44;
  *     On the FIRST view, AFTER setView: renderer.centerOn(the tile of the
  *     player's first city, or else of their first unit). (centerOn needs a
  *     view; before setView it does nothing.)
+ *  8. Mount the hover box (ui/hoverBox.ts) on top of the screen. It comes
+ *     last because it asks the renderer where a tile is.
+ *
+ * STEPPING ASIDE. A panel that opens bottom left can land on the very tile
+ * it is about (the marked tile: the selected unit or city, or the tile
+ * whose card is open). The map then moves just far enough to bring that
+ * tile into the open: up, or sideways when there is no room above the
+ * panel. It does so when the marked tile changes. When only a size changes
+ * (a panel grows by a queue row, the window is resized) it does so only for
+ * a tile that was in the open before; a tile the player has scrolled away
+ * is never pulled back.
  *
  * ORDER AS BUILT: steps 3 and 5 (controller, panels) are carried out before
  * step 2 (renderer). The top bar and, on a narrow screen, the bottom panels
@@ -127,6 +147,7 @@ export function mountGameScreen(parent: HTMLElement, store: Store, connection: C
     mountStartHint(hudLeft, store),
     mountUnitPanel(hudLeft, store, controller),
     mountCityPanel(hudLeft, store, controller),
+    mountTileCard(hudLeft, store, controller),
     mountEndTurnButton(hudRight, store, controller, (tile) => renderer.centerOn(tile)),
   ];
 
@@ -152,30 +173,9 @@ export function mountGameScreen(parent: HTMLElement, store: Store, connection: C
   let shownOverlay: MapOverlay = EMPTY_OVERLAY;
   let centered = false;
   let revealFrame: number | null = null;
-
-  /**
-   * Selecting something opens a panel, and the panel can land right on top
-   * of the thing that was selected (or, on a narrow screen, push the map
-   * area up past it). So after the selected tile has changed, the map is
-   * scrolled just far enough to bring that tile into the open. It waits for
-   * the next frame: by then the panel has its size, and a centerOn asked for
-   * in the same instant (N key, "Show me") has been done.
-   */
-  function revealSelectionSoon(): void {
-    if (revealFrame !== null) return;
-    revealFrame = requestAnimationFrame(() => {
-      revealFrame = null;
-      const tile = shownOverlay.selectedTile;
-      if (tile === null || shownView === null) return;
-      const point = renderer.tileToScreen(tile);
-      const map = canvas.getBoundingClientRect();
-      const highest = map.top + REVEAL_MARGIN;
-      const lowest = lowestUncoveredY(point.x, map.bottom - REVEAL_MARGIN);
-      if (lowest <= highest) return; // no room to show it properly: leave the map alone
-      if (point.y > lowest) renderer.panBy(0, lowest - point.y);
-      else if (point.y < highest) renderer.panBy(0, highest - point.y);
-    });
-  }
+  let fullReveal = false; // the marked tile changed: bring it out whatever else is true
+  let wasOpen = false; // was the marked tile in the open when last looked at?
+  let lookedAtSize = ''; // the canvas's width and height at that look
 
   /** How far down the screen a tile at this x may sit before a floating bottom panel covers it. */
   function lowestUncoveredY(x: number, mapBottom: number): number {
@@ -188,11 +188,115 @@ export function mountGameScreen(parent: HTMLElement, store: Store, connection: C
     return lowest;
   }
 
-  // On a narrow screen an opening panel makes the canvas itself smaller.
-  // This observer is created after the renderer's own, so it runs after the
-  // renderer has taken the new size in, and can then put the selection right.
-  const sizeWatcher = new ResizeObserver(revealSelectionSoon);
+  /**
+   * Is there a marked tile, and is it in the open right now? In the open
+   * means: its middle lies on the canvas, at least REVEAL_MARGIN below the
+   * canvas's top, and not below lowestUncoveredY (the bottom edge and the
+   * two corner panels, each with the margin). False without a view.
+   */
+  function markedIsOpen(): boolean {
+    const tile = shownOverlay.selectedTile;
+    if (tile === null || shownView === null) return false;
+    let point: ScreenPoint;
+    try {
+      point = renderer.tileToScreen(tile);
+    } catch {
+      // Asked from the camera listener in the middle of a change of view:
+      // the renderer already has a map on which the tile marked until now
+      // does not exist. Nothing is in the open then.
+      return false;
+    }
+    const map = canvas.getBoundingClientRect();
+    if (point.x < map.left || point.x > map.right) return false;
+    if (point.y < map.top + REVEAL_MARGIN) return false;
+    return point.y <= lowestUncoveredY(point.x, map.bottom - REVEAL_MARGIN);
+  }
+
+  /** The canvas's width and height on screen (getBoundingClientRect), as one string. */
+  function canvasSizeNow(): string {
+    const map = canvas.getBoundingClientRect();
+    return `${map.width}x${map.height}`;
+  }
+
+  /** Notes whether the marked tile is in the open right now. */
+  function look(): void {
+    wasOpen = markedIsOpen();
+    lookedAtSize = canvasSizeNow();
+  }
+
+  /**
+   * Selecting something opens a panel, and the panel can land right on top
+   * of the thing that was selected (or, on a narrow screen, push the map
+   * area up past it). So the map is scrolled just far enough to bring the
+   * marked tile into the open. It waits for the next frame: by then the
+   * panel has its size, and a centerOn asked for in the same instant (N
+   * key, "Show me") has been done.
+   *
+   * @param full  true: the marked tile changed (a selection, a card, a unit
+   *              that walked): bring it out. false: only a size changed
+   *              (a panel grew, the window was resized): bring the tile
+   *              out ONLY if it was in the open before and is not now.
+   *              A tile the player has scrolled away is never pulled back.
+   */
+  function revealSoon(full: boolean): void {
+    fullReveal = fullReveal || full;
+    if (revealFrame !== null) return;
+    revealFrame = requestAnimationFrame(() => {
+      revealFrame = null;
+      const tile = shownOverlay.selectedTile;
+      if (tile !== null && shownView !== null && (fullReveal || (wasOpen && !markedIsOpen()))) bringOut(tile);
+      fullReveal = false;
+      look();
+    });
+  }
+
+  /** Moves the map just far enough to bring the tile into the open. */
+  function bringOut(tile: TileIndex): void {
+    const map = canvas.getBoundingClientRect();
+    const highest = map.top + REVEAL_MARGIN;
+    const mapBottom = map.bottom - REVEAL_MARGIN;
+    let point = renderer.tileToScreen(tile);
+
+    // 1. Is there room above the panels at the tile's x? If not (a tall
+    //    panel, a low window): step aside SIDEWAYS first, to the nearest x
+    //    that has room: just right of the left corner's box, or just left
+    //    of the right corner's. If no x on the canvas has room, the map is
+    //    left alone.
+    if (lowestUncoveredY(point.x, mapBottom) <= highest) {
+      const left = hudLeft.getBoundingClientRect();
+      const right = hudRight.getBoundingClientRect();
+      const roomy = [left.right + REVEAL_MARGIN + REVEAL_SLACK, right.left - REVEAL_MARGIN - REVEAL_SLACK]
+        .filter((x) => x >= map.left && x <= map.right && lowestUncoveredY(x, mapBottom) > highest)
+        .sort((a, b) => Math.abs(a - point.x) - Math.abs(b - point.x));
+      if (roomy.length === 0) return;
+      renderer.panBy(roomy[0] - point.x, 0);
+      point = renderer.tileToScreen(tile);
+    }
+
+    // 2. Then up or down.
+    const lowest = lowestUncoveredY(point.x, mapBottom);
+    if (lowest <= highest) return; // the camera stopped at the map's edge on the way: nothing more can be done
+    if (point.y > lowest) renderer.panBy(0, lowest - REVEAL_SLACK - point.y);
+    else if (point.y < highest) renderer.panBy(0, highest + REVEAL_SLACK - point.y);
+  }
+
+  // A panel that opens, closes or grows changes the size of a corner, and
+  // on a narrow screen of the canvas itself. This observer is created after
+  // the renderer's own, so it runs after the renderer has taken a new
+  // canvas size in, and can then put the marked tile right.
+  const sizeWatcher = new ResizeObserver(() => revealSoon(false));
   sizeWatcher.observe(canvas);
+  sizeWatcher.observe(hudLeft);
+  sizeWatcher.observe(hudRight);
+
+  // Keeps `wasOpen` true to what the player did: a tile dragged under a
+  // panel, or off the screen, is no longer "in the open", and a panel that
+  // grows later must not pull it back. A camera report that comes with a
+  // new canvas size is left to the size watcher, which must still know how
+  // things were before. The listener only reads; it never moves the camera.
+  const stopCameraWatch = renderer.onCameraChange(() => {
+    if (canvasSizeNow() === lookedAtSize) look();
+  });
 
   const titleBefore = document.title;
 
@@ -210,20 +314,29 @@ export function mountGameScreen(parent: HTMLElement, store: Store, connection: C
         centered = true;
       }
     }
-    const overlay = overlayFor(state);
+    // The state is read afresh: a camera listener (input/mapInput.ts) may
+    // have put a new hover tile into the store while the renderer was
+    // given its view just above, and `state` would be a step behind.
+    const overlay = overlayFor(store.get());
     if (!sameOverlay(overlay, shownOverlay)) {
       const selectionMoved = overlay.selectedTile !== null && overlay.selectedTile !== shownOverlay.selectedTile;
       renderer.setOverlay(overlay);
       shownOverlay = overlay;
-      if (selectionMoved) revealSelectionSoon();
+      if (selectionMoved) revealSoon(true);
     }
   }
 
   const unsubscribe = store.subscribe(update);
   update(store.get());
 
+  // 8. The hover box. After the first update, so the renderer has its view
+  // when the box first asks where a tile is.
+  const unmountHoverBox = mountHoverBox(screen, store, { renderer, canvas, obstacles: [hudLeft, hudRight] });
+
   return () => {
     unsubscribe();
+    unmountHoverBox();
+    stopCameraWatch();
     sizeWatcher.disconnect();
     if (revealFrame !== null) cancelAnimationFrame(revealFrame);
     removeDebugHook();

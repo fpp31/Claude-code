@@ -2,12 +2,13 @@ import {
   CIV_IDS,
   GAME_CODE_ALPHABET,
   GAME_CODE_LENGTH,
+  IMPROVEMENT_IDS,
   MAP_SIZE_IDS,
   PROTOCOL_VERSION,
   RULES,
   UNIT_TYPE_IDS,
 } from '@domination/shared';
-import type { ClientMessage } from '@domination/shared';
+import type { BuildItem, ClientMessage } from '@domination/shared';
 import { describe, expect, it } from 'vitest';
 import { cleanPlayerName, parseClientMessage } from '../src/parseMessage';
 import { hashToken, isValidToken, newGameCode, newSeed, newToken, normalizeGameCode } from '../src/tokens';
@@ -34,13 +35,36 @@ const VALID_MESSAGES: ClientMessage[] = [
     type: 'action',
     requestId: 3,
     turn: 3,
-    action: { type: 'setProduction', cityId: 'c1_r6wz2e', item: { kind: 'unit', unitType: 'settler' } },
+    action: {
+      type: 'setBuildQueue',
+      cityId: 'c1_r6wz2e',
+      queue: [{ kind: 'unit', unitType: 'settler' }, { kind: 'unit', unitType: 'worker' }],
+    },
   },
+  // An empty list is a message too: it stops the city.
+  { type: 'action', requestId: 5, turn: 3, action: { type: 'setBuildQueue', cityId: 'c1_r6wz2e', queue: [] } },
+  // One entry more than the rules allow is still a message: the rules answer it ('queueFull'), with its request id.
+  {
+    type: 'action',
+    requestId: 6,
+    turn: 3,
+    action: { type: 'setBuildQueue', cityId: 'c1_r6wz2e', queue: queueOf(RULES.maxQueueLength + 1) },
+  },
+  { type: 'action', requestId: 7, turn: 4, action: { type: 'startJob', unitId: 'u1_m4wq7e', improvement: 'farm' } },
+  { type: 'action', requestId: 8, turn: 4, action: { type: 'stopJob', unitId: 'u1_m4wq7e' } },
   { type: 'action', requestId: 4, turn: 9, action: { type: 'endTurn' } },
   { type: 'action', requestId: 0, turn: 0, action: { type: 'cancelEndTurn' } },
   { type: 'resync' },
   { type: 'ping' },
 ];
+
+/** The longest build queue the message check lets through (MAX_QUEUE_INPUT_LENGTH in parseMessage.ts). */
+const LONGEST_QUEUE_IN_A_MESSAGE = 64;
+
+/** A build queue of `length` Warriors. (A function declaration, so the list above can use it.) */
+function queueOf(length: number): BuildItem[] {
+  return Array.from({ length }, (): BuildItem => ({ kind: 'unit', unitType: 'warrior' }));
+}
 
 /** The message as JSON text with one field changed (or, with `undefined`, removed). */
 function withField(message: object, path: string[], value: unknown): string {
@@ -59,7 +83,26 @@ const MOVE: ClientMessage = {
   turn: 1,
   action: { type: 'moveUnit', unitId: 'u1_k7m2qd', path: [5] },
 };
-const PRODUCE: ClientMessage = {
+const QUEUE: ClientMessage = {
+  type: 'action',
+  requestId: 1,
+  turn: 1,
+  action: { type: 'setBuildQueue', cityId: 'c1_r6wz2e', queue: [{ kind: 'unit', unitType: 'warrior' }] },
+};
+const START_JOB: ClientMessage = {
+  type: 'action',
+  requestId: 1,
+  turn: 1,
+  action: { type: 'startJob', unitId: 'u1_m4wq7e', improvement: 'mine' },
+};
+const STOP_JOB: ClientMessage = {
+  type: 'action',
+  requestId: 1,
+  turn: 1,
+  action: { type: 'stopJob', unitId: 'u1_m4wq7e' },
+};
+/** What a phase 1 page would still send. The action no longer exists. */
+const SET_PRODUCTION = {
   type: 'action',
   requestId: 1,
   turn: 1,
@@ -151,17 +194,49 @@ describe('tokens, codes and parsing (WP3)', () => {
     expect([...types].sort()).toEqual(
       ['action', 'chooseCiv', 'createGame', 'hello', 'joinGame', 'leaveGame', 'ping', 'resync', 'setMapSize', 'startGame'],
     );
+    // And every action type of the game (the compiler checks the reverse here too).
+    const actionTypes = new Set(VALID_MESSAGES.flatMap((message) => (message.type === 'action' ? [message.action.type] : [])));
+    expect([...actionTypes].sort()).toEqual(
+      ['cancelEndTurn', 'endTurn', 'foundCity', 'moveUnit', 'setBuildQueue', 'startJob', 'stopJob'],
+    );
     // Every id of the tables is accepted, and the longest allowed path.
     for (const civ of CIV_IDS) expect(parseClientMessage(JSON.stringify({ type: 'chooseCiv', civ }))).not.toBeNull();
     for (const mapSize of MAP_SIZE_IDS) {
       expect(parseClientMessage(JSON.stringify({ type: 'setMapSize', mapSize }))).not.toBeNull();
     }
     for (const unitType of UNIT_TYPE_IDS) {
-      expect(parseClientMessage(withField(PRODUCE, ['action', 'item', 'unitType'], unitType))).not.toBeNull();
+      const text = withField(QUEUE, ['action', 'queue'], [{ kind: 'unit', unitType }]);
+      expect(parseClientMessage(text), unitType).toEqual(JSON.parse(text));
+    }
+    for (const improvement of IMPROVEMENT_IDS) {
+      const text = withField(START_JOB, ['action', 'improvement'], improvement);
+      expect(parseClientMessage(text), improvement).toEqual(JSON.parse(text));
     }
     const longestPath = Array.from({ length: RULES.maxPathLength }, (_, i) => i);
     expect(parseClientMessage(withField(MOVE, ['action', 'path'], longestPath))).not.toBeNull();
     expect(parseClientMessage(withField(MOVE, ['action', 'path'], []))).not.toBeNull();
+  });
+
+  it('a build queue that is too long for the rules is still a message, up to 64 entries: whether it is too long is the rules\' answer', () => {
+    // The limit of the message check lies well above the limit of the rules,
+    // so that "too long" is answered by the rules, with a request id.
+    expect(RULES.maxQueueLength).toBeLessThan(LONGEST_QUEUE_IN_A_MESSAGE);
+    for (const length of [0, 1, RULES.maxQueueLength, RULES.maxQueueLength + 1, LONGEST_QUEUE_IN_A_MESSAGE]) {
+      const text = withField(QUEUE, ['action', 'queue'], queueOf(length));
+      const parsed = parseClientMessage(text);
+      expect(parsed, `${length} entries`).toEqual(JSON.parse(text));
+      if (parsed?.type !== 'action' || parsed.action.type !== 'setBuildQueue') throw new Error('not a setBuildQueue');
+      // Every entry arrives, in its place: nothing is cut off to make the list fit.
+      expect(parsed.action.queue).toHaveLength(length);
+    }
+    // Duplicates and any order are fine: the list is carried as it was sent.
+    const mixed: BuildItem[] = (['worker', 'warrior', 'worker', 'settler', 'scout', 'warrior'] as const).map(
+      (unitType): BuildItem => ({ kind: 'unit', unitType }),
+    );
+    const parsedMixed = parseClientMessage(withField(QUEUE, ['action', 'queue'], mixed));
+    expect(parsedMixed).toMatchObject({ action: { queue: mixed } });
+    // One more than that is not a message at all.
+    expect(parseClientMessage(withField(QUEUE, ['action', 'queue'], queueOf(LONGEST_QUEUE_IN_A_MESSAGE + 1)))).toBeNull();
   });
 
   it('parseClientMessage returns null for bad JSON, unknown types, missing fields, wrong field types, negative or fractional numbers, over-long strings and over-long paths', () => {
@@ -248,14 +323,50 @@ describe('tokens, codes and parsing (WP3)', () => {
       // action: foundCity
       '{"type":"action","requestId":1,"turn":1,"action":{"type":"foundCity"}}',
       '{"type":"action","requestId":1,"turn":1,"action":{"type":"foundCity","unitId":null}}',
-      // action: setProduction
-      withField(PRODUCE, ['action', 'cityId'], undefined),
-      withField(PRODUCE, ['action', 'cityId'], 'c'.repeat(33)),
-      withField(PRODUCE, ['action', 'item'], undefined),
-      withField(PRODUCE, ['action', 'item'], 'warrior'),
-      withField(PRODUCE, ['action', 'item', 'kind'], 'building'),
-      withField(PRODUCE, ['action', 'item', 'unitType'], 'dragon'),
-      withField(PRODUCE, ['action', 'item', 'unitType'], undefined),
+      // action: setBuildQueue
+      withField(QUEUE, ['action', 'cityId'], undefined),
+      withField(QUEUE, ['action', 'cityId'], 7),
+      withField(QUEUE, ['action', 'cityId'], null),
+      withField(QUEUE, ['action', 'cityId'], 'c'.repeat(33)),
+      withField(QUEUE, ['action', 'queue'], undefined),
+      withField(QUEUE, ['action', 'queue'], null),
+      withField(QUEUE, ['action', 'queue'], 'warrior'),
+      withField(QUEUE, ['action', 'queue'], { kind: 'unit', unitType: 'warrior' }),
+      withField(QUEUE, ['action', 'queue'], { 0: { kind: 'unit', unitType: 'warrior' }, length: 1 }),
+      withField(QUEUE, ['action', 'queue'], 3),
+      withField(QUEUE, ['action', 'queue'], queueOf(LONGEST_QUEUE_IN_A_MESSAGE + 1)),
+      withField(QUEUE, ['action', 'queue'], [null]),
+      withField(QUEUE, ['action', 'queue'], ['warrior']),
+      withField(QUEUE, ['action', 'queue'], [[{ kind: 'unit', unitType: 'warrior' }]]),
+      withField(QUEUE, ['action', 'queue'], [{ kind: 'unit' }]),
+      withField(QUEUE, ['action', 'queue'], [{ unitType: 'warrior' }]),
+      withField(QUEUE, ['action', 'queue'], [{ kind: 'building', unitType: 'warrior' }]),
+      withField(QUEUE, ['action', 'queue'], [{ kind: 'unit', unitType: 'dragon' }]),
+      withField(QUEUE, ['action', 'queue'], [{ kind: 'unit', unitType: 'Warrior' }]),
+      withField(QUEUE, ['action', 'queue'], [{ kind: 'unit', unitType: ['warrior'] }]),
+      withField(QUEUE, ['action', 'queue'], [{ kind: 'unit', unitType: 'toString' }]),
+      // One bad entry spoils the list, wherever it stands.
+      withField(QUEUE, ['action', 'queue'], [...queueOf(3), null]),
+      withField(QUEUE, ['action', 'queue'], [...queueOf(3), { kind: 'unit', unitType: 'dragon' }, ...queueOf(2)]),
+      // action: startJob
+      withField(START_JOB, ['action', 'unitId'], undefined),
+      withField(START_JOB, ['action', 'unitId'], 7),
+      withField(START_JOB, ['action', 'unitId'], 'u'.repeat(33)),
+      withField(START_JOB, ['action', 'improvement'], undefined),
+      withField(START_JOB, ['action', 'improvement'], 'road'),
+      withField(START_JOB, ['action', 'improvement'], 'Farm'),
+      withField(START_JOB, ['action', 'improvement'], 'toString'),
+      withField(START_JOB, ['action', 'improvement'], 0),
+      withField(START_JOB, ['action', 'improvement'], null),
+      withField(START_JOB, ['action', 'improvement'], ['farm']),
+      withField(START_JOB, ['action', 'improvement'], { improvement: 'farm' }),
+      // action: stopJob
+      withField(STOP_JOB, ['action', 'unitId'], undefined),
+      withField(STOP_JOB, ['action', 'unitId'], null),
+      withField(STOP_JOB, ['action', 'unitId'], 'u'.repeat(33)),
+      // action: setProduction, which phase 1 had. It no longer exists.
+      JSON.stringify(SET_PRODUCTION),
+      withField(SET_PRODUCTION, ['action', 'queue'], [{ kind: 'unit', unitType: 'warrior' }]),
     ];
     for (const text of bad) {
       expect(parseClientMessage(text), text.slice(0, 120)).toBeNull();
@@ -269,6 +380,11 @@ describe('tokens, codes and parsing (WP3)', () => {
       `{"type":"joinGame","code":"K7QXM","name":"${'x'.repeat(100_000)}"}`,
       `[${'['.repeat(5000)}${']'.repeat(5000)}]`,
       '{"__proto__":{"type":"ping"}}',
+      '{"type":"action","requestId":1,"turn":1,"action":{"type":"setBuildQueue","cityId":"c1_a","queue":[{"kind":"unit","unitType":{"toString":null}}]}}',
+      '{"type":"action","requestId":1,"turn":1,"action":{"type":"setBuildQueue","cityId":"c1_a","queue":[{"__proto__":{"kind":"unit","unitType":"warrior"}}]}}',
+      '{"type":"action","requestId":1,"turn":1,"action":{"type":"setBuildQueue","cityId":"c1_a","queue":{"length":1e999}}}',
+      '{"type":"action","requestId":1,"turn":1,"action":{"type":"startJob","unitId":"u1_a","improvement":{"valueOf":null}}}',
+      `{"type":"action","requestId":1,"turn":1,"action":{"type":"setBuildQueue","cityId":"c1_a","queue":[${'{"kind":"unit","unitType":"warrior"},'.repeat(20_000)}null]}}`,
     ];
     for (const text of nasty) {
       expect(() => parseClientMessage(text)).not.toThrow();
@@ -290,13 +406,25 @@ describe('tokens, codes and parsing (WP3)', () => {
         { type: 'action', requestId: 1, turn: 2, action: { type: 'moveUnit', unitId: 'u1_a', path: [3] } },
       ],
       [
-        '{"type":"action","requestId":1,"turn":2,"action":{"type":"setProduction","cityId":"c1_a","item":{"kind":"unit","unitType":"scout","cost":0},"free":true}}',
+        '{"type":"action","requestId":1,"turn":2,"action":{"type":"setBuildQueue","cityId":"c1_a","queue":[{"kind":"unit","unitType":"scout","cost":0,"turns":1},{"kind":"unit","unitType":"worker","free":true}],"free":true,"item":{"kind":"unit","unitType":"settler"},"productionStored":999}}',
         {
           type: 'action',
           requestId: 1,
           turn: 2,
-          action: { type: 'setProduction', cityId: 'c1_a', item: { kind: 'unit', unitType: 'scout' } },
+          action: {
+            type: 'setBuildQueue',
+            cityId: 'c1_a',
+            queue: [{ kind: 'unit', unitType: 'scout' }, { kind: 'unit', unitType: 'worker' }],
+          },
         },
+      ],
+      [
+        '{"type":"action","requestId":1,"turn":2,"action":{"type":"startJob","unitId":"u1_a","improvement":"farm","tile":77,"turnsWorked":3,"owner":"p2"}}',
+        { type: 'action', requestId: 1, turn: 2, action: { type: 'startJob', unitId: 'u1_a', improvement: 'farm' } },
+      ],
+      [
+        '{"type":"action","requestId":1,"turn":2,"action":{"type":"stopJob","unitId":"u1_a","improvement":"mine","keepProgress":true}}',
+        { type: 'action', requestId: 1, turn: 2, action: { type: 'stopJob', unitId: 'u1_a' } },
       ],
       ['{"type":"action","requestId":1,"turn":2,"action":{"type":"endTurn","playerId":"p2"}}', {
         type: 'action',

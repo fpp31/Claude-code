@@ -10,7 +10,13 @@
  * Phase 1 rule: when a tile has a feature, the feature's numbers REPLACE the
  * ground's numbers (they are not added). A forest behaves the same on
  * grassland and on plains.
+ *
+ * An IMPROVEMENT (a farm, a mine: data/improvements.ts) is the one thing
+ * whose numbers are added instead of replacing.
  */
+
+import { IMPROVEMENTS } from './improvements';
+import type { ImprovementId } from './improvements';
 
 /** What a worked tile gives a city each turn. Later phases add more keys (gold, science...). */
 export interface Yields {
@@ -84,6 +90,13 @@ export const FEATURES: Record<FeatureId, FeatureDef> = {
 export interface Ground {
   terrain: TerrainId;
   feature: FeatureId | null;
+  /**
+   * What has been built on the tile. A `Tile` and a `TileView` always carry
+   * it. A caller that only knows the land (the map generator, the movement
+   * Board, a table test) leaves it out, and that means "nothing built".
+   * Only tileYields looks at it.
+   */
+  improvement?: ImprovementId | null;
 }
 
 /** True for ocean and coast. */
@@ -100,10 +113,20 @@ export function tileMoveCost(ground: Ground): number | null {
   return TERRAIN[ground.terrain].moveCost;
 }
 
-/** What a citizen working this tile produces (before any city-centre minimum). */
+/**
+ * What a citizen working this tile produces (before any city-centre
+ * minimum): the feature's yields if the tile has a feature, otherwise the
+ * ground's, PLUS the yields of the tile's improvement, if it has one.
+ * Hands out a fresh object.
+ */
 export function tileYields(ground: Ground): Yields {
   const source = ground.feature !== null ? FEATURES[ground.feature].yields : TERRAIN[ground.terrain].yields;
-  return { food: source.food, production: source.production };
+  const built = ground.improvement ?? null;
+  const bonus = built === null ? null : IMPROVEMENTS[built].yields;
+  return {
+    food: source.food + (bonus === null ? 0 : bonus.food),
+    production: source.production + (bonus === null ? 0 : bonus.production),
+  };
 }
 
 /** Can a citizen work this tile? (Everything except mountains in phase 1; water is workable.) */

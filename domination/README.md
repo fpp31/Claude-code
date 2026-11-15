@@ -6,7 +6,7 @@ An original, multiplayer-first, turn-based strategy game on a hex map: explore, 
 
 *Turn 23 of a three-player game, as the Maya player sees it: her cities Copan and Tikal, Rome and Egypt next door, and darker land she has explored but cannot see right now.*
 
-**Where the project stands:** phase 1 is finished and playable. You can create a private game, invite friends with a link, pick one of six civilizations, and play on a freshly generated map: move Warriors, Scouts and Settlers, found cities, choose what each city builds, and watch cities grow. Everybody sees only what their own units and cities can see (fog of war). Games are saved after every move and survive a closed browser or a restarted server. There is no fighting, research or winning yet: those come in later phases (see "Good to know" at the end).
+**Where the project stands:** phase 1 is finished and playable, and a second round has added what the first evenings of play asked for: words about every tile, a build queue for cities, and Workers. You can create a private game, invite friends with a link, pick one of six civilizations, and play on a freshly generated map: move Warriors, Scouts, Settlers and Workers, found cities, give each city a queue of things to build, improve your land with farms and mines, and watch cities grow. Rest the mouse on a tile, or tap it, to read what is there. Everybody sees only what their own units and cities can see (fog of war). Games are saved after every move and survive a closed browser or a restarted server. There is no fighting, research or winning yet: those come in later phases (see "Good to know" at the end).
 
 ## What you need
 
@@ -38,9 +38,36 @@ Then open <http://localhost:8787> to try it yourself. One program serves both th
 - Run `npm run build` again whenever the code has changed. `npm start` serves what the last build made.
 - On a hosting service, install with the plain `npm install` (not `--omit=dev` or "production only"): `npm run build` needs the development tools.
 - To play over the internet, put the server behind something that adds HTTPS (for example the Caddy web server). Without it, the secret that identifies each player travels unprotected.
-- **Keeping it running on a server.** `npm start` is meant for a terminal that stays open and is stopped with `Ctrl+C`. To leave the server running in the background, start it without npm, from this folder: `node --import tsx packages/server/src/main.ts`. That is one program, and stopping it (`kill` and its process number) stops the server cleanly. Started as `npm start` in the background, stopping npm leaves the real server running. A service manager that stops the whole group of processes is fine too. After stopping, the address should no longer answer; if the next start says the port is in use (`EADDRINUSE`), an old server is still running.
+- **Keeping it running on a server.** `npm start` is meant for a terminal that stays open and is stopped with `Ctrl+C`. To keep the server running after the terminal is closed (on Linux or macOS), start the program that `npm start` runs, without npm, from this folder, and let it write into a file what it would have printed:
 
-**How to play, in short.** Tap one of your units to select it; the tiles it can reach light up; tap one to go there. When two of your units share a tile (as at the start), tap the tile again for the other one; the same goes for a city with a unit standing in it (the unit's panel says so). Select your Settler and press "Found City". Tap a city to choose what it builds. A new game shows a short "First steps" note until you have founded your first city. While a unit is selected, a tap on a highlighted tile always sends it there, also when one of your cities or other units is on that tile: close the unit's panel first (the × button, or `Esc`) if you meant to select that instead. Drag the map to scroll; zoom with the mouse wheel, the + and - buttons, or two fingers on a touch screen. When you are done, press "End Turn"; the next turn starts when every player has. The button says how many units can still move, and "Show me" takes you to the next one. Keys: `Enter` end turn, `N` next unit, `F` found city, `Esc` close a panel, arrow keys or `W` `A` `S` `D` scroll, `+` and `-` zoom.
+  ```
+  nohup node --import tsx packages/server/src/main.ts > server.log 2>&1 &
+  echo $!
+  ```
+
+  The second line prints the server's process number, for example `28286`; write it down. `tail server.log` shows the last lines the server has printed, among them its address and how many saved games it loaded. If the number is lost, `pgrep -f packages/server/src/main.ts` prints it again. To stop the server, type `kill` and that number (`kill 28286`). That stops it cleanly: the log ends with "Stopping the server..." and the address no longer answers. Settings go in front as usual (`PORT=9000 nohup node ...`).
+
+  Do not put `npm start` itself into the background: npm runs the server as a program of its own, and stopping npm by its number leaves the real server running. A service manager that stops the whole group of processes is fine too. If the next start says the port is in use (`EADDRINUSE`), an old server is still running.
+
+**How to play, in short.** Tap one of your units to select it; the tiles it can reach light up; tap one to go there. When two of your units share a tile (as at the start), tap the tile again for the other one; the same goes for a city with a unit standing in it (the unit's panel says so). Select your Settler and press "Found City". A new game shows a short "First steps" note until you have founded your first city. While a unit is selected, a tap on a highlighted tile always sends it there, also when one of your cities or other units is on that tile: close the unit's panel first (the × button, or `Esc`) if you meant to select that instead. Drag the map to scroll; zoom with the mouse wheel, the + and - buttons, or two fingers on a touch screen. When you are done, press "End Turn"; the next turn starts when every player has. The button says what is still to do (a city with nothing to build first, then how many units can still move), and "Show me" takes you there. Nothing ever stops you from ending the turn. Keys: `Enter` end turn, `N` next unit, `F` found city, `Esc` close the box at the mouse first, then the open panel, arrow keys or `W` `A` `S` `D` scroll, `+` and `-` zoom.
+
+**What a city builds.** Tap a city to see its build queue. The buttons under "Add to the queue" put a unit at the end of it; the arrows of a row move that item up or down; the × of a row removes it. The first row is what the city is building now, so removing it stops that build, and what the city has saved goes to the next item. A finished item leaves the queue. Every row says in how many turns it will be done: the game plays the city forward for that, growth included. A city with an empty queue builds nothing and its production is lost every turn: such a city carries a small gold sign on the map (at the upper left of its hall), and the End Turn button names it. A Settler needs a city of two citizens and takes one along; while a Settler is paid for and the city is too small, the panel says "Waiting", and the down arrow lets the next item through.
+
+![The city panel on a computer: the queue of Rome with three items, and a second city with the gold sign of a city that builds nothing](docs/screenshots/city-queue.png)
+
+*Turn 23 of a two-player game, as the Roman player sees it. Rome is building a Warrior; a Worker and a Scout wait behind it, and every row says when it will be done. Ostia, the new city at the top, has nothing to build yet: the gold sign at the upper left of its hall says so, and so does the End Turn button. The gold tokens on the map mark the tiles Rome's citizens work.*
+
+<img src="docs/screenshots/city-queue-phone.png" alt="The city panel on a phone held upright: the panel sits below the map" width="390">
+
+*The same city on a phone held upright. The panel sits below the map and scrolls inside itself; its head, with the name, the queue count and the close button, stays in place.*
+
+**Workers, farms and mines.** A Worker builds farms (more food; on open grassland, plains or desert) and mines (more production; on hills), on your own land only. Select it, walk it to a tile, and press "Build Farm" or "Build Mine" in its panel; where a button is greyed out, a line says why. The work takes a few turns and the Worker stays on its tile meanwhile; "Stop work" lets it move again, and the work done so far is lost. Your citizens choose the tiles they work by themselves, the best ones first, but they put growing first: a new mine in a young city can stand unused for a while and comes into use as the city grows or gets farms. The box of a tile says whether a citizen works it.
+
+![A Worker at work next to a finished farm and a mine, with the box that says what is on the farm's tile](docs/screenshots/worker-farm-mine.png)
+
+*The same turn, one zoom step closer. The Worker (selected; the white sign beside it means "at work") has one turn left on a second farm. Right of it is the farm it finished earlier, with the box that comes up when the mouse rests on a tile; the mouth of the mine is in the hill next to Rome.*
+
+**Reading the map.** Rest the mouse on a tile for a moment: a box beside the tile says what is there (the ground, a city, units, a farm or a mine, what the tile yields, what it costs to enter and whose land it is; for your own city what it builds, and on your own land whether a citizen works the tile and what a Worker could build there). Tap or click a tile that holds nothing of yours, and the same words appear on a card at the bottom left (on a phone held upright: below the map); on a phone, where nothing hovers, that is the way to read a tile. Another player's unit or city is read the same way.
 
 ## Run it while developing
 
@@ -69,9 +96,9 @@ Pages that only exist in this mode, for looking at one thing at a time:
 
 | Command | What it does |
 |---|---|
-| `npm test` | Runs all unit tests (about 870; it takes well under a minute). None is skipped. |
+| `npm test` | Runs all unit tests (about 1,160; it takes well under a minute). None is skipped. |
 | `npm run typecheck` | Checks the whole code base for type mistakes without running it. |
-| `npm run e2e` | Runs the end-to-end test: two real browsers create a game, join, play a first turn, reload, and come back after the server was restarted. It then checks three things about the screen that once went wrong (what a stranger sees who opens the link of a running game, the city panel in a low window as on a phone held sideways, and the top bar with very long player names) and five small ones: a damaged link, the lobby's warning about a `localhost` link, a double-click on Start or Leave, the Enter key after a click on a zoom button, and the "Turn 3 has begun." message. It uses its own server and its own throw-away folder for saved games. Needs `npm run build` first, and [Playwright](https://playwright.dev), which `npm install` does not fetch: install it separately and set the `PLAYWRIGHT_PATH` environment variable to its folder. |
+| `npm run e2e` | Runs the end-to-end test (about 40 seconds): two real browsers create a game, join, play a first turn, reload, and come back after the server was restarted. It then checks three things about the screen that once went wrong (what a stranger sees who opens the link of a running game, the city panel in a low window as on a phone held sideways, and the top bar with very long player names) and five small ones: a damaged link, the lobby's warning about a `localhost` link, a double-click on Start or Leave, the Enter key after a click on a zoom button, and the "Turn 3 has begun." message. Then the two play on for the second round: the box at the mouse and the card for a tapped tile (also with a finger, in a phone-sized window), a build queue that is edited and runs empty, and a Worker that is built, walks to a tile and finishes a farm, which is still there after a reload. All the way it checks that the other player is shown none of it. It uses its own server and its own throw-away folder for saved games. Needs `npm run build` first, and [Playwright](https://playwright.dev), which `npm install` does not fetch: install it separately and set the `PLAYWRIGHT_PATH` environment variable to its folder. |
 
 ## Saved games
 
@@ -81,20 +108,36 @@ The server saves every game to disk after every accepted action, so closing the 
 - **Back up** by copying the `data/` folder. **Restore** by copying it back while the server is stopped.
 - **Never run two servers on the same folder of saved games** (for example `npm start` twice with different ports). Each keeps its games in memory and writes whole files, so each would silently write over what the other saved. Nothing checks this for you. (`npm run dev` has its own folder, `data-dev/`, for this reason.)
 - If the disk is full, a move cannot be saved: the player is told "The server had a problem. Please try again.", the server prints "saving failed", and the last complete save stays as it is. Make room and play on.
-- A save that cannot be read is moved aside (`.corrupt`), never deleted, and the server still starts.
+- A save that cannot be read is moved aside (`.corrupt`), never deleted, and the server still starts. "Getting a game back after a slip" below says how to repair it.
 - A save made by a newer version of the game than the one running is left untouched and not loaded; the server says so when it starts. Run the matching version of the code and the game is back.
+- A game saved by an older version of the game is converted when the server starts, and the server says so ("K7QXM.json was made by an older version of the game (layout 1) and has been brought up to layout 2."). Its file is rewritten the next time something happens in that game. In a game that phase 1 saved, every city goes on with the item it was building, once; then its queue is empty and it asks for a new one. A game that does not convert cleanly is not loaded and its file is not touched; the server says which ("K7QXM.json was left alone and NOT loaded."). **Before you update the game, stop the server and copy the `data/` folder**: that copy is your way back, because the server keeps no copy of its own.
 - A game that was created but never started (its creator closed the page without pressing Leave) stays in the folder as a small file. Deleting such a file while the server is stopped is safe.
 
 **A player lost their seat** (new phone, cleared browser data, another browser): the game cannot tell them apart from a stranger, and a running game waits for that seat every turn. The person who runs the server can free the seat:
 
 1. Stop the server.
-2. Open the game's file, for example `data/rooms/K7QXM.json`, in a text editor. Near the top, under `"seats"`, every player has one line. Find the player's line (by `"name"`) and change its `"tokenHash": "..."` to `"tokenHash": null`. Change nothing else: a seat's line cannot be deleted, and its `"playerId"` must stay as it is (the server would set such a file aside at the next start and say why).
+2. Open the game's file, for example `data/rooms/K7QXM.json`, in a text editor. Near the top, under `"seats"`, every player has one line. Find the player's line (by `"name"`) and change its `"tokenHash": "..."` to `"tokenHash": null`. Change nothing else: a seat's line cannot be deleted, and its `"playerId"` must stay as it is (the server would set such a file aside at the next start and say why; "Getting a game back after a slip" below is the way out).
 3. Start the server. The player opens the game's link, types a name and presses Join: they are back on their old seat, with its old name.
 
 Two things to know about a freed seat:
 
 - **It goes to the first browser without a seat in this game that opens the link and presses Join.** That need not be a stranger: it can be another player of the same game on a second device or in another browser, who would then see and play that side. So free the seat when the returning player is ready to press Join at once (stay on a call with them), and ask them to confirm that they are in. The server prints a line when the seat is taken. If the wrong person got it, do the three steps again.
 - **Free one seat at a time.** If two players lost their seats, do the steps for one, wait until that player is back, then for the other. Two free seats are handed out in the order people join, whatever names they type, so two players could end up on each other's side.
+
+**Getting a game back after a slip.** If a mistake crept in while a saved game was edited by hand (a comma or a quotation mark lost, a `"playerId"` changed), the server cannot use the file at its next start. It does not delete it: it gives the file a new name that ends in `.corrupt`, starts without that game, and says why, for example:
+
+```
+Saved games: K7QXM.json is damaged (it cannot be read (Expected ',' or '}' after property value in JSON at position 311 (line 9 column 43))). It was moved aside as .../data/rooms/K7QXM.json.corrupt and not loaded.
+```
+
+Nothing is lost, and the game comes back like this:
+
+1. Stop the server.
+2. Open `data/rooms/K7QXM.json.corrupt` in a text editor and correct the slip. The server's sentence says what is wrong, and for a lost comma or quotation mark in which line.
+3. Give the file its old name back: rename `K7QXM.json.corrupt` to `K7QXM.json`.
+4. Start the server. It now counts the game among the "Saved games loaded", and the players are back in it where they left off.
+
+If the server sets the file aside again, its new sentence names the next slip; do the four steps once more. (A file that is set aside while an older `.corrupt` file of the same game is still lying there gets the ending `.corrupt.2`; the newest one is the one to repair.)
 
 ## Settings
 
@@ -123,13 +166,14 @@ domination/
   e2e/                 the end-to-end test
   packages/
     shared/            THE RULES OF THE GAME. Used by both server and client.
-      src/data/          every number of the game: terrain, units, civilizations, balance
+      src/data/          every number of the game: terrain, units, improvements, civilizations, balance
       src/hex.ts         hex-grid maths
       src/rng.ts         seeded random numbers
       src/mapgen/        map generation (tuning.ts: the numbers that shape the maps)
-      src/rules/         moving, cities, turns
+      src/rules/         moving, cities and their build queues, Workers' jobs, turns
       src/view/          fog of war: what each player is allowed to see
       src/protocol.ts    the messages between browser and server
+      src/stateMigrations.ts   brings a game saved by an older version up to date
       test/              the tests of all of the above
     server/            the game server (keeps the truth, saves games)
     client/            the web page (map drawing, panels, input)
@@ -139,11 +183,11 @@ domination/
   data-dev/            saved games of "npm run dev" (created by it; not in git)
 ```
 
-**Changing the game's numbers:** movement costs, yields, unit costs, city rules, map sizes, colours and city names are plain tables in `packages/shared/src/data/`. Edit a number, run `npm test`, run `npm run build`, restart the server, and ask players to reload the page: the page works out the highlighted tiles with its own copy of the numbers, and a page built before the change would highlight by the old ones. (With `npm run dev` neither the build nor the restart is needed.) Running games use the new numbers too. Some tests guard how the numbers hang together, and their messages say what does not fit. Many more are simply written for today's numbers (a Warrior that walks two tiles of grassland, say): after a deliberate change such a test fails although nothing is wrong, and its expectation is what has to change.
+**Changing the game's numbers:** movement costs, yields, unit costs, city rules, map sizes, colours and city names are plain tables in `packages/shared/src/data/`. So are what a farm and a mine give and how long they take (`improvements.ts`), how long a build queue may be (`rules.ts`; never make it shorter while games are running), how far ahead a city's forecast looks, and the one-line descriptions of units and improvements (at most 45 characters, so that each stays one line in a panel). Edit a number, run `npm test`, run `npm run build`, restart the server, and ask players to reload the page: the page works out the highlighted tiles with its own copy of the numbers, and a page built before the change would highlight by the old ones. (With `npm run dev` neither the build nor the restart is needed.) Running games use the new numbers too. Some tests guard how the numbers hang together, and their messages say what does not fit. Many more are simply written for today's numbers (a Warrior that walks two tiles of grassland, say): after a deliberate change such a test fails although nothing is wrong, and its expectation is what has to change.
 
 **Changing what maps look like:** the share of land, the size of mountain ranges, forests and deserts, and how start positions are chosen are numbers in `packages/shared/src/mapgen/tuning.ts`. They only affect games started afterwards: a running game keeps its map.
 
-## Good to know (phase 1 limits)
+## Good to know (the limits for now)
 
 - **No fighting yet.** Units of different players cannot attack or pass through each other; they simply block the way. Combat, research, buildings and a way to win come in later phases.
 - **Up to 6 players** for now: civilizations are unique per game and there are six. The game is laid out for 8.
@@ -153,8 +197,10 @@ domination/
 - **Only the host can start.** If the host presses Leave, the next player who is connected becomes host. If the host only closes the page, they stay host, and the lobby waits for them to come back.
 - **Opening an invite link does not join.** It shows the game's code with a Join button; only pressing Join takes a seat. Coming back to a game you are already in needs no button. If the game has already started, is full or does not exist, the page says so under the code and offers to start a new game instead. A link that was damaged on its way (cut short, or with a full stop stuck to its end) is called damaged; the code can then be typed by hand.
 - **A running game has no Leave button.** To get back to the first screen, open the page without the `?g=...` part of the address. Your seat in the game is kept.
-- **Your seat lives in your browser.** There are no accounts: the browser remembers a secret that identifies you. Clearing the browser's site data, or switching to another browser or device, loses the seat (see "A player lost their seat" above for the rescue). One known gap: on a browser's very first visit, two tabs opened in the same instant can each be given a secret of their own, and only one of them is remembered. Open the game in one tab first.
+- **Your seat lives in your browser.** There are no accounts: the browser remembers a secret that identifies you. Clearing the browser's site data, or switching to another browser or device, loses the seat (see "A player lost their seat" above for the rescue). One known gap, still open: on a browser's very first visit, a second tab that is opened before the first tab has heard back from the server can be given a secret of its own. The two tabs are then two different players, the browser remembers only one of the two secrets, and the other tab loses its seat when it is reloaded. A slow connection makes this more likely, not less, because the server's first answer takes longer to arrive. So on a first visit open the game in one tab, and wait until the line "Connecting to the server..." has gone before you open another.
 - **Meant for friends, not for strangers.** Anybody who can open the page can create games, and there is no limit on how many. Share the address only with people you trust, or keep the server on your home network.
-- **Tried in one browser only.** The end-to-end test plays in Chromium (the engine of Chrome and Edge) in a laptop-sized window, and the game was played by hand in a phone-sized touch window of the same browser, upright and on its side. Firefox, Safari and real phones have not been tried yet. The mouse, the wheel and the fingers were simulated by the test programs: a real mouse wheel and a laptop trackpad have not been tried either. If the wheel zooms too much or too little on your computer, the + and - buttons and keys always move exactly one step.
-- **Small windows.** The game is laid out for a laptop screen and for a phone held upright. A phone on its side works too, but it is cramped: the panels float over the map and scroll inside themselves, and a city you select can end up behind its own panel. Drag the map to bring it out.
+- **Built and tested in one browser only.** The end-to-end test plays in Chromium (the engine of Chrome and Edge) in a laptop-sized window and, for a few steps, in a phone-sized touch window. The things of the second round were also played through by a program that drives the same browser the way a person would: a mouse that travels in small steps and is never quite still, the many small wheel events a trackpad sends, and a finger in a phone-sized window, upright and on its side. What the builders could not try: a real mouse, a real laptop trackpad, a real phone, Firefox and Safari. Three things to look out for when you play. The box at the mouse comes after 0.4 seconds of rest on a tile; if that feels too slow or too quick, the two numbers are at the top of `packages/client/src/input/hoverInfo.ts`. On a trackpad a gentle two-finger scroll zooms one step, but a quick flick ran through four steps in the trial; the + and - buttons and keys always move exactly one step. And the heads of the panels, which stay in place while a panel scrolls, rest on a style rule that was only seen in Chromium: if a head scrolls away in another browser, nothing else breaks.
+- **Small windows.** The game is laid out for a laptop screen and for a phone held upright, where the panels sit below the map. A phone on its side works too, but it is cramped: the panels (a unit's, a city's and the card of a tapped tile) float over the map and scroll inside themselves. There the tile card is at most 150 pixels tall and the unit panel at most 220, and a unit's description is left out, so that a Worker's buttons are in view without scrolling. When a panel would cover the unit, city or tile it is about, the map steps aside by itself, upwards or sideways. On a phone the full words about a tile that holds your own unit or city are not within reach (the unit panel has a one-line summary of its tile); and to read about a highlighted tile while a unit is selected, close the unit's panel first.
+- **After updating from phase 1.** A running game goes on (see "Saved games"). Its cities finish what they were building and then ask for a queue. Citizens now put growing first, so cities grow a little faster and build a little slower wherever they used to stand still.
+- **An idle city loses its production; a waiting city does not.** A city with an empty queue loses what it would have produced that turn. A city whose first item is paid for and cannot be finished yet (a Settler in a city of one citizen) keeps saving. Both are the rule for now; each is one line to change if evenings of play show that queues run out unnoticed.
 - **Moving this folder is fine.** Nothing inside refers to where the folder is; move or rename it, then run `npm install` again if the tools complain.

@@ -26,16 +26,20 @@ import type {
   Action,
   ActionResult,
   AddressedEvent,
+  BuildItem,
   City,
+  CityId,
   CivId,
   GameSetup,
   GameState,
   GridSize,
+  ImprovementId,
   MapGenerator,
   PlayerId,
   RuleErrorCode,
   TileIndex,
   Unit,
+  UnitId,
   UnitTypeId,
 } from '../src/index';
 import { mapFromAscii } from '../src/testing';
@@ -197,6 +201,37 @@ export function endTurnForAll(state: GameState): { state: GameState; events: Add
   return { state: current, events };
 }
 
+/** One unit a city completed while a test played on: its type, and after how many End Turns it appeared. */
+export interface Completion {
+  unitType: UnitTypeId;
+  /** 1 = when the first turn played resolved. */
+  after: number;
+}
+
+/**
+ * Plays on with nobody doing anything but ending the turn, and notes every
+ * unit the city completes, until it has completed `count` units or `limit`
+ * turns have been played. This is how the tests learn "after how many End
+ * Turns does the unit really appear", to hold the forecast against.
+ */
+export function playUntilBuilt(
+  state: GameState,
+  cityId: CityId,
+  count: number,
+  limit = 60,
+): { state: GameState; completions: Completion[] } {
+  const completions: Completion[] = [];
+  let current = state;
+  for (let played = 1; played <= limit && completions.length < count; played++) {
+    const step = endTurnForAll(current);
+    current = step.state;
+    for (const { event } of step.events) {
+      if (event.type === 'unitBuilt' && event.cityId === cityId) completions.push({ unitType: event.unitType, after: played });
+    }
+  }
+  return { state: current, completions };
+}
+
 // ---------------------------------------------------------------------------
 // Looking things up
 // ---------------------------------------------------------------------------
@@ -272,9 +307,36 @@ export function placeUnit(
   let number = 1;
   while (`u${owner.slice(1)}_extra${number}` in draft.units) number += 1;
   const id = `u${owner.slice(1)}_extra${number}`;
-  const unit: Unit = { id, type, owner, tile, movesLeft };
+  const unit: Unit = { id, type, owner, tile, movesLeft, job: null };
   draft.units[id] = unit;
   return unit;
+}
+
+/**
+ * Puts a finished improvement on a tile (or takes it away with null), as if
+ * a Worker had built it. Use inside `arrange`, whose health check then makes
+ * sure the ground suits it.
+ */
+export function improve(draft: GameState, tile: TileIndex, improvement: ImprovementId | null): void {
+  draft.map.tiles[tile].improvement = improvement;
+}
+
+/**
+ * A copy of the state with one more Worker of `owner` on `tile` (full moves,
+ * no job), and that Worker's id. The back door for the job tests, which
+ * would otherwise spend their first turns building the unit.
+ */
+export function workerOn(state: GameState, owner: PlayerId, tile: TileIndex): { state: GameState; workerId: UnitId } {
+  let workerId = '';
+  const ready = arrange(state, (draft) => {
+    workerId = placeUnit(draft, owner, 'worker', tile).id;
+  });
+  return { state: ready, workerId };
+}
+
+/** A build queue of these unit types, in this order, as fresh items (what a client sends in setBuildQueue). */
+export function queueOf(...unitTypes: UnitTypeId[]): BuildItem[] {
+  return unitTypes.map((unitType): BuildItem => ({ kind: 'unit', unitType }));
 }
 
 /**

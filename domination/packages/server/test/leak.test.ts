@@ -1,10 +1,11 @@
 import { cpSync } from 'node:fs';
+import { IMPROVEMENTS, RULES } from '@domination/shared';
 import type { Action, PlayerView, ServerMessage } from '@domination/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import { hashToken } from '../src/tokens';
 import { cleanUp, gameWith, lobbyWith, startTestServer, temporaryFolder } from './harness';
 import type { TestClient, TestServer } from './harness';
-import { MEADOW_WIDTH, at, ownUnit, realRulesOnMeadow } from './realWorld';
+import { MEADOW_WIDTH, at, endTurn, ownCity, ownUnit, queueItems, queueOf, raiseWorker, realRulesOnMeadow, setQueue, turnOf } from './realWorld';
 
 /**
  * NOTHING HIDDEN ON THE WIRE. These tests look at the raw text of every
@@ -14,6 +15,7 @@ import { MEADOW_WIDTH, at, ownUnit, realRulesOnMeadow } from './realWorld';
  * The stage: Ada (p1, Rome) starts at the west end of a long meadow, Ben
  * (p2, Egypt) at the east end, seventeen tiles apart. Units see two or three
  * tiles, a city sees three, so neither ever sees anything of the other.
+ * (The one test that puts a city IN the other player's sight says so.)
  */
 
 afterEach(cleanUp);
@@ -71,7 +73,7 @@ async function playApart(server: TestServer) {
   remember();
   const benCity = ben.view?.cities.find((city) => city.owner === 'p2');
   if (benCity === undefined) throw new Error('Ben has no city');
-  await ben.actOk(1, { type: 'setProduction', cityId: benCity.id, item: { kind: 'unit', unitType: 'scout' } });
+  await ben.actOk(1, { type: 'setBuildQueue', cityId: benCity.id, queue: [{ kind: 'unit', unitType: 'scout' }] });
 
   // Then turn after turn: Ben's Warrior paces east and west, until the Scout is built.
   const warrior = ownUnit(ben.view, 'warrior');
@@ -166,7 +168,7 @@ describe('NO LEAK on the wire (WP3, real rules)', () => {
     }
     const city = ben.view?.cities[0];
     if (city === undefined) throw new Error('Ben has no city');
-    await ben.actOk(1, { type: 'setProduction', cityId: city.id, item: { kind: 'unit', unitType: 'settler' } });
+    await ben.actOk(1, { type: 'setBuildQueue', cityId: city.id, queue: [{ kind: 'unit', unitType: 'settler' }] });
     expect(await ben.actRejected(1, { type: 'moveUnit', unitId: warrior.id, path: [at(17, 5)] })).toBe('noMovesLeft');
     await ada.expectNothingPending();
 
@@ -214,7 +216,7 @@ describe('NO LEAK on the wire (WP3, real rules)', () => {
           await ada.actOk(1, { type: 'foundCity', unitId: ownUnit(ada.view, 'settler').id });
           const capital = ada.view?.cities[0];
           if (capital === undefined) throw new Error('Ada has no city');
-          await ada.actOk(1, { type: 'setProduction', cityId: capital.id, item: { kind: 'unit', unitType: 'warrior' } });
+          await ada.actOk(1, { type: 'setBuildQueue', cityId: capital.id, queue: [{ kind: 'unit', unitType: 'warrior' }] });
         }
 
         await benScript(ben, turn);
@@ -237,7 +239,7 @@ describe('NO LEAK on the wire (WP3, real rules)', () => {
         await ben.actOk(1, { type: 'foundCity', unitId: ownUnit(ben.view, 'settler').id });
         const city = ben.view?.cities[0];
         if (city === undefined) throw new Error('Ben has no city');
-        await ben.actOk(1, { type: 'setProduction', cityId: city.id, item: { kind: 'unit', unitType: 'warrior' } });
+        await ben.actOk(1, { type: 'setBuildQueue', cityId: city.id, queue: [{ kind: 'unit', unitType: 'warrior' }] });
       }
       if (turn <= 2) await ben.actOk(turn, { type: 'moveUnit', unitId: warrior.id, path: [warrior.tile - 1, warrior.tile - 2] });
     });
@@ -254,7 +256,7 @@ describe('NO LEAK on the wire (WP3, real rules)', () => {
         await ben.actOk(2, { type: 'foundCity', unitId: ownUnit(ben.view, 'settler').id });
         const city = ben.view?.cities[0];
         if (city === undefined) throw new Error('Ben has no city');
-        await ben.actOk(2, { type: 'setProduction', cityId: city.id, item: { kind: 'unit', unitType: 'scout' } });
+        await ben.actOk(2, { type: 'setBuildQueue', cityId: city.id, queue: [{ kind: 'unit', unitType: 'scout' }] });
       }
       // Up one row and down again, turn after turn.
       const home = at(20, 5);
@@ -343,6 +345,169 @@ describe('NO LEAK on the wire (WP3, real rules)', () => {
       }
       expect(frames).toBeGreaterThan(50);
       await cleanUp();
+    }
+  });
+});
+
+/**
+ * Orders are private: what a city is told to build and what a Worker is told
+ * to do reach nobody but their owner, in sight or out of it.
+ */
+describe('NO LEAK on the wire: build queues and jobs (WP3, real rules)', () => {
+  /** The frames a socket received from frame `from` on, without the pongs that only answer a test's own pings. */
+  function framesSince(client: TestClient, from: number): string[] {
+    return client.frames.slice(from).filter((frame) => frame !== '{"type":"pong"}');
+  }
+
+  it("a player's Worker starting, doing and finishing a job out of the other player's sight sends that player nothing but the turn changes", async () => {
+    /**
+     * One world. In both, Ada does nothing but end her turns, after Ben. If
+     * `benWorks`, Ben founds his capital, has it build a Worker, and the
+     * Worker builds a farm from start to finish; otherwise Ben, too, only
+     * ends his turns, until the same turn is reached.
+     */
+    async function playWorld(benWorks: boolean, lastTurn: number) {
+      const server = await meadowServer();
+      const { code, clients } = await gameWith(server, ['Ada', 'Ben']);
+      const [ada, ben] = clients;
+      const fromTheStart = ada.frames.length;
+      let farmTile = -1;
+      let workerId = '';
+
+      if (benWorks) {
+        const worker = await raiseWorker(ben, [ben, ada]);
+        workerId = worker.id;
+        // One step east of the city, onto Ben's own meadow; then the job, in the same turn.
+        farmTile = worker.tile + 1;
+        await ben.actOk(turnOf(ben), { type: 'moveUnit', unitId: worker.id, path: [farmTile] });
+        await ben.actOk(turnOf(ben), { type: 'startJob', unitId: worker.id, improvement: 'farm' });
+        await ada.expectNothingPending();
+
+        // The work, turn after turn: Ben is told how far it is; the tile is still bare.
+        const turns = IMPROVEMENTS.farm.turns;
+        for (let worked = 0; worked < turns; worked++) {
+          expect(ownUnit(ben.view, 'worker').own?.job).toEqual({
+            improvement: 'farm',
+            turnsWorked: worked,
+            turnsTotal: turns,
+            turnsLeft: turns - worked,
+          });
+          expect(ben.view?.tiles[farmTile]?.improvement).toBeNull();
+          await endTurn([ben, ada]);
+        }
+        // Finished: the farm stands, the Worker is free again, and Ben (only Ben) got the news.
+        expect(ben.view?.tiles[farmTile]?.improvement).toBe('farm');
+        expect(ownUnit(ben.view, 'worker').own?.job).toBeNull();
+        expect(server.save(code).game?.map.tiles[farmTile].improvement).toBe('farm');
+        expect(ben.frames.filter((frame) => frame.includes('"improvementBuilt"'))).toHaveLength(1);
+      }
+      while (turnOf(ada) < lastTurn) await endTurn([ben, ada]);
+
+      return { ada, ben, turn: turnOf(ada), farmTile, workerId, adaFrames: framesSince(ada, fromTheStart) };
+    }
+
+    const busy = await playWorld(true, 0);
+    // The job really took place over several turns, and Ada's socket was busy all the while.
+    expect(busy.turn).toBeGreaterThan(IMPROVEMENTS.farm.turns + 2);
+    expect(busy.adaFrames.length).toBeGreaterThan(3 * IMPROVEMENTS.farm.turns);
+
+    // Everything Ada was sent after the start: Ben has ended his turn; the
+    // turn has changed; the answers to her own End Turns. No tile, no unit,
+    // no city, and no news but the turn counter.
+    for (const frame of busy.adaFrames) {
+      const message = JSON.parse(frame) as ServerMessage;
+      if (message.type === 'actionOk') continue;
+      if (message.type !== 'gameUpdate') throw new Error(`Ada was sent a ${message.type}: ${frame.slice(0, 200)}`);
+      expect(Object.keys(message.patch).filter((key) => key !== 'players' && key !== 'turn'), frame.slice(0, 200)).toEqual([]);
+      expect(message.events.filter((event) => event.type !== 'turnStarted'), frame.slice(0, 200)).toEqual([]);
+    }
+    // In words, over every frame from her first: nothing names the Worker, the job or the farm.
+    const everythingAdaGot = busy.ada.frames.join('\n');
+    const everythingBenGot = busy.ben.frames.join('\n');
+    for (const secret of [busy.workerId, '"worker"', '"farm"', 'improvementBuilt', '"turnsWorked":0', '"turnsLeft"']) {
+      // The check can fail: Ben was told every one of them.
+      expect(everythingBenGot.includes(secret), `Ben was told ${secret}`).toBe(true);
+      expect(everythingAdaGot.includes(secret), `Ada was told ${secret}`).toBe(false);
+    }
+    // What she knows of the tile is what she knew at the start: nothing.
+    expect(busy.ada.view?.tiles[busy.farmTile]).toBeNull();
+
+    // And she cannot tell this world from one in which Ben never did a
+    // thing: every frame after the start is the same, byte for byte.
+    const idle = await playWorld(false, busy.turn);
+    expect(idle.turn).toBe(busy.turn);
+    expect(idle.ben.view?.cities).toEqual([]);
+    expect(busy.adaFrames).toEqual(idle.adaFrames);
+  });
+
+  it('editing a build queue sends the other player nothing at all', async () => {
+    // Here the city is IN the other player's sight: Ada's Warrior walks up
+    // to Ben's capital and watches it. A queue is an order, and orders are
+    // private wherever the city stands.
+    const server = await startTestServer({ rules: realRulesOnMeadow([[6, 5], [10, 5]]), fixedSeed: SEED, noRateLimit: true });
+    const { code, clients } = await gameWith(server, ['Ada', 'Ben']);
+    const [ada, ben] = clients;
+    await ben.actOk(1, { type: 'foundCity', unitId: ownUnit(ben.view, 'settler').id });
+    await ada.actOk(1, { type: 'moveUnit', unitId: ownUnit(ada.view, 'warrior').id, path: [at(7, 5), at(8, 5)] });
+    await ada.drain();
+    await ben.drain();
+    const thebes = ownCity(ben.view);
+    const seenByAda = { id: thebes.id, owner: 'p2', name: 'Thebes', tile: at(10, 5), population: 1, visible: true, own: null };
+    expect(ada.view?.cities).toStrictEqual([seenByAda]);
+    const adaFrames = ada.frames.length;
+    const adaView = ada.view;
+
+    // Ben adds, moves up, removes, fills the queue to the brim and empties it.
+    const edits = [
+      queueOf('warrior'),
+      queueOf('warrior', 'scout', 'worker'),
+      queueOf('scout', 'warrior', 'worker'),
+      queueOf('scout', 'worker'),
+      queueOf(...Array.from({ length: RULES.maxQueueLength }, () => 'settler' as const)),
+      [],
+      queueOf('worker', 'worker'),
+    ];
+    for (const queue of edits) {
+      // Ben himself is sent his city with the new queue...
+      const told = await ben.actOk(1, setQueue(thebes.id, queue));
+      expect(told.map((message) => message.type)).toEqual(['gameUpdate']);
+      expect(queueItems(ownCity(ben.view))).toEqual(queue);
+      // ...and Ada, who is looking at the city, nothing.
+      await ada.expectNothingPending();
+    }
+    // Edits that are refused, or change nothing, are as silent.
+    const tooLong = queueOf(...Array.from({ length: RULES.maxQueueLength + 1 }, () => 'scout' as const));
+    expect(await ben.actRejected(1, setQueue(thebes.id, tooLong))).toBe('queueFull');
+    expect(await ben.actOk(1, setQueue(thebes.id, queueOf('worker', 'worker')))).toEqual([]);
+    await ada.expectNothingPending();
+    expect(framesSince(ada, adaFrames)).toEqual([]);
+    expect(ada.view).toBe(adaView);
+
+    // Ada cannot edit it, and the answer is the one for a city that does not exist.
+    expect(await ada.actRejected(1, setQueue(thebes.id, queueOf('warrior')))).toBe('noSuchCity');
+    expect(await ada.actRejected(1, setQueue('c2_nosuch', queueOf('warrior')))).toBe('noSuchCity');
+    await ben.expectNothingPending();
+    expect(server.save(code).game?.cities[thebes.id].buildQueue).toEqual(queueOf('worker', 'worker'));
+
+    // A turn goes by and the city saves production for its Worker. Ada is
+    // sent the turn and her own Warrior's fresh moves; of the city, nothing.
+    await ben.actOk(1, { type: 'endTurn' });
+    await ada.actOk(1, { type: 'endTurn' });
+    await ben.drain();
+    expect(ownCity(ben.view).own.productionStored).toBeGreaterThan(0);
+    for (const frame of framesSince(ada, adaFrames)) {
+      const message = JSON.parse(frame) as ServerMessage;
+      if (message.type === 'gameUpdate') expect(Object.keys(message.patch)).not.toContain('cities');
+    }
+    expect(ada.view?.turn).toBe(2);
+    expect(ada.view?.cities).toStrictEqual([seenByAda]);
+
+    // Not one frame Ada ever received says anything about a queue.
+    const everythingAdaGot = ada.frames.join('\n');
+    const everythingBenGot = ben.frames.join('\n');
+    for (const secret of ['buildQueue', 'buildOptions', 'productionStored', 'queueFull', '"held"', '"worker"']) {
+      expect(everythingBenGot.includes(secret), `Ben was told ${secret}`).toBe(true);
+      expect(everythingAdaGot.includes(secret), `Ada was told ${secret}`).toBe(false);
     }
   });
 });

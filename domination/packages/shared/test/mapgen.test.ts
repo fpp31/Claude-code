@@ -200,23 +200,24 @@ describe('generateMap: the shape of the map', () => {
     expect(seen.size).toBe(MAP_SIZE_IDS.length * RULES.maxSeats);
   });
 
-  it('has width * height tiles of the requested size, all with cityId null', () => {
+  it('has width * height tiles of the requested size, all with cityId null and nothing built on them', () => {
     const problems = problemsIn(({ map, mapSize }) => {
       const size = MAP_SIZES[mapSize];
       if (map.width !== size.width || map.height !== size.height) return `is ${map.width} x ${map.height}`;
       if (map.tiles.length !== size.width * size.height) return `has ${map.tiles.length} tiles`;
       if (map.tiles.some((tile) => tile.cityId !== null)) return 'a tile has a cityId';
+      if (map.tiles.some((tile) => tile.improvement !== null)) return 'a tile has an improvement';
       return null;
     });
     expect(problems).toEqual([]);
   });
 
-  it('uses only the terrains and features of the tables, and gives every tile exactly terrain, feature and cityId', () => {
+  it('uses only the terrains and features of the tables, and gives every tile exactly terrain, feature, improvement and cityId', () => {
     const problems = problemsIn(({ map }) => {
       for (const tile of map.tiles) {
         if (!TERRAIN_IDS.includes(tile.terrain)) return `unknown terrain '${tile.terrain}'`;
         if (tile.feature !== null && !FEATURE_IDS.includes(tile.feature)) return `unknown feature '${tile.feature}'`;
-        if (Object.keys(tile).sort().join() !== 'cityId,feature,terrain') return `a tile has the keys ${Object.keys(tile).join()}`;
+        if (Object.keys(tile).sort().join() !== 'cityId,feature,improvement,terrain') return `a tile has the keys ${Object.keys(tile).join()}`;
       }
       return null;
     });

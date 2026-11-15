@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { CIVS, MAP_SIZES, tileCoord } from '@domination/shared';
-import type { PlayerView, UnitView } from '@domination/shared';
+import { CIVS, IMPROVEMENTS, MAP_SIZES, UNIT_TYPE_IDS, tileCoord } from '@domination/shared';
+import type { CityView, PlayerView, UnitView } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import { bannerFrame, bannerLayout, bannerScale, bannerSize, drawBanner } from '../src/render/banner';
 import { BANNER_REACH } from '../src/render/frame';
-import { TILE_WIDTH, tileOrigin } from '../src/render/geometry';
+import { HEX_POINT_ROWS, ROW_PITCH, TILE_WIDTH, isInsideHex, tileOrigin } from '../src/render/geometry';
 import { civsByPlayer, ownerColors } from '../src/render/owners';
-import { citiesInDrawingOrder, pathMarks, unitDrawings } from '../src/render/scene';
+import { citiesInDrawingOrder, cityIsIdle, pathMarks, unitDrawings, workingSignOffset } from '../src/render/scene';
+import type { UnitDrawing } from '../src/render/scene';
 import { SLIDE_MS, slideOffset, startSlides } from '../src/render/slide';
 import { packImages } from '../src/sprites/atlas';
 import { parseColor } from '../src/sprites/color';
@@ -16,21 +17,34 @@ import { blendPixel, createImage, getPixel } from '../src/sprites/image';
 import { FOG_AMOUNT, FOG_COLOR, colorWithLook, foggedColor, imageWithLook } from '../src/sprites/looks';
 import { PALETTE } from '../src/sprites/palette';
 import { RIM_COLOR, RIM_ROWS_ADDED, imageWithRim } from '../src/sprites/rim';
+import { MARKER_SPRITES } from '../src/sprites/art/markers';
 import { NEUTRAL_OWNER, buildSpriteImages, pickVariant, spriteKey } from '../src/sprites/spriteSheet';
 import { installFakeBrowser } from './renderFakeCanvas';
 import type { FakeBrowser } from './renderFakeCanvas';
 
 /**
  * The renderer's remaining pure parts (WP5): who stands in front on a
- * shared tile, the slide animation, banner layout, the fog and spent looks,
- * and the packing of the sprite sheet. Plain Node.
+ * shared tile, which units are dimmed and which carry the "at work" sign,
+ * which cities carry the "builds nothing" sign, the slide animation, banner
+ * layout, the fog and spent looks, and the packing of the sprite sheet.
+ * Plain Node.
  */
 
-/** The sample view with other units: `at` lists [id, type, owner, tile, movesLeft or null for a foreign unit]. */
-function viewWithUnits(at: [string, UnitView['type'], string, number, number | null][]): PlayerView {
-  const units: UnitView[] = at.map(([id, type, owner, tile, movesLeft]) => ({
+/**
+ * The sample view with other units: `at` lists [id, type, owner, tile,
+ * movesLeft or null for a foreign unit, and 'atWork' for an own unit with a job].
+ */
+function viewWithUnits(at: [string, UnitView['type'], string, number, number | null, 'atWork'?][]): PlayerView {
+  const units: UnitView[] = at.map(([id, type, owner, tile, movesLeft, atWork]) => ({
     id, type, owner, tile,
-    own: movesLeft === null ? null : { movesLeft, foundCityError: 'cannotFoundCity' },
+    own: movesLeft === null ? null : {
+      movesLeft,
+      foundCityError: 'cannotFoundCity',
+      job: atWork === undefined
+        ? null
+        : { improvement: 'farm', turnsWorked: 1, turnsTotal: IMPROVEMENTS.farm.turns, turnsLeft: IMPROVEMENTS.farm.turns - 1 },
+      jobOptions: [],
+    },
   }));
   return { ...sampleView(), units };
 }
@@ -50,7 +64,7 @@ describe('unitDrawings (WP5)', () => {
 
   it('a unit alone on open ground stands in the middle of its tile', () => {
     const view = viewWithUnits([['a', 'warrior', 'p1', OPEN, 2]]);
-    expect(unitDrawings(view, null)).toEqual([{ unit: view.units[0], dx: 0, dy: 0, look: 'normal', rim: false }]);
+    expect(unitDrawings(view, null)).toEqual([{ unit: view.units[0], dx: 0, dy: 0, look: 'normal', rim: false, working: false }]);
   });
 
   it('on a tile with two units the civilian stands behind the military unit', () => {
@@ -103,6 +117,86 @@ describe('unitDrawings (WP5)', () => {
     ]);
   });
 
+  it('an own unit at work is dimmed and marked as working; with moves and without; a foreign unit never is', () => {
+    const view = viewWithUnits([
+      ['atWorkWithMoves', 'worker', 'p1', 20, 2, 'atWork'],
+      ['atWorkWithoutMoves', 'worker', 'p1', 30, 0, 'atWork'],
+      ['idleWorker', 'worker', 'p1', 40, 2],
+      ['tiredWorker', 'worker', 'p1', 50, 0],
+      ['foreignWorker', 'worker', 'p2', 60, null],
+    ]);
+    expect(unitDrawings(view, null).map((drawing) => [drawing.unit.id, drawing.look, drawing.working])).toEqual([
+      ['atWorkWithMoves', 'spent', true],
+      ['atWorkWithoutMoves', 'spent', true],
+      ['idleWorker', 'normal', false],
+      ['tiredWorker', 'spent', false], // dimmed for having no moves, but not at work: no sign
+      ['foreignWorker', 'normal', false],
+    ]);
+
+    // The sample view's own Worker is at work, and nothing else in it is.
+    const sample = sampleView();
+    const working = unitDrawings(sample, null).filter((drawing) => drawing.working);
+    expect(working.map((drawing) => [drawing.unit.id, drawing.look])).toEqual([['u1_m4wq7e', 'spent']]);
+    // Selecting it changes neither: a unit at work stays dimmed.
+    expect(unitDrawings(sample, 'u1_m4wq7e').filter((drawing) => drawing.working).map((drawing) => drawing.look)).toEqual(['spent']);
+  });
+
+  it('workingSignOffset keeps the sign inside the full-width rows of the tile for every place a unit can stand (alone, in front, behind, in a city)', () => {
+    const sign = MARKER_SPRITES.working;
+    const [signX, signY] = [sign.offsetX ?? 0, sign.offsetY ?? 0];
+    expect([sign.width, sign.height, signX, signY]).toEqual([7, 7, 1, 7]);
+
+    /** The drawing of the unit `id` in a view. */
+    const drawingOf = (view: PlayerView, id: string, selected: string | null = null): UnitDrawing => {
+      const drawing = unitDrawings(view, selected).find((candidate) => candidate.unit.id === id);
+      if (drawing === undefined) throw new Error(`no drawing of ${id}`);
+      return drawing;
+    };
+    const pair = viewWithUnits([['w', 'warrior', 'p1', OPEN, 2], ['k', 'worker', 'p1', OPEN, 2, 'atWork']]);
+    const inCity = viewWithUnits([['w', 'warrior', 'p1', ROME, 2], ['k', 'worker', 'p1', ROME, 2, 'atWork']]);
+    const places: [string, UnitDrawing][] = [
+      ['alone', drawingOf(viewWithUnits([['k', 'worker', 'p1', OPEN, 2, 'atWork']]), 'k')],
+      ['behind another unit', drawingOf(pair, 'k')],
+      ['in front of another unit', drawingOf(pair, 'k', 'k')],
+      ['alone in a city', drawingOf(viewWithUnits([['k', 'worker', 'p1', ROME, 2, 'atWork']]), 'k')],
+      ['behind another unit in a city', drawingOf(inCity, 'k')],
+      ['in front of another unit in a city', drawingOf(inCity, 'k', 'k')],
+    ];
+    // Six different places, and the sign follows the unit wherever that keeps it on the tile.
+    expect(new Set(places.map(([, drawing]) => `${drawing.dx},${drawing.dy}`)).size).toBe(5); // alone in a city = in front in a city
+    expect(workingSignOffset(places[0][1])).toEqual({ dx: 0, dy: 0 });
+    expect(workingSignOffset(places[2][1])).toEqual({ dx: places[2][1].dx, dy: places[2][1].dy });
+
+    for (const [name, drawing] of places) {
+      const offset = workingSignOffset(drawing);
+      // Never further from the unit's normal spot than the unit itself: the sign stays with its figure.
+      expect(Math.abs(offset.dx), name).toBeLessThanOrEqual(Math.abs(drawing.dx));
+      expect(Math.abs(offset.dy), name).toBeLessThanOrEqual(Math.abs(drawing.dy));
+      for (let y = 0; y < sign.height; y++) {
+        for (let x = 0; x < sign.width; x++) {
+          const [px, py] = [signX + offset.dx + x, signY + offset.dy + y];
+          expect(isInsideHex(px, py), `${name}: the sign's pixel (${px}, ${py})`).toBe(true);
+          // The rows where the hexagon has its full width: there a square cannot stick out at a corner.
+          expect(py >= HEX_POINT_ROWS && py < ROW_PITCH, `${name}: row ${py}`).toBe(true);
+        }
+      }
+    }
+    // The unit behind another would carry its sign off the left edge of the tile (x 1 - 5): it is held back.
+    const behind = places[1][1];
+    expect(signX + behind.dx).toBeLessThan(0);
+    expect(signX + workingSignOffset(behind).dx).toBe(0);
+    // Whatever offset a unit is given, the sign stays on the tile.
+    for (const dx of [-30, -9, 0, 9, 30]) {
+      for (const dy of [-30, -9, 0, 9, 30]) {
+        const offset = workingSignOffset({ ...behind, dx, dy });
+        expect(isInsideHex(signX + offset.dx, signY + offset.dy)).toBe(true);
+        expect(isInsideHex(signX + offset.dx + sign.width - 1, signY + offset.dy + sign.height - 1)).toBe(true);
+        expect(signY + offset.dy).toBeGreaterThanOrEqual(HEX_POINT_ROWS);
+        expect(signY + offset.dy + sign.height - 1).toBeLessThan(ROW_PITCH);
+      }
+    }
+  });
+
   it('a unit among trees gets the pale line around it, whoever owns it; on open ground and on hills none does', () => {
     const FOREST = 1 * 14 + 4;
     const HILLS = 3 * 14 + 6;
@@ -146,6 +240,32 @@ describe('citiesInDrawingOrder and owners (WP5)', () => {
     expect(civs.get('p9')).toBeUndefined();
     expect(ownerColors(civs.get('p1'))).toEqual({ primary: CIVS.rome.primary, secondary: CIVS.rome.secondary });
     expect(ownerColors(civs.get('p9'))).toEqual(NEUTRAL_OWNER);
+  });
+});
+
+describe('cityIsIdle', () => {
+  it('cityIsIdle is true for an own city with an empty queue, false with an entry, and false for every foreign city', () => {
+    const sample = sampleView();
+    const rome = sample.cities.find((city) => city.name === 'Rome');
+    const thebes = sample.cities.find((city) => city.name === 'Thebes');
+    if (rome === undefined || rome.own === null || thebes === undefined) throw new Error('the sample view has changed');
+
+    // The sample Rome is building a Warrior and has a Scout queued.
+    expect(rome.own.buildQueue.length).toBe(2);
+    expect(cityIsIdle(rome)).toBe(false);
+    const oneLeft: CityView = { ...rome, own: { ...rome.own, buildQueue: rome.own.buildQueue.slice(0, 1) } };
+    expect(cityIsIdle(oneLeft)).toBe(false);
+    const idle: CityView = { ...rome, own: { ...rome.own, buildQueue: [] } };
+    expect(cityIsIdle(idle)).toBe(true);
+    // It is about the queue alone: an idle city with production saved, or one that is not in sight, is idle all the same.
+    expect(cityIsIdle({ ...idle, own: { ...idle.own!, productionStored: 40 } })).toBe(true);
+    expect(cityIsIdle({ ...idle, visible: false })).toBe(true);
+
+    // Another player's city carries no queue in the view: never a sign, in sight or remembered.
+    expect(thebes.own).toBeNull();
+    expect(cityIsIdle(thebes)).toBe(false);
+    expect(cityIsIdle({ ...thebes, visible: true })).toBe(false);
+    expect(cityIsIdle({ ...rome, own: null })).toBe(false);
   });
 });
 
@@ -458,7 +578,8 @@ describe('the pale line around a unit among trees', () => {
 
   it('every unit has a rimmed picture for every owner and look: the same figure, one row taller and drawn one row higher', () => {
     const images = new Map(buildSpriteImages().map((entry) => [entry.key, entry]));
-    for (const unit of ['unit.warrior', 'unit.scout', 'unit.settler'] as const) {
+    expect(UNIT_TYPE_IDS.length).toBe(4);
+    for (const unit of UNIT_TYPE_IDS.map((unitType) => `unit.${unitType}` as const)) {
       for (const owner of ['rome', 'norse', 'neutral'] as const) {
         for (const look of ['normal', 'spent'] as const) {
           const plain = images.get(spriteKey(unit, '', owner, look));

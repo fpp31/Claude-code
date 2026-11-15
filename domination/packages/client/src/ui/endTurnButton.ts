@@ -14,8 +14,11 @@ import { todoHints, waitingForText } from './texts';
 /**
  * One button (TEST_IDS.endTurnButton, attribute data-ended="true|false"):
  *  - not ended: label "End Turn"; a small hint underneath when something is
- *    still to do ("2 units can still move", "1 city has nothing to build"),
- *    from idleUnits / citiesWithoutProduction. The hint never blocks ending.
+ *    still to do, one sentence per line, in the order and wording of
+ *    todoHints (ui/texts.ts): cities with nothing to build first ("Rome has
+ *    nothing to build"), then cities that wait with no end in sight ("Rome
+ *    is waiting: the city must grow first"), then units ("2 units can still
+ *    move"; a unit at work is not counted). The hint never blocks ending.
  *  - ended: label "Waiting for others - tap to cancel".
  *  - click: controller.toggleEndTurn(). The button does no guarding of its
  *    own: the controller ignores presses for END_TURN_GUARD_MS (0.6 s) after
@@ -26,8 +29,8 @@ import { todoHints, waitingForText } from './texts';
  *
  * Two additions that make the hint something a player can act on:
  *  - while there is something still to do, a small "Show me" button above
- *    End Turn selects the next such unit or city (controller.selectNextTask)
- *    and scrolls the map to it;
+ *    End Turn selects the next such city or unit (controller.selectNextTask:
+ *    idle cities, then waiting cities, then units) and scrolls the map to it;
  *  - once the turn is ended, the hint names who the game is waiting for.
  *
  * @param showTile  scrolls the map to a tile (the game screen passes the

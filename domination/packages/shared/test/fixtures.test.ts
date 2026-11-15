@@ -2,14 +2,31 @@ import { describe, expect, it } from 'vitest';
 import {
   FEATURES,
   FEATURE_IDS,
+  IMPROVEMENTS,
+  IMPROVEMENT_IDS,
+  RULES,
   TERRAIN_IDS,
+  UNITS,
+  UNIT_TYPE_IDS,
+  applyAction,
+  buildPlayerView,
+  checkInvariants,
   cloneJson,
+  createGame,
+  foodToGrow,
   generateMap,
+  improvementFits,
+  improvementSiteError,
+  jobView,
   maxPlayers,
   neighbors,
+  siteInView,
   tileCount,
   tileIsWater,
+  tileYields,
+  updateKnowledge,
 } from '../src/index';
+import type { TileView } from '../src/index';
 import {
   ASCII_LEGEND,
   isImplemented,
@@ -29,12 +46,12 @@ describe('mapFromAscii', () => {
     expect(map.width).toBe(3);
     expect(map.height).toBe(2);
     expect(map.tiles).toEqual([
-      { terrain: 'ocean', feature: null, cityId: null },
-      { terrain: 'grassland', feature: null, cityId: null },
-      { terrain: 'grassland', feature: 'forest', cityId: null },
-      { terrain: 'coast', feature: null, cityId: null },
-      { terrain: 'plains', feature: null, cityId: null },
-      { terrain: 'grassland', feature: 'mountains', cityId: null },
+      { terrain: 'ocean', feature: null, improvement: null, cityId: null },
+      { terrain: 'grassland', feature: null, improvement: null, cityId: null },
+      { terrain: 'grassland', feature: 'forest', improvement: null, cityId: null },
+      { terrain: 'coast', feature: null, improvement: null, cityId: null },
+      { terrain: 'plains', feature: null, improvement: null, cityId: null },
+      { terrain: 'grassland', feature: 'mountains', improvement: null, cityId: null },
     ]);
   });
 
@@ -121,6 +138,7 @@ describe('the sample map', () => {
       const feature = map.tiles[tile].feature;
       if (feature !== null) expect(FEATURES[feature].allowedOn).toContain(map.tiles[tile].terrain);
       expect(map.tiles[tile].cityId).toBeNull();
+      expect(map.tiles[tile].improvement).toBeNull();
     }
   });
 
@@ -174,6 +192,123 @@ describe('the sample view', () => {
     const warrior = view.units.find((u) => u.type === 'warrior' && u.owner === 'p1');
     expect(settler?.own?.foundCityError).toBeNull();
     expect(warrior?.own?.foundCityError).toBe('cannotFoundCity');
+  });
+
+  it('the sample city\'s queue and menu obey the rule "turns or wait, never both"', () => {
+    const rome = view.cities.find((city) => city.own !== null);
+    const own = rome?.own;
+    expect(own).toBeDefined();
+    if (own === null || own === undefined) return;
+
+    expect(own.buildQueue.length).toBeGreaterThan(1);
+    expect(own.buildQueue.length).toBeLessThanOrEqual(RULES.maxQueueLength);
+    for (const entry of [...own.buildQueue, ...own.buildOptions]) {
+      expect(entry.turns !== null, entry.item.unitType).toBe(entry.wait === null);
+      if (entry.turns !== null) {
+        expect(Number.isInteger(entry.turns)).toBe(true);
+        expect(entry.turns).toBeGreaterThanOrEqual(1);
+        expect(entry.turns).toBeLessThanOrEqual(RULES.forecastTurns);
+      }
+      expect(entry.cost).toBe(UNITS[entry.item.unitType].cost);
+      expect(Object.keys(entry.item).sort()).toEqual(['kind', 'unitType']);
+    }
+    // The rows come one after the other, and the menu is forecast behind the whole queue.
+    const rowTurns = own.buildQueue.map((row) => row.turns ?? 0);
+    expect(rowTurns).toEqual([...rowTurns].sort((a, b) => a - b));
+    expect(new Set(rowTurns).size).toBe(rowTurns.length);
+    for (const option of own.buildOptions) expect(option.turns).toBeGreaterThan(rowTurns[rowTurns.length - 1]);
+    // The menu is the unit table, in its order; the queue is not full, so everything can be added.
+    expect(own.buildOptions.map((option) => option.item.unitType)).toEqual(UNIT_TYPE_IDS);
+    for (const option of own.buildOptions) expect(option.addError).toBeNull();
+    // Nothing is held: the first entry is not even paid for.
+    expect(own.held).toBeNull();
+    expect(own.productionStored).toBeLessThan(own.buildQueue[0].cost);
+    expect(own.foodToGrow).toBe(foodToGrow(rome?.population ?? 0));
+  });
+
+  it('the sample city\'s numbers are what the rules give for such a city', () => {
+    // The sample view is hand-made. Here the same city is set up in a real
+    // game on the sample map, and the rules are asked for its panel.
+    const sample = view.cities.find((city) => city.own !== null);
+    const thebes = view.cities.find((city) => city.own === null);
+    if (sample === undefined || sample.own === null || thebes === undefined) throw new Error('the sample view has lost its cities');
+    const farm = view.tiles.findIndex((tile) => tile !== null && tile.visible && tile.improvement === 'farm');
+
+    const start = createGame(
+      {
+        seed: 'sample',
+        settings: { mapSize: 'small', turnMode: 'simultaneous' },
+        players: [{ id: 'p1', name: 'Ada', civ: 'rome' }, { id: 'p2', name: 'Ben', civ: 'egypt' }],
+      },
+      () => ({ map: sampleMap(), starts: [sample.tile, thebes.tile] }),
+    );
+    const settler = Object.values(start.units).find((unit) => unit.owner === 'p1' && unit.type === 'settler');
+    const founded = applyAction(start, 'p1', start.turn, { type: 'foundCity', unitId: settler?.id ?? '' });
+    if (!founded.ok) throw new Error(`Rome could not be founded on the sample map: ${founded.error.code}`);
+    const state = cloneJson(founded.state);
+    const rome = Object.values(state.cities)[0];
+    rome.population = sample.population;
+    rome.foodStored = sample.own.foodStored;
+    rome.productionStored = sample.own.productionStored;
+    rome.buildQueue = sample.own.buildQueue.map((row) => ({ kind: 'unit', unitType: row.item.unitType }));
+    state.map.tiles[farm].improvement = 'farm';
+    updateKnowledge(state);
+    expect(checkInvariants(state)).toEqual([]);
+
+    const real = buildPlayerView(state, 'p1').cities.find((city) => city.id === rome.id)?.own;
+    // Everything but the list of worked tiles: the citizen next to the farm
+    // has several grassland tiles alike to choose from, and the sample,
+    // drawn by hand, shows another of them than the rule's tie-break picks.
+    expect({ ...real, worked: null }).toEqual({ ...sample.own, worked: null });
+    expect(real?.worked).toContain(farm);
+    expect(real?.worked).toHaveLength(sample.own.worked.length);
+    for (const tile of sample.own.worked) {
+      expect(view.tiles[tile]).toMatchObject({ owner: 'p1', visible: true });
+      expect(tile).not.toBe(sample.tile);
+    }
+    const yieldsOf = (tiles: number[]): number[] =>
+      tiles.map((tile) => tileYields(view.tiles[tile] as TileView)).map((yields) => yields.food * 100 + yields.production).sort();
+    expect(yieldsOf(sample.own.worked)).toEqual(yieldsOf(real?.worked ?? []));
+  });
+
+  it('the sample view\'s improvements stand on ground that fits them, and its Worker\'s job and options are consistent', () => {
+    // A finished farm in sight, on the viewer's own land and worked by the city; a mine that is only remembered.
+    const improved = view.tiles.map((tile, index) => ({ tile, index })).filter(({ tile }) => tile !== null && tile.improvement !== null);
+    expect(improved.map(({ tile }) => [tile?.improvement, tile?.visible, tile?.owner])).toEqual([
+      ['mine', false, 'p2'],
+      ['farm', true, 'p1'],
+    ]);
+    for (const { tile, index } of improved) {
+      if (tile === null || tile.improvement === null) continue;
+      expect(improvementFits(tile.improvement, tile), `tile ${index}`).toBe(true);
+      expect(view.cities.some((city) => city.tile === index), `tile ${index}`).toBe(false);
+    }
+    const farm = improved[1].index;
+    expect(view.cities.find((city) => city.own !== null)?.own?.worked).toContain(farm);
+
+    // The Worker: at work on a farm, on own land where a farm fits and none stands yet.
+    const worker = view.units.find((unit) => unit.type === 'worker');
+    const own = worker?.own;
+    if (worker === undefined || own === null || own === undefined || own.job === null) throw new Error('the sample view has lost its Worker at work');
+    expect(UNITS[worker.type].canImprove).toBe(true);
+    expect(own.job).toEqual(jobView({ improvement: own.job.improvement, turnsWorked: own.job.turnsWorked }));
+    expect(own.job.turnsWorked).toBeLessThan(own.job.turnsTotal);
+    expect(improvementSiteError(siteInView(view, worker.tile), own.job.improvement)).toBeNull();
+    // While it works, every option says so; the turns are the table's.
+    expect(own.jobOptions).toEqual(IMPROVEMENT_IDS.map((improvement) => ({
+      improvement, turns: IMPROVEMENTS[improvement].turns, error: 'unitBusy',
+    })));
+    expect(own.foundCityError).toBe('cannotFoundCity');
+
+    // Units that cannot build carry no job and no options; the foreign unit carries nothing at all.
+    for (const unit of view.units) {
+      if (unit.own === null) continue;
+      if (UNITS[unit.type].canImprove) continue;
+      expect(unit.own.job, unit.id).toBeNull();
+      expect(unit.own.jobOptions, unit.id).toEqual([]);
+    }
+    // "2 units can still move": the Warrior and the Settler. The Worker is busy.
+    expect(view.units.filter((unit) => unit.own !== null && unit.own.movesLeft > 0 && unit.own.job === null)).toHaveLength(2);
   });
 });
 

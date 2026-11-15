@@ -9,7 +9,8 @@
 import type { AddressedEvent, GameEvent } from '../actions';
 import { foodToGrow } from '../data/rules';
 import { getPlayer } from '../ids';
-import { buildCost, buildOptions, cityEconomy, foundCityError, productionBlocked } from '../rules/city';
+import { buildPlan, foundCityError } from '../rules/city';
+import { jobOptions, jobView } from '../rules/improvements';
 import { tileOwner } from '../rules/stateQueries';
 import type { City, CityPublic, GameState, PlayerId, PlayerKnowledge, PlayerState, Unit } from '../types';
 import type { CityView, OwnCityDetail, PlayerPublic, PlayerView, TileView, UnitView } from '../viewTypes';
@@ -32,16 +33,21 @@ import { computeVisible } from './visibility';
  *  - tiles[i]:
  *      * never explored                 -> null;
  *      * visible now (computeVisible)   -> terrain, feature, visible: true,
- *                                          owner = current owner of the tile;
+ *                                          owner = current owner of the tile,
+ *                                          improvement = what is built on it;
  *      * explored but not visible       -> terrain, feature, visible: false,
- *                                          owner = knowledge.remembered[i]?.owner ?? null.
+ *                                          owner = knowledge.remembered[i]?.owner ?? null,
+ *                                          improvement = knowledge.remembered[i]?.improvement ?? null
+ *                                          (both as last seen, never the truth).
  *  - units, sorted by id (plain string comparison with < and >):
- *      * the viewer's own units, with own = { movesLeft, foundCityError };
- *      * other players' units standing on tiles visible now, with own = null.
+ *      * the viewer's own units, with own = { movesLeft, foundCityError,
+ *        job, jobOptions } (jobView and jobOptions in rules/improvements.ts);
+ *      * other players' units standing on tiles visible now, with own = null:
+ *        nothing says whether such a unit has a job.
  *  - cities, sorted by id:
  *      * the viewer's own cities: visible: true, own = OwnCityDetail computed
- *        with cityEconomy / foodToGrow / buildCost / buildOptions /
- *        productionBlocked;
+ *        with buildPlan (rules/city.ts: the economy and a forecast made with
+ *        the functions turn resolution uses) and foodToGrow;
  *      * other players' cities on tiles visible now: current public fields,
  *        visible: true, own = null;
  *      * cities in knowledge.remembered on tiles NOT visible now: the
@@ -50,8 +56,10 @@ import { computeVisible } from './visibility';
  *
  * Property the tests must prove (non-interference): changing anything in the
  * state that this player cannot see (a hidden unit's position, terrain of a
- * never-seen tile, another city's food or production, another player's
- * knowledge or idRng, `seed`, `rng`) leaves the returned view deep-equal.
+ * never-seen tile, another city's food or production, another city's build
+ * queue, a foreign unit's job, the improvement of a tile out of sight,
+ * another player's knowledge or idRng, `seed`, `rng`) leaves the returned
+ * view deep-equal.
  */
 export function buildPlayerView(state: GameState, playerId: PlayerId): PlayerView {
   const viewer = getPlayer(state, playerId); // throws for somebody who is not in this game
@@ -78,14 +86,22 @@ function tileViews(state: GameState, knowledge: PlayerKnowledge, visible: boolea
   return state.map.tiles.map((tile, index): TileView | null => {
     if (knowledge.explored[index] !== 1) return null;
     if (visible[index]) {
-      return { terrain: tile.terrain, feature: tile.feature, owner: tileOwner(state, index), visible: true };
+      return {
+        terrain: tile.terrain,
+        feature: tile.feature,
+        improvement: tile.improvement,
+        owner: tileOwner(state, index),
+        visible: true,
+      };
     }
     // Terrain never changes, so it may be read from the truth. The owner can
-    // change out of sight, so it comes from the player's memory only.
+    // change out of sight, so it comes from the player's memory only, and so
+    // does the improvement.
     const remembered = knowledge.remembered[index];
     return {
       terrain: tile.terrain,
       feature: tile.feature,
+      improvement: remembered === undefined ? null : remembered.improvement,
       owner: remembered === undefined ? null : remembered.owner,
       visible: false,
     };
@@ -109,7 +125,12 @@ function ownUnitView(state: GameState, unit: Unit): UnitView {
     type: unit.type,
     owner: unit.owner,
     tile: unit.tile,
-    own: { movesLeft: unit.movesLeft, foundCityError: foundCityError(state, unit) },
+    own: {
+      movesLeft: unit.movesLeft,
+      foundCityError: foundCityError(state, unit),
+      job: unit.job === null ? null : jobView(unit.job),
+      jobOptions: jobOptions(state, unit),
+    },
   };
 }
 
@@ -167,26 +188,18 @@ function ownCityView(state: GameState, city: City): CityView {
 
 /** Every number the city panel prints, computed with the same functions turn resolution uses. */
 function ownCityDetail(state: GameState, city: City): OwnCityDetail {
-  const economy = cityEconomy(state, city);
-  const options = buildOptions(state, city);
-  const current = city.production;
-  // The menu entry of the current item already says how many turns it needs
-  // from here, so the panel and the menu can never show different numbers.
-  const currentOption =
-    current === null ? undefined : options.find((option) => option.item.unitType === current.unitType);
-
+  // ONE call: the plan reads the city's land once and hands out the economy it found.
+  const plan = buildPlan(state, city);
   return {
     foodStored: city.foodStored,
     foodToGrow: foodToGrow(city.population),
-    foodPerTurn: economy.foodSurplus,
-    production: current === null ? null : { kind: current.kind, unitType: current.unitType },
+    foodPerTurn: plan.economy.foodSurplus,
+    buildQueue: plan.queue,
+    held: plan.held,
     productionStored: city.productionStored,
-    productionCost: current === null ? null : buildCost(current),
-    productionPerTurn: economy.production,
-    turnsLeft: currentOption === undefined ? null : currentOption.turns,
-    productionBlocked: productionBlocked(state, city),
-    worked: economy.worked,
-    buildOptions: options,
+    productionPerTurn: plan.economy.production,
+    worked: plan.economy.worked,
+    buildOptions: plan.options,
   };
 }
 

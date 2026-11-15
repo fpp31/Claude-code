@@ -25,6 +25,9 @@ export function moveUnit(state: GameState, playerId: PlayerId, action: MoveUnitA
   if (unit === null || unit.owner !== playerId) return rejected('noSuchUnit');
 
   if (!isPathShapeValid(state, unit.tile, action.path)) return rejected('badPath');
+  // A unit at work stays where it is until the job is finished or stopped:
+  // a stray tap must never throw away turns of work.
+  if (unit.job !== null) return rejected('unitBusy');
   if (unit.movesLeft <= 0) return rejected('noMovesLeft');
 
   // The first step decides between "rejected" and "accepted". It is judged

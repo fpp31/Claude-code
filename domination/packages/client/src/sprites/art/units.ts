@@ -2,7 +2,7 @@
  * Unit sprites (work package WP5): chunky big-headed figures in their
  * owner's colours (characters 1-4, see format.ts).
  *
- * All three share the body of the reference picture (groups "man" and
+ * All four share the body of the reference picture (groups "man" and
  * "manB" of docs/art/style-d-reference.svg): a big head with two eyes, a
  * tunic in the owner's colour, two feet and a shadow. What they carry and
  * wear tells them apart at a glance:
@@ -13,7 +13,10 @@
  *                  the reference's blue soldier) and bare legs with boots;
  *  - unit.settler  a wide straw hat and a loaded hand cart (a sack on a
  *                  wooden box with one big wheel) beside the figure; nothing
- *                  that looks like a weapon.
+ *                  that looks like a weapon;
+ *  - unit.worker   a bare head with brown hair and a headband in the
+ *                  owner's secondary colour, and a big mattock held upright
+ *                  at the right (no helmet, no hat, no cart).
  *
  * New sprites must keep the style: lit left, shaded right, outline, shadow.
  */
@@ -107,5 +110,32 @@ export const settler: SpriteSource = {
     '.....######.....#PPPP#....',
     '.....##..##......####.....',
     '......::::::::::::::::::..',
+  ],
+};
+
+export const worker: SpriteSource = {
+  width: TILE_WIDTH,
+  height: 17,
+  offsetY: 4,
+  // `h` hair, `w` steel, `S` steel in shade, `o` the wood of the handle
+  colors: { ...BODY_COLORS, h: PALETTE.hair, w: PALETTE.steel, S: PALETTE.steelShade, o: PALETTE.bow },
+  rows: [
+    '.................#######..',
+    '..........#######wwwwwSS#.',
+    '.........#hhhhhh########..',
+    '.........#hhhhhh#..#o#....',
+    '.........#444444#..#o#....',
+    '.........#kkkkkk#..#o#....',
+    '.........#k#kk#k#..#o#....',
+    '.........#kkkkkK#..#o#....',
+    '..........######...#o#....',
+    '..........#1222#####o#....',
+    '..........#1223#kkK#o#....',
+    '..........#2223#####o#....',
+    '..........#2223#...#o#....',
+    '..........#2223#...###....',
+    '..........######..........',
+    '..........##..##..........',
+    '...........::::::::.......',
   ],
 };

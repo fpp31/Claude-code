@@ -13,7 +13,8 @@
  *    its owner and of nobody else, and ending a turn changes everybody's;
  *  - moveUnit puts the unit on the last tile of the path, endTurn /
  *    cancelEndTurn work like the real ones (the turn advances when everybody
- *    has ended), and foundCity / setProduction are always refused.
+ *    has ended), and foundCity, setBuildQueue, startJob and stopJob are
+ *    always refused.
  *
  * Failures are switched on through the `control` object, from the test.
  */
@@ -99,7 +100,7 @@ export function createFakeRules(): { rules: Rules; control: FakeRulesControl } {
     };
     for (const player of state.players) {
       const id = fakeUnitId(player.id);
-      state.units[id] = { id, type: 'warrior', owner: player.id, tile: 0, movesLeft: 2 };
+      state.units[id] = { id, type: 'warrior', owner: player.id, tile: 0, movesLeft: 2, job: null };
     }
     return state;
   }
@@ -135,8 +136,12 @@ export function createFakeRules(): { rules: Rules; control: FakeRulesControl } {
       }
       case 'foundCity':
         return refuse('cannotFoundCity');
-      case 'setProduction':
+      case 'setBuildQueue':
         return refuse('noSuchCity');
+      case 'startJob':
+        return refuse('cannotImprove');
+      case 'stopJob':
+        return refuse('noSuchUnit');
       case 'endTurn': {
         if (me.endedTurn) return { ok: true, state, events: [], changed: false };
         me.endedTurn = true;
@@ -175,7 +180,7 @@ export function createFakeRules(): { rules: Rules; control: FakeRulesControl } {
           type: unit.type,
           owner: unit.owner,
           tile: unit.tile,
-          own: { movesLeft: unit.movesLeft, foundCityError: 'cannotFoundCity' as const },
+          own: { movesLeft: unit.movesLeft, foundCityError: 'cannotFoundCity' as const, job: null, jobOptions: [] },
         })),
       cities: [],
       players: state.players.map((player) => ({

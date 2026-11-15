@@ -3,7 +3,7 @@
  * `parseClientMessage` before any other code looks at it.
  */
 
-import { CIV_IDS, MAP_SIZE_IDS, RULES, UNIT_TYPE_IDS } from '@domination/shared';
+import { CIV_IDS, IMPROVEMENT_IDS, MAP_SIZE_IDS, RULES, UNIT_TYPE_IDS } from '@domination/shared';
 import type { Action, BuildItem, ClientMessage } from '@domination/shared';
 
 /** Longest strings accepted in a message (see parseClientMessage). */
@@ -11,6 +11,14 @@ const MAX_NAME_INPUT_LENGTH = 200;
 const MAX_CODE_INPUT_LENGTH = 16;
 const MAX_TOKEN_INPUT_LENGTH = 64;
 const MAX_ID_LENGTH = 32;
+
+/**
+ * The longest build queue a message may carry. Far above RULES.maxQueueLength
+ * on purpose: a list that is only too long for the rules is still a
+ * message, and the rules answer it ('queueFull') with its request id. This
+ * number only keeps absurd lists out, like the limits on strings.
+ */
+const MAX_QUEUE_INPUT_LENGTH = 64;
 
 /** Any JSON object, before its fields have been checked. */
 type Fields = Record<string, unknown>;
@@ -29,9 +37,12 @@ type Fields = Record<string, unknown>;
  *    and cut to RULES.maxNameLength later), `code` at most 16, `token` at
  *    most 64, ids at most 32;
  *  - `civ` is one of CIV_IDS and `mapSize` one of MAP_SIZE_IDS;
- *  - `action.type` is one of the five action types with exactly its fields;
+ *  - `action.type` is one of the seven action types with exactly its fields;
  *    `path` is an array of at most RULES.maxPathLength whole numbers;
- *    `item` is `{ kind: 'unit', unitType: <one of UNIT_TYPE_IDS> }`.
+ *    `queue` is an array of at most 64 entries, each
+ *    `{ kind: 'unit', unitType: <one of UNIT_TYPE_IDS> }` (whether it is too
+ *    long for the rules is the rules' answer); `improvement` is one of
+ *    IMPROVEMENT_IDS.
  *
  * The result is rebuilt field by field (never the parsed object itself), so
  * unexpected extra properties cannot travel further into the server.
@@ -93,7 +104,7 @@ export function parseClientMessage(raw: string): ClientMessage | null {
   }
 }
 
-/** The `action` field of an `action` message, checked and rebuilt; null if it is not one of the five actions. */
+/** The `action` field of an `action` message, checked and rebuilt; null if it is not one of the action types. */
 function parseAction(value: unknown): Action | null {
   if (!isObject(value)) return null;
 
@@ -114,11 +125,28 @@ function parseAction(value: unknown): Action | null {
       if (!isShortString(unitId, MAX_ID_LENGTH)) return null;
       return { type: 'foundCity', unitId };
     }
-    case 'setProduction': {
-      const { cityId } = value;
+    case 'setBuildQueue': {
+      const { cityId, queue } = value;
       if (!isShortString(cityId, MAX_ID_LENGTH)) return null;
-      const item = parseBuildItem(value.item);
-      return item === null ? null : { type: 'setProduction', cityId, item };
+      if (!Array.isArray(queue) || queue.length > MAX_QUEUE_INPUT_LENGTH) return null;
+      const items: BuildItem[] = [];
+      for (const entry of queue) {
+        const item = parseBuildItem(entry);
+        if (item === null) return null;
+        items.push(item);
+      }
+      return { type: 'setBuildQueue', cityId, queue: items };
+    }
+    case 'startJob': {
+      const { unitId } = value;
+      if (!isShortString(unitId, MAX_ID_LENGTH)) return null;
+      const improvement = IMPROVEMENT_IDS.find((id) => id === value.improvement);
+      return improvement === undefined ? null : { type: 'startJob', unitId, improvement };
+    }
+    case 'stopJob': {
+      const { unitId } = value;
+      if (!isShortString(unitId, MAX_ID_LENGTH)) return null;
+      return { type: 'stopJob', unitId };
     }
     case 'endTurn':
       return { type: 'endTurn' };

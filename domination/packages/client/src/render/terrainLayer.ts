@@ -1,7 +1,8 @@
 /**
  * The part of the map that only changes when the view does
- * (work package WP5): ground, territory borders and features, painted onto
- * an offscreen canvas at one canvas pixel per art pixel.
+ * (work package WP5): ground, territory borders, features and improvements
+ * (farms, mines), painted onto an offscreen canvas at one canvas pixel per
+ * art pixel.
  *
  * Why: panning and zooming then cost one image copy per frame, however
  * large the map is, instead of thousands of small ones. And because the
@@ -88,6 +89,11 @@ export function createTerrainLayer(sheet: SpriteSheet): TerrainLayer {
    * Paints the given tiles (in ascending order) in three passes, each from
    * the top row down, so that every border lies on the ground and every
    * feature on the borders, and a tall feature overlaps the row behind it.
+   * The third pass paints a tile's feature first and its improvement on top
+   * of it. So, back to front, a farm tile is: bare ground, the border
+   * strip, the farm; a mine tile is: bare ground, the border strip, the
+   * hills, the mine. On a tile out of sight each of these is its fogged
+   * twin.
    */
   function paintTiles(view: PlayerView, civs: Map<PlayerId, CivId>, tiles: Iterable<TileIndex>): void {
     const list = [...tiles];
@@ -96,8 +102,10 @@ export function createTerrainLayer(sheet: SpriteSheet): TerrainLayer {
       if (tile === null) continue; // never seen: stays empty
       const origin = tileOrigin(tileCoord(index, view));
       const look: SpriteLook = tile.visible ? 'normal' : 'fogged';
-      // Under a feature the ground is bare, as in the reference picture.
-      const ground = sheet.get(`ground.${tile.terrain}`, undefined, { look, variant: index, bare: tile.feature !== null });
+      // Under a feature the ground is bare, as in the reference picture; under
+      // an improvement too, so no tuft, stalk or cactus pokes out between the fields.
+      const bare = tile.feature !== null || tile.improvement !== null;
+      const ground = sheet.get(`ground.${tile.terrain}`, undefined, { look, variant: index, bare });
       stamp(ground, origin.px, origin.py);
     }
     for (const index of list) {
@@ -111,10 +119,15 @@ export function createTerrainLayer(sheet: SpriteSheet): TerrainLayer {
     }
     for (const index of list) {
       const tile = view.tiles[index];
-      if (tile === null || tile.feature === null) continue;
+      if (tile === null || (tile.feature === null && tile.improvement === null)) continue;
       const origin = tileOrigin(tileCoord(index, view));
       const look: SpriteLook = tile.visible ? 'normal' : 'fogged';
-      stamp(sheet.get(`feature.${tile.feature}`, undefined, { look, on: tile.terrain }), origin.px, origin.py);
+      if (tile.feature !== null) {
+        stamp(sheet.get(`feature.${tile.feature}`, undefined, { look, on: tile.terrain }), origin.px, origin.py);
+      }
+      if (tile.improvement !== null) {
+        stamp(sheet.get(`improvement.${tile.improvement}`, undefined, { look, on: tile.terrain }), origin.px, origin.py);
+      }
     }
   }
 
@@ -132,10 +145,11 @@ export function createTerrainLayer(sheet: SpriteSheet): TerrainLayer {
    * What has to be wiped is the 26 x 28 box of every changed tile, and of
    * every neighbor of one (a tile's border strip depends on who owns its
    * neighbors). What has to be painted into the wiped boxes is those tiles
-   * and, once more, THEIR neighbors: a sprite never leaves its own tile box,
-   * and a box only overlaps the boxes of the six tiles around it. The
-   * canvas is told to draw nowhere but in the wiped boxes ("clip"), so the
-   * tiles painted for the second reason leave everything else as it is.
+   * and, once more, THEIR neighbors: a sprite of this picture (ground,
+   * feature, improvement) never leaves its own tile box, and a box only
+   * overlaps the boxes of the six tiles around it. The canvas is told to
+   * draw nowhere but in the wiped boxes ("clip"), so the tiles painted for
+   * the second reason leave everything else as it is.
    */
   function paintAround(view: PlayerView, civs: Map<PlayerId, CivId>, changed: TileIndex[]): void {
     const wiped = new Set<TileIndex>();
@@ -176,8 +190,9 @@ export function createTerrainLayer(sheet: SpriteSheet): TerrainLayer {
       if (before.tiles === view.tiles) return; // views share the array for as long as no tile changes
 
       // Compared as whole tiles (like the shared diffViews), so that a field
-      // added to a tile later cannot be forgotten here. Unchanged tiles are
-      // usually the very same object, which jsonEqual sees at once.
+      // added to a tile later cannot be forgotten here (a finished farm is
+      // such a change). Unchanged tiles are usually the very same object,
+      // which jsonEqual sees at once.
       const changed: TileIndex[] = [];
       view.tiles.forEach((tile, index) => {
         if (!jsonEqual(before.tiles[index], tile)) changed.push(index);

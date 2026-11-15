@@ -28,7 +28,7 @@ import { openPasses } from './passes';
  */
 export type MapStreams = (part: string) => RngState;
 
-/** Builds the map for one attempt. Every tile has `cityId: null`. */
+/** Builds the map for one attempt. Every tile has `cityId: null` and `improvement: null`. */
 export function buildMap(grid: Grid, streams: MapStreams): GameMap {
   const isLand = shapeLand(grid, streams(''));
   const ground = paintGround(grid, isLand, streams('moisture'), streams('desert'));
@@ -43,7 +43,7 @@ export function buildMap(grid: Grid, streams: MapStreams): GameMap {
     if (mountains.isMountain[tile]) feature = 'mountains';
     else if (isHills[tile]) feature = 'hills';
     else if (isForest[tile]) feature = 'forest';
-    tiles.push({ terrain: ground.terrain[tile], feature, cityId: null });
+    tiles.push({ terrain: ground.terrain[tile], feature, improvement: null, cityId: null });
   }
   openPasses(grid, tiles);
   return { width: grid.width, height: grid.height, tiles };

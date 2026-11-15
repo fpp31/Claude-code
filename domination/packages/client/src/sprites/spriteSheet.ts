@@ -8,11 +8,13 @@
  */
 
 import { CIVS, CIV_IDS } from '@domination/shared';
-import type { CivId, FeatureId, TerrainId, UnitTypeId } from '@domination/shared';
+import type { CivId, FeatureId, ImprovementId, TerrainId, UnitTypeId } from '@domination/shared';
 import type { MarkerId } from './art/markers';
 import { packImages } from './atlas';
 import { imageToCanvas } from './canvas';
-import { BARE_VERSION, RIM_VERSION, buildCatalog, featureOf, groundTerrain, groundVariantCount, isUnitSprite } from './catalog';
+import {
+  BARE_VERSION, RIM_VERSION, buildCatalog, featureOf, groundTerrain, groundVariantCount, improvementOf, isUnitSprite,
+} from './catalog';
 import type { OwnerColors, RasterImage } from './format';
 import { SPRITE_LOOKS, imageWithLook } from './looks';
 import type { SpriteLook } from './looks';
@@ -20,12 +22,13 @@ import { rasterizeSprite } from './rasterize';
 import { RIM_ROWS_ADDED, imageWithRim } from './rim';
 
 /**
- * Every sprite the game needs. Adding a terrain, feature or unit type to the tables adds an id here automatically.
- * The markers are the selection ring and the highlights (sprites/art/markers.ts).
+ * Every sprite the game needs. Adding a terrain, feature, improvement or unit type to the tables adds an id here
+ * automatically. The markers are the selection ring, the highlights and the two small signs (sprites/art/markers.ts).
  */
 export type SpriteId =
   | `ground.${TerrainId}`
   | `feature.${FeatureId}`
+  | `improvement.${ImprovementId}`
   | `unit.${UnitTypeId}`
   | 'city'
   | `marker.${MarkerId}`;
@@ -47,7 +50,7 @@ export interface Sprite {
 
 /** The finer choices when asking for a sprite. Everything is optional. */
 export interface SpriteOptions {
-  /** 'fogged' for things on explored tiles out of sight, 'spent' for a unit without moves (see looks.ts). Default 'normal'. */
+  /** 'fogged' for things on explored tiles out of sight, 'spent' for a unit that will not move this turn (see looks.ts). Default 'normal'. */
   look?: SpriteLook;
   /**
    * Ground sprites only: any whole number, normally the tile index. The
@@ -57,12 +60,14 @@ export interface SpriteOptions {
   variant?: number;
   /**
    * Ground sprites only: true for the ground without decorations, which
-   * goes under a feature (`variant` is then ignored). Default false.
+   * goes under a feature or an improvement (`variant` is then ignored).
+   * Default false.
    */
   bare?: boolean;
   /**
-   * Feature sprites only: the terrain the feature stands on (hills are
-   * sand-coloured on desert). Default 'grassland'.
+   * Feature and improvement sprites only: the terrain the thing stands on
+   * (hills are sand-coloured on desert; a farm on plains grows wheat).
+   * Default 'grassland'.
    */
   on?: TerrainId;
   /**
@@ -75,10 +80,11 @@ export interface SpriteOptions {
 
 export interface SpriteSheet {
   /**
-   * The sprite for an id. Ground and feature sprites ignore `owner`. Unit
-   * and city sprites are tinted in the owner's colours and need it; without
-   * an owner they come in neutral grey (NEUTRAL_OWNER), so that something
-   * owned by a player the view does not list is still drawn.
+   * The sprite for an id. Ground, feature, improvement and marker sprites
+   * ignore `owner`. Unit and city sprites are tinted in the owner's colours
+   * and need it; without an owner they come in neutral grey
+   * (NEUTRAL_OWNER), so that something owned by a player the view does not
+   * list is still drawn.
    * The same call always returns the same Sprite (cached).
    */
   get(id: SpriteId, owner?: CivId, options?: SpriteOptions): Sprite;
@@ -198,7 +204,7 @@ function versionFor(id: SpriteId, options: SpriteOptions): string {
   if (terrain !== null) {
     return options.bare ? BARE_VERSION : String(pickVariant(options.variant ?? 0, groundVariantCount(terrain)));
   }
-  if (featureOf(id) !== null) return options.on ?? 'grassland';
+  if (featureOf(id) !== null || improvementOf(id) !== null) return options.on ?? 'grassland';
   if (isUnitSprite(id)) return options.rim ? RIM_VERSION : '';
   return '';
 }

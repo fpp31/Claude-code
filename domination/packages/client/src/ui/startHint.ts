@@ -1,8 +1,8 @@
 /**
  * The "First steps" note: a few words at the very start of a game that say
- * what to touch first. It sits where the unit and city panels appear
- * (bottom left), is shown only while nothing is selected, and is gone for
- * good once the player has founded a city.
+ * what to touch first. It sits where the unit and city panels and the tile
+ * card appear (bottom left), is shown only while none of them is, and is
+ * gone for good once the player has founded a city.
  */
 
 import type { AppState, Store } from '../state/store';
@@ -13,8 +13,9 @@ import { firstStepsText } from './texts';
 
 /**
  * The note (TEST_IDS.startHint) is hidden unless there is a game, nothing
- * is selected and firstStepsText(view) has something to say. It has no
- * buttons and sends nothing. Built once; updated in place.
+ * is selected, no tile card is open (state.inspectedTile is null) and
+ * firstStepsText(view) has something to say. It has no buttons and sends
+ * nothing. Built once; updated in place.
  */
 export function mountStartHint(parent: HTMLElement, store: Store): Unmount {
   const text = h('p', { className: 'panel-hint' });
@@ -28,7 +29,8 @@ export function mountStartHint(parent: HTMLElement, store: Store): Unmount {
   parent.append(panel);
 
   function update(state: AppState): void {
-    const words = state.game === null || state.selection !== null ? null : firstStepsText(state.game.view);
+    const somethingElseShows = state.selection !== null || state.inspectedTile !== null;
+    const words = state.game === null || somethingElseShows ? null : firstStepsText(state.game.view);
     setHidden(panel, words === null);
     if (words !== null) setText(text, words);
   }

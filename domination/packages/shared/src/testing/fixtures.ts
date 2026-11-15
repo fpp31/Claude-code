@@ -57,26 +57,43 @@ const ROME_TILE: TileIndex = 4 * 14 + 3;
 const THEBES_TILE: TileIndex = 3 * 14 + 10;
 const OWN_WARRIOR_TILE: TileIndex = 3 * 14 + 5;
 const OWN_SETTLER_TILE: TileIndex = 6 * 14 + 8;
+/** Plains on Rome's land: the Worker is building a farm here. */
+const OWN_WORKER_TILE: TileIndex = 5 * 14 + 3;
+/** Grassland on Rome's land, worked by a citizen: a finished farm. */
+const FARM_TILE: TileIndex = 3 * 14 + 3;
+/** Desert hills on Egypt's land, explored and out of sight: a mine the player remembers. */
+const MINE_TILE: TileIndex = 2 * 14 + 10;
 const FOREIGN_WARRIOR_TILE: TileIndex = 4 * 14 + 7;
 /** Centre of an area the player explored earlier and has since left. */
 const OLD_EXPLORED_CENTER: TileIndex = 3 * 14 + 9;
 
 /**
  * A plausible view for player 'p1' (Rome) in turn 7:
- *  - the city of Rome (population 2, building a Warrior) with its territory;
+ *  - the city of Rome (population 2) with its territory; its build queue
+ *    holds a Warrior (being built) and a Scout;
  *  - an own Warrior and an own Settler (the Settler may found a city);
+ *  - an own Worker at work: it is building a farm on plains south of Rome
+ *    and has three turns to go;
+ *  - a finished farm on a grassland tile that a citizen of Rome works;
  *  - a Warrior of 'p2' (Egypt) in sight;
- *  - the Egyptian city of Thebes, remembered but currently out of sight;
+ *  - the Egyptian city of Thebes, remembered but currently out of sight,
+ *    and a mine in the hills next to it, remembered too;
  *  - a ring of fogged (explored, not visible) tiles and never-seen tiles.
+ *
+ * The numbers agree with each other: Rome's food and production are what
+ * its centre, the farm and one more grassland tile give, and the turns of
+ * the queue and of the build menu are what the forecast of the rules gives
+ * for them (buildPlan in rules/city.ts) if Rome grows onto open grassland.
  */
 export function sampleView(): PlayerView {
   const map = sampleMap();
   const count = tileCount(map);
 
-  // In sight now: around both units and around Rome's territory.
+  // In sight now: around the three units and around Rome's territory.
   const visible: boolean[] = new Array(count).fill(false);
   for (const tile of tilesInRange(OWN_WARRIOR_TILE, 2, map)) visible[tile] = true;
   for (const tile of tilesInRange(OWN_SETTLER_TILE, 3, map)) visible[tile] = true;
+  for (const tile of tilesInRange(OWN_WORKER_TILE, 2, map)) visible[tile] = true;
   for (const tile of tilesInRange(ROME_TILE, 3, map)) visible[tile] = true;
 
   // Seen at some point: everything in sight plus an area visited earlier.
@@ -98,6 +115,7 @@ export function sampleView(): PlayerView {
     tiles.push({
       terrain: map.tiles[tile].terrain,
       feature: map.tiles[tile].feature,
+      improvement: tile === FARM_TILE ? 'farm' : tile === MINE_TILE ? 'mine' : null,
       owner: ownerOf(tile),
       visible: visible[tile],
     });
@@ -106,11 +124,23 @@ export function sampleView(): PlayerView {
   const units: UnitView[] = [
     {
       id: 'u1_k7m2qd', type: 'warrior', owner: 'p1', tile: OWN_WARRIOR_TILE,
-      own: { movesLeft: 2, foundCityError: 'cannotFoundCity' },
+      own: { movesLeft: 2, foundCityError: 'cannotFoundCity', job: null, jobOptions: [] },
+    },
+    {
+      id: 'u1_m4wq7e', type: 'worker', owner: 'p1', tile: OWN_WORKER_TILE,
+      own: {
+        movesLeft: 2,
+        foundCityError: 'cannotFoundCity',
+        job: { improvement: 'farm', turnsWorked: 1, turnsTotal: 4, turnsLeft: 3 },
+        jobOptions: [
+          { improvement: 'farm', turns: 4, error: 'unitBusy' },
+          { improvement: 'mine', turns: 5, error: 'unitBusy' },
+        ],
+      },
     },
     {
       id: 'u1_x3fp9a', type: 'settler', owner: 'p1', tile: OWN_SETTLER_TILE,
-      own: { movesLeft: 2, foundCityError: null },
+      own: { movesLeft: 2, foundCityError: null, job: null, jobOptions: [] },
     },
     { id: 'u2_b8nq4t', type: 'warrior', owner: 'p2', tile: FOREIGN_WARRIOR_TILE, own: null },
   ];
@@ -121,18 +151,21 @@ export function sampleView(): PlayerView {
       own: {
         foodStored: 4,
         foodToGrow: foodToGrow(2),
-        foodPerTurn: 2,
-        production: { kind: 'unit', unitType: 'warrior' },
+        // The centre 2, the farm 3 and a grassland tile 2, minus 4 eaten.
+        foodPerTurn: 3,
+        buildQueue: [
+          { item: { kind: 'unit', unitType: 'warrior' }, cost: 18, turns: 4, wait: null },
+          { item: { kind: 'unit', unitType: 'scout' }, cost: 12, turns: 7, wait: null },
+        ],
+        held: null,
         productionStored: 6,
-        productionCost: 18,
         productionPerTurn: 3,
-        turnsLeft: 4,
-        productionBlocked: null,
-        worked: [3 * 14 + 3, 4 * 14 + 4],
+        worked: [FARM_TILE, 4 * 14 + 4],
         buildOptions: [
-          { item: { kind: 'unit', unitType: 'warrior' }, cost: 18, turns: 4 },
-          { item: { kind: 'unit', unitType: 'scout' }, cost: 12, turns: 2 },
-          { item: { kind: 'unit', unitType: 'settler' }, cost: 30, turns: 8 },
+          { item: { kind: 'unit', unitType: 'warrior' }, cost: 18, turns: 12, wait: null, addError: null },
+          { item: { kind: 'unit', unitType: 'scout' }, cost: 12, turns: 10, wait: null, addError: null },
+          { item: { kind: 'unit', unitType: 'settler' }, cost: 30, turns: 14, wait: null, addError: null },
+          { item: { kind: 'unit', unitType: 'worker' }, cost: 20, turns: 12, wait: null, addError: null },
         ],
       },
     },

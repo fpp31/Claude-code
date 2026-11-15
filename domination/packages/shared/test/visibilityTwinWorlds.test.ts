@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  IMPROVEMENTS,
+  RULES,
   UNITS,
   applyAction,
   buildPlayerView,
@@ -11,7 +13,7 @@ import {
   seedRng,
   tileMoveCost,
 } from '../src/index';
-import type { Action, GameState, PlayerId, TileIndex } from '../src/index';
+import type { Action, BuildItem, GameState, PlayerId, TileIndex } from '../src/index';
 import {
   MEADOW,
   actWithEvents,
@@ -22,11 +24,13 @@ import {
   endTurnForAll,
   newGame,
   placeUnit,
+  queueOf,
   send,
   tamper,
   unitOf,
+  workerOn,
 } from './rulesKit';
-import { LONG_TEST, sensibleAction, wildAttempt } from './rulesRandomPlay';
+import { LONG_TEST, nextStepOfThePlan, sensibleAction, wildAttempt } from './rulesRandomPlay';
 import { inSight } from './visibilityOracle';
 import { borderScene, fogScene } from './visibilityScenes';
 
@@ -183,18 +187,33 @@ describe('NO LEAK: twin worlds (WP2)', () => {
 
           // The hidden players act, differently in each world. (They do not
           // end their turns here: who has ended is public, so that happens
-          // below, in both worlds alike.) In world B, p3 never founds a city.
+          // below, in both worlds alike.) In world B, p3 never founds a city
+          // and nobody ever sets a Worker to work.
           for (const hidden of ['p2', 'p3']) {
             const actionA = sensibleAction(diceA, buildPlayerView(worldA, hidden));
             if (actionA !== null && actionA.type !== 'endTurn' && actionA.type !== 'cancelEndTurn') {
               worldA = hiddenAction(worldA, hidden, actionA);
             }
             const actionB = sensibleAction(diceB, buildPlayerView(worldB, hidden));
-            const allowedInB = actionB !== null && !(hidden === 'p3' && actionB.type === 'foundCity');
+            const allowedInB = actionB !== null && !(hidden === 'p3' && actionB.type === 'foundCity') && actionB.type !== 'startJob';
             if (actionB !== null && allowedInB && actionB.type !== 'endTurn' && actionB.type !== 'cancelEndTurn') {
               worldB = hiddenAction(worldB, hidden, actionB);
             }
           }
+        }
+
+        // On top of the dice, two players follow a plan (at most three steps
+        // of it a turn): p1, in both worlds alike, and the hidden p2 in
+        // world A only. Both want a Worker and an improvement.
+        for (let step = 0; step < 3; step++) {
+          const planned = worldA.players[0].endedTurn ? null : nextStepOfThePlan(buildPlayerView(worldA, 'p1'));
+          if (planned !== null) {
+            const result = applyAction(deepFreeze(worldA), 'p1', worldA.turn, planned);
+            if (result.ok) for (const event of filterEvents(result.events, 'p1')) newsForP1.add(event.type);
+            [worldA, worldB] = sameForP1(worldA, worldB, 'p1', worldA.turn, planned, `${seed}, turn ${turn}: p1's plan, ${JSON.stringify(planned)}`);
+          }
+          const hiddenPlan = worldA.players[1].endedTurn ? null : nextStepOfThePlan(buildPlayerView(worldA, 'p2'));
+          if (hiddenPlan !== null) worldA = hiddenAction(worldA, 'p2', hiddenPlan);
         }
 
         // Everybody ends the turn, in the same order in both worlds.
@@ -225,9 +244,16 @@ describe('NO LEAK: twin worlds (WP2)', () => {
       expect(citiesOf(worldB, 'p3')).toBe(0);
       expect(JSON.stringify(worldA.units)).not.toBe(JSON.stringify(worldB.units));
       expect(JSON.stringify(worldA.map)).not.toBe(JSON.stringify(worldB.map));
-      // ...while p1 lived a full life in both: cities, growth, new units, the lot.
+      // ...down to what stands on the land: across the sea, world A has
+      // improvements (p2's plan saw to that) and world B has none.
+      const builtInTheEast = (world: GameState): number =>
+        world.map.tiles.filter((tile, index) => tile.improvement !== null && index % world.map.width > LAST_COLUMN_P1_CAN_SEE).length;
+      expect(builtInTheEast(worldA)).toBeGreaterThan(0);
+      expect(builtInTheEast(worldB)).toBe(0);
+      // ...while p1 lived a full life in both: cities, growth, new units, a finished improvement, the lot.
       expect(citiesOf(worldA, 'p1')).toBeGreaterThan(0);
-      expect([...newsForP1].sort()).toEqual(['cityFounded', 'cityGrew', 'turnStarted', 'unitBuilt', 'unitMoved']);
+      expect([...newsForP1].sort()).toEqual(['cityFounded', 'cityGrew', 'improvementBuilt', 'turnStarted', 'unitBuilt', 'unitMoved']);
+      expect(worldA.map.tiles.some((tile, index) => tile.improvement !== null && index % worldA.map.width <= LAST_COLUMN_P1_CAN_SEE)).toBe(true);
       expect(JSON.stringify(buildPlayerView(worldB, 'p1'))).toBe(JSON.stringify(buildPlayerView(worldA, 'p1')));
     }
   });
@@ -311,10 +337,15 @@ describe('NO LEAK: twin worlds (WP2)', () => {
       { type: 'moveUnit', unitId: hiddenWarriorId, path: [at(map, 11, 5)] },
       { type: 'foundCity', unitId: hiddenScoutId },
       { type: 'foundCity', unitId: hiddenWarriorId },
-      { type: 'setProduction', cityId: thebes.id, item: { kind: 'unit', unitType: 'warrior' } },
-      { type: 'setProduction', cityId: thebes.id, item: { kind: 'unit', unitType: 'dragon' as 'scout' } },
+      { type: 'setBuildQueue', cityId: thebes.id, queue: queueOf('warrior') },
+      { type: 'setBuildQueue', cityId: thebes.id, queue: [{ kind: 'unit', unitType: 'dragon' as 'scout' }] },
+      { type: 'startJob', unitId: hiddenScoutId, improvement: 'farm' },
+      { type: 'startJob', unitId: hiddenWarriorId, improvement: 'dragon' as 'farm' },
+      { type: 'stopJob', unitId: hiddenScoutId },
       { type: 'moveUnit', unitId: 'u2_madeup', path: [step] },
-      { type: 'setProduction', cityId: 'c2_madeup', item: { kind: 'unit', unitType: 'warrior' } },
+      { type: 'setBuildQueue', cityId: 'c2_madeup', queue: queueOf('warrior') },
+      { type: 'startJob', unitId: 'u2_madeup', improvement: 'mine' },
+      { type: 'stopJob', unitId: 'u2_madeup' },
     ];
     for (const probe of probes) {
       const exists = send(world, 'p1', probe);
@@ -327,6 +358,115 @@ describe('NO LEAK: twin worlds (WP2)', () => {
     expect(new Set(probes.map((probe) => codeOf(send(world, 'p1', probe))))).toEqual(new Set(['noSuchUnit', 'noSuchCity']));
     // The owner's own answer shows the ids are real.
     expect(codeOf(send(world, 'p2', { type: 'moveUnit', unitId: hiddenScoutId, path: [step] }))).toBeNull();
+  });
+
+  it('the setBuildQueue probes get the same answers in both worlds', () => {
+    // Two worlds that p1 cannot tell apart. In world A the fogged city of
+    // p2 has a full queue and a full store; in world B its queue is empty;
+    // in world C the city is not there at all.
+    const { state, thebes } = fogScene();
+    const worldA = tamper(state, (draft) => {
+      draft.cities[thebes.id].buildQueue = Array.from({ length: RULES.maxQueueLength }, () => queueOf('settler')[0]);
+      draft.cities[thebes.id].productionStored = 4321;
+    });
+    const worldB = state;
+    const worldC = tamper(state, (draft) => {
+      delete draft.cities[thebes.id];
+      for (const tile of draft.map.tiles) if (tile.cityId === thebes.id) tile.cityId = null;
+    });
+    expect(worldB.cities[thebes.id].buildQueue).toEqual([]);
+    const viewOfP1 = JSON.stringify(buildPlayerView(worldA, 'p1'));
+    expect(JSON.stringify(buildPlayerView(worldB, 'p1'))).toBe(viewOfP1);
+    expect(JSON.stringify(buildPlayerView(worldC, 'p1'))).toBe(viewOfP1);
+
+    const tooLong = Array.from({ length: RULES.maxQueueLength + 1 }, () => queueOf('scout')[0]);
+    const lists: BuildItem[][] = [
+      [],
+      queueOf('warrior'),
+      queueOf('settler', 'settler'),
+      Array.from({ length: RULES.maxQueueLength }, () => queueOf('settler')[0]), // the very queue the city has in world A
+      tooLong,
+      [{ kind: 'unit', unitType: 'dragon' } as unknown as BuildItem],
+      [null as unknown as BuildItem],
+    ];
+    for (const cityId of [thebes.id, 'c2_madeup', 'constructor']) {
+      for (const queue of lists) {
+        const probe: Action = { type: 'setBuildQueue', cityId, queue };
+        const what = `${cityId}, ${JSON.stringify(queue)}`;
+        const answers = [worldA, worldB, worldC].map((world) => JSON.stringify(send(world, 'p1', probe)));
+        // One code for "not yours" and "does not exist", whatever the list
+        // is: not "the same queue as now", not "full", not "cannot build".
+        expect(codeOf(send(worldA, 'p1', probe)), what).toBe('noSuchCity');
+        expect(answers[1], what).toBe(answers[0]);
+        expect(answers[2], what).toBe(answers[0]);
+      }
+    }
+    // The ids and the queues are real: the owner gets other answers.
+    expect(codeOf(send(worldA, 'p2', { type: 'setBuildQueue', cityId: thebes.id, queue: tooLong }))).toBe('queueFull');
+    const same = send(worldA, 'p2', { type: 'setBuildQueue', cityId: thebes.id, queue: lists[3] });
+    expect(same.ok && !same.changed).toBe(true);
+    const other = send(worldB, 'p2', { type: 'setBuildQueue', cityId: thebes.id, queue: lists[3] });
+    expect(other.ok && other.changed).toBe(true);
+
+    // p1's own queue edits get the same answers and leave the same views, too.
+    const rome = Object.values(state.cities).find((city) => city.owner === 'p1');
+    let [a, b] = [worldA, worldB];
+    for (const queue of [queueOf('warrior'), queueOf('warrior', 'worker'), queueOf('warrior', 'worker'), tooLong, []]) {
+      [a, b] = sameForP1(a, b, 'p1', a.turn, { type: 'setBuildQueue', cityId: rome?.id ?? '', queue }, JSON.stringify(queue));
+    }
+  });
+
+  it('an improvement a hidden player builds in one world only changes nothing p1 is sent', () => {
+    // The fog scene twice. In world A p2 has a Worker on Theban land that p1
+    // has never seen, and sets it to build a farm; world B has neither.
+    const { state } = fogScene();
+    const site = at(state.map, 14, 5);
+    expect(buildPlayerView(state, 'p1').tiles[site]).toBeNull();
+    const hidden = workerOn(state, 'p2', site);
+    let worldA = hidden.state;
+    let worldB = state;
+    sameViewForP1(worldA, worldB, 'a hidden Worker');
+
+    // The order, and every turn of the work: p1 does the same in both worlds
+    // and is told the same; what p2 does in world A sends p1 nothing.
+    worldA = hiddenAction(worldA, 'p2', { type: 'startJob', unitId: hidden.workerId, improvement: 'farm' });
+    sameViewForP1(worldA, worldB, 'the job has begun');
+    const warrior = unitOf(worldA, 'p1', 'warrior');
+    for (let turn = 0; turn < IMPROVEMENTS.farm.turns; turn++) {
+      const there = worldA.units[warrior.id].tile === at(state.map, 3, 5) ? at(state.map, 2, 5) : at(state.map, 3, 5);
+      const steps: [PlayerId, Action][] = [
+        ['p1', { type: 'moveUnit', unitId: warrior.id, path: [there] }],
+        ['p1', { type: 'startJob', unitId: hidden.workerId, improvement: 'farm' }], // a probe with the stolen id
+        ['p1', { type: 'endTurn' }],
+        ['p2', { type: 'endTurn' }],
+      ];
+      for (const [playerId, action] of steps) {
+        [worldA, worldB] = sameForP1(worldA, worldB, playerId, worldA.turn, action, `turn ${turn}: ${action.type} of ${playerId}`);
+      }
+    }
+
+    // The farm stands in world A, its owner was told, and p1 knows nothing of it.
+    expect(worldA.map.tiles[site].improvement).toBe('farm');
+    expect(worldB.map.tiles[site].improvement).toBeNull();
+    expect(worldA.units[hidden.workerId].job).toBeNull();
+    expect(buildPlayerView(worldA, 'p2').tiles[site]).toMatchObject({ improvement: 'farm' });
+    expect(JSON.stringify(buildPlayerView(worldA, 'p1'))).not.toContain('"farm"');
+    sameViewForP1(worldA, worldB, 'the farm is finished');
+
+    // The last resolution, looked at alone: world A's has the news for p2, and nothing more for p1 than world B's.
+    const almost = tamper(hidden.state, (draft) => {
+      draft.units[hidden.workerId].job = { improvement: 'farm', turnsWorked: IMPROVEMENTS.farm.turns - 1 };
+    });
+    const finishing = endTurnForAll(almost);
+    const quiet = endTurnForAll(state);
+    expect(filterEvents(finishing.events, 'p2').map((event) => event.type)).toEqual(['improvementBuilt', 'turnStarted']);
+    expect(filterEvents(finishing.events, 'p1')).toEqual(filterEvents(quiet.events, 'p1'));
+    expect(filterEvents(finishing.events, 'p1').map((event) => event.type)).toEqual(['turnStarted']);
+    // The patch p1 would be sent is the same in both worlds (the turn number, and nothing about that tile).
+    const patchA = diffViews(buildPlayerView(almost, 'p1'), buildPlayerView(finishing.state, 'p1'));
+    const patchB = diffViews(buildPlayerView(state, 'p1'), buildPlayerView(quiet.state, 'p1'));
+    expect(patchA).toEqual(patchB);
+    expect(JSON.stringify(patchA)).not.toContain('farm');
   });
 
   it('a refused first step is always about a tile next to the unit, which its owner sees', () => {
@@ -396,7 +536,9 @@ describe('NO LEAK: twin worlds (WP2)', () => {
 
       // The same with a hidden foreign city on the path.
       const walled = arrange(alone, (draft) => {
-        draft.cities.c2_wall = { id: 'c2_wall', owner: 'p2', name: 'Wall', tile: blockerTile, population: 1, foodStored: 0, production: null, productionStored: 0 };
+        draft.cities.c2_wall = {
+          id: 'c2_wall', owner: 'p2', name: 'Wall', tile: blockerTile, population: 1, foodStored: 0, buildQueue: [], productionStored: 0,
+        };
         draft.map.tiles[blockerTile].cityId = 'c2_wall';
       });
       const atTheGate = actWithEvents(walled, 'p1', move);
@@ -427,7 +569,7 @@ describe('NO LEAK: twin worlds (WP2)', () => {
     const scene = borderScene();
     const busy = arrange(scene.state, (draft) => {
       for (const city of Object.values(draft.cities)) {
-        city.production = { kind: 'unit', unitType: 'scout' };
+        city.buildQueue = queueOf('scout');
         city.productionStored = UNITS.scout.cost;
       }
     });

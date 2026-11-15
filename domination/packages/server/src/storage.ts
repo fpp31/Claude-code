@@ -23,8 +23,8 @@ import {
   writeSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { STATE_SCHEMA } from '@domination/shared';
-import type { GameCode } from '@domination/shared';
+import { STATE_SCHEMA, checkInvariants, migrateGameState } from '@domination/shared';
+import type { GameCode, GameState } from '@domination/shared';
 import { ROOM_FILE_FORMAT } from './roomFile';
 import type { RoomFile } from './roomFile';
 import { checkRoomFile, serializeRoomFile } from './roomFileText';
@@ -41,23 +41,24 @@ export interface Storage {
    *    starts.
    *  - Files with an older `format` are upgraded in memory by the migration
    *    steps in this module (none exist yet for format 1). A started game
-   *    whose `game.schema` is older than STATE_SCHEMA is upgraded by the
-   *    game-state migrations of the shared package. None exist yet for
-   *    schema 1, and the shared package exports no migration function yet:
-   *    the first change to the layout of GameState adds one next to
-   *    STATE_SCHEMA (so it stays pure and testable) and calls it at the
-   *    marked place in this file.
+   *    whose `game.schema` is older than STATE_SCHEMA is brought up to date
+   *    in memory by migrateGameState of the shared package; the file is
+   *    rewritten with the next save.
    *  - The version numbers are looked at BEFORE the detailed check of the
    *    file, so a save from another version that also looks wrong to this
    *    one (an unknown civilization, say) is left alone, not moved aside as
    *    damaged.
    *  - A file from ANOTHER VERSION of the game that cannot be brought up to
-   *    date (`format` newer than ROOM_FILE_FORMAT, or `game.schema` still not
-   *    equal to STATE_SCHEMA after the migrations) is LEFT EXACTLY AS IT IS
-   *    and skipped, with a clear log line naming the file and both version
-   *    numbers. It is neither renamed nor loaded: playing it with the wrong
-   *    layout would damage it at the next save, and leaving it in place
-   *    means it simply works again once the right code runs.
+   *    date (`format` newer than ROOM_FILE_FORMAT, or a `game.schema` that
+   *    migrateGameState cannot convert: it knows no way from that layout, the
+   *    save does not have that layout's shape, or the converted game does
+   *    not pass the rules' health check, checkInvariants) is LEFT EXACTLY AS
+   *    IT IS and skipped, with a clear log line naming the file and both
+   *    version numbers. It is neither renamed nor loaded: playing it with
+   *    the wrong layout would damage it at the next save, and leaving it in
+   *    place means it simply works again once the right code runs. No copy
+   *    of an older save is kept when it is converted: backing up is copying
+   *    the data folder before updating the game.
    */
   loadAll(): RoomFile[];
 
@@ -202,20 +203,52 @@ export function createStorage(dataDir: string, log: (line: string) => void, writ
       content = migrate(content);
     }
 
-    // The game state has a version of its own. Migrations for older states
-    // belong to the shared package, next to STATE_SCHEMA; none exist yet for
-    // schema 1. When the first one is written, call it here, before this check.
+    // The game state has a version of its own. An older layout is brought up
+    // to date by the shared package's migrateGameState (pure; in memory).
     //
     // This comes BEFORE the file is checked in detail: a game from another
     // version may well look wrong to this one (a civilization it does not
     // know, say), and must still be left alone rather than moved aside.
     const schema = gameSchemaOf(content);
     if (schema !== null && schema !== STATE_SCHEMA) {
+      let converted: GameState | null;
+      try {
+        converted = migrateGameState(content.game);
+      } catch (error) {
+        log(
+          `Saved games: ${name} was left alone and NOT loaded. Its game state has layout ${schema} and could not be ` +
+            `brought up to layout ${STATE_SCHEMA} (${describe(error)}).`,
+        );
+        return null;
+      }
+      if (converted === null) {
+        log(
+          `Saved games: ${name} was left alone and NOT loaded. Its game state has layout ${schema}, ` +
+            `this version of the game plays layout ${STATE_SCHEMA}. Run the matching version to play it.`,
+        );
+        return null;
+      }
+      // A conversion that leaves a game the rules call unhealthy must never
+      // reach the file: the first accepted action would save it over what
+      // the older version wrote. So it counts as a failed conversion.
+      let problems: string[];
+      try {
+        problems = checkInvariants(converted);
+      } catch (error) {
+        problems = [`the health check itself failed: ${describe(error)}`];
+      }
+      if (problems.length > 0) {
+        log(
+          `Saved games: ${name} was left alone and NOT loaded. Its game state has layout ${schema}; brought up to ` +
+            `layout ${STATE_SCHEMA} it has ${problems.length} problem(s), the first: ${problems[0]}`,
+        );
+        return null;
+      }
+      content = { ...content, game: converted };
       log(
-        `Saved games: ${name} was left alone and NOT loaded. Its game state has layout ${schema}, ` +
-          `this version of the game plays layout ${STATE_SCHEMA}. Run the matching version to play it.`,
+        `Saved games: ${name} was made by an older version of the game (layout ${schema}) and has been brought up to ` +
+          `layout ${STATE_SCHEMA}. The file itself is rewritten with the next change to the game.`,
       );
-      return null;
     }
 
     const checked = checkRoomFile(content, code);

@@ -62,8 +62,9 @@ function select(tile: TileIndex): void {
   const unit = view.units.find((candidate) => candidate.tile === tile && candidate.owner === view.you);
   const city = view.cities.find((candidate) => candidate.tile === tile && candidate.owner === view.you);
   if (unit !== undefined) {
-    // Not the real movement rules: simply the explored tiles next to the unit.
-    const reachable = neighbors(tile, view).filter((neighbor) => view.tiles[neighbor] !== null);
+    // Not the real movement rules: simply the explored tiles next to the unit. A unit at work goes nowhere.
+    const atWork = unit.own !== null && unit.own.job !== null;
+    const reachable = atWork ? [] : neighbors(tile, view).filter((neighbor) => view.tiles[neighbor] !== null);
     setOverlay({ selectedTile: tile, selectedUnitId: unit.id, reachable, path: [], workedTiles: [] });
   } else if (city !== undefined) {
     setOverlay({ selectedTile: tile, selectedUnitId: null, reachable: [], path: [], workedTiles: city.own?.worked ?? [] });
@@ -78,7 +79,8 @@ function describe(tile: TileIndex | null): string {
   const x = tile % view.width;
   const y = Math.floor(tile / view.width);
   if (seen === null) return `tile ${tile} (${x}, ${y}): never seen`;
-  return `tile ${tile} (${x}, ${y}): ${seen.feature ?? seen.terrain}${seen.visible ? '' : ', fogged'}`;
+  const built = seen.improvement === null ? '' : ` with a ${seen.improvement}`;
+  return `tile ${tile} (${x}, ${y}): ${seen.feature ?? seen.terrain}${built}${seen.visible ? '' : ', fogged'}`;
 }
 
 // ---- Input: the smallest version of what input/mapInput.ts does ----

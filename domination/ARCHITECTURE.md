@@ -1,4 +1,4 @@
-# Domination: architecture (phase 1)
+# Domination: architecture (phase 1 and round 2)
 
 This file is the map of the project. The precise contracts live in the code as types and doc comments; where this file and a doc comment disagree, the doc comment wins and this file should be fixed.
 
@@ -25,18 +25,21 @@ The ideas everything else follows from:
 **Rules engine (`shared`)**
 
 - State is plain JSON (`types.ts`). Positions are always a `TileIndex`; `{x, y}` coordinates exist only inside `hex.ts` and the renderer.
-- A tile is `terrain` (ocean, coast, grassland, plains, desert) + optional `feature` (forest, hills, mountains) + owning `cityId`. A feature's numbers *replace* the ground's. Rules read tiles only through `tileMoveCost`, `tileYields`, `tileIsWorkable`, `tileAllowsCity`.
+- A tile is `terrain` (ocean, coast, grassland, plains, desert) + optional `feature` (forest, hills, mountains) + owning `cityId` + optional `improvement` (a farm or a mine, `data/improvements.ts`). A feature's numbers *replace* the ground's; an improvement's are *added*. Rules read tiles only through `tileMoveCost`, `tileYields`, `tileIsWorkable`, `tileAllowsCity`, `cityCenterYields` and `improvementFits`.
 - Territory has one source of truth: `tile.cityId`. Worked tiles and yields are derived by `cityEconomy`, never stored.
 - `applyAction(state, playerId, turn, action)` validates fully, then works on a copy. Every action carries the turn it was issued in (`staleTurn`). Accepted no-ops are reported with `changed: false`. "Not yours" and "does not exist" share one error code.
 - A move carries the path the client chose from its own view. The server walks it one step at a time on the truth, refreshing sight after each step, and stops before the first illegal step. The server never path-finds, so a route cannot give hidden things away.
 - One movement implementation behind the small `Board` interface (`boardFromState` on the server, `boardFromView` on the client), so the reachable-tile highlight matches what the server accepts.
-- Turns are simultaneous. The turn resolves inside the `endTurn` action that makes everybody ready (same call, same save). `resolveTurn` is a short list of named steps.
+- Turns are simultaneous. The turn resolves inside the `endTurn` action that makes everybody ready (same call, same save). `resolveTurn` is a short list of named steps: `runCities`, `runJobs`, `refreshUnits`, `beginNextTurn`, `updateKnowledge`. `runJobs` comes after `runCities`: an improvement that is finished when a turn resolves first counts when the next turn resolves (the rule a new citizen already follows), so a city gets exactly what its panel showed.
 - Randomness: one seed string, several independent streams (`seedRng(seed, stream)`): the map, gameplay dice (unused in phase 1), and one id stream per player.
 - Unit and city ids are random, per player (`u3_k7m2qd`), so the ids a player sees depend only on their own actions.
-- Fog of war: visible = within sight of own units, plus own territory and one ring around it. Explored tiles and last-seen owners/cities are remembered per player *on the server*, inside the game state.
-- Events (`GameEvent`) are cosmetic news for toasts. The engine hands out every event together with its audience (`AddressedEvent`: `to` is a list of players or `'all'`); `filterEvents` picks one player's events and drops the audience lists, which never leave the server. Phase 1 addresses a player's events to that player only, plus `turnStarted` to all. The client must work if events are ignored.
+- Fog of war: visible = within sight of own units, plus own territory and one ring around it. Explored tiles and last-seen owners, cities and improvements are remembered per player *on the server*, inside the game state.
+- Events (`GameEvent`) are cosmetic news for toasts. The engine hands out every event together with its audience (`AddressedEvent`: `to` is a list of players or `'all'`); `filterEvents` picks one player's events and drops the audience lists, which never leave the server. Phase 1 addresses a player's events to that player only, plus `turnStarted` to all; `improvementBuilt` (round 2) goes to the owner of the unit that built it. The client must work if events are ignored.
 - Cities are named from their civilization's list in founding order. That makes "how many cities has this player founded" readable from a city's name, which is accepted and written down as a public fact (`protocol.ts`).
-- A city's view says why a finished item is not appearing (`productionBlocked`: needs population, or no free tile); one function (`productionBlocked` in `rules/city.ts`) serves both turn resolution and the view.
+- A city has a build QUEUE and one store of production. One turn of a city is ONE function, `runCityTurn` (`rules/city.ts`). Turn resolution calls it; the view's forecast (`buildPlan`) calls the same function on a scratch copy, turn after turn (at most `RULES.forecastTurns`), so every "in N turns" of the city panel is what the engine will do if nothing outside the city changes. `OwnCityDetail.held` says when the first entry is paid for and waiting (the city must grow first, or there is no free tile for the unit).
+- A queue is changed by ONE action that carries the whole list (`setBuildQueue`), as a move carries its path; the engine stores only objects it made itself. No queue edit touches what the city has saved.
+- Citizens are placed in two steps (`cityEconomy`): the best tiles first, then food before production while the city would not grow (`RULES.minFoodSurplus`). So no improvement and no terrain can stop a city growing while it owns food that nobody works.
+- Work in progress lives on the unit (`Unit.job`); a tile changes only when an improvement is finished, and a unit at work does not move (`unitBusy`). Where an improvement may be built is one function behind a small interface (`improvementSiteError`, with `siteOfTile` on the server and `siteInView` on the client), the pattern of `Board`. Other players learn nothing of a job or a queue: both are orders, and orders are private.
 - Start positions come with hard guarantees (distinct, legal city sites, at least `minCityDistance` apart, room to walk) and stronger ones when the map is not crowded (distance, one landmass, fairness within 70%); the generator checks every result and retries with the next attempt stream until they hold. On a crowded map the stronger ones become aims, in that order, behind one that comes first: nobody is put alone on an island too small to grow on.
 - All balance numbers live in `shared/src/data/`. Table tests guard the relationships fog and rules rely on (for example: a settler sees far enough that "too close to a city" reveals nothing; every unit sees at least as far as it walks in a turn, so the highlighted tiles are exactly the ones the server lets it reach). The numbers that only shape what generated maps look like live in `shared/src/mapgen/tuning.ts`.
 
@@ -50,21 +53,27 @@ The ideas everything else follows from:
 - A socket is attached to at most one room. Joining another game detaches it from the old one only after the join succeeded, and never gives up the old seat; only `leaveGame` does. The room is the authority on which sockets it holds.
 - Per socket: its own `seq` counter (plus one for every `gameSync` and `gameUpdate` sent on it) and last-sent view. Full `gameSync` on attach and on `resync`, `gameUpdate` patches afterwards. `DOMINATION_FULL_SYNC=1` turns patches off.
 - Liveness survives background tabs, whose timers run about once a minute: the client pings every 25 s and gives up only if nothing arrives within 10 s after a ping (never on a late timer alone); the server drops a socket after 150 s of silence.
-- A save from another version of the game (newer file format, or a game-state layout it cannot migrate) is left untouched on disk and not loaded; its code stays reserved.
+- A save from another version of the game (newer file format, or a game-state layout it cannot migrate) is left untouched on disk and not loaded; its code stays reserved. An older layout is brought up to date in memory by `migrateGameState` (`shared/src/stateMigrations.ts`) when the save is loaded, and must then pass `checkInvariants`, or it is left alone like a save from another version; the file is rewritten with the next save, and no copy of the older file is kept.
+- The message check bounds a build queue at 64 entries (`parseMessage.ts`); whether a queue is too long for the rules (`RULES.maxQueueLength`) is the rules' answer, which comes with a request id instead of a closed socket.
 - Start-up refuses a data folder inside the public client folder, and warns loudly about a fixed seed.
-- The server reaches the rules only through the `Rules` bundle (`server/src/rules.ts`); tests can pass a fake.
+- Everything about playing reaches the rules through the `Rules` bundle (`server/src/rules.ts`); tests can pass a fake. Loading is the one exception: `storage.ts` imports `migrateGameState`, `checkInvariants` and `STATE_SCHEMA` directly, so a converted save meets the real health check whatever bundle the server runs with.
 - No absolute paths: defaults are resolved from the source file location to the project root.
 
 **Client**
 
-- No UI framework. Panels are built once and then updated in place (`textContent`, `hidden`, `disabled`), which keeps clicks from being lost when an update arrives mid-press. Names from other players only ever become text nodes.
-- One small store holds everything on screen; game data enters it only from server messages. One action in flight at a time (`busy`, set only when a message really went out). One question, `canActNow`, decides both whether reachable tiles are highlighted and whether a tap moves the unit.
+- No UI framework. Panels are built once and then updated in place (`textContent`, `hidden`, `disabled`; the small helpers for that are in `ui/dom.ts`, among them `setBar` for the progress bars of both panels), which keeps clicks from being lost when an update arrives mid-press. Names from other players only ever become text nodes.
+- One small store holds everything on screen; game data enters it only from server messages. One action in flight at a time (`busy`, set only when a message really went out). One question, `canActNow`, decides both whether reachable tiles are highlighted and whether a tap moves the unit. Buttons that give orders are greyed by `ordersClosed` (no connection, turn ended), with a sentence that says why; never for `busy`, which lasts a blink (a press in that blink is ignored).
+- The words and decisions of the client are pure functions tested in plain Node (`game/`, `state/`, `input/hoverInfo.ts`, `input/gestures.ts`, `input/keys.ts`, `ui/texts.ts`, `ui/hoverPlacement.ts`); the files that touch the page only print them.
+- What a tile says comes from one function, `describeTile` (`game/tileInfo.ts`), used by the hover box and the tile card; the unit panel's one line about its tile (`unitTileText`) is in the same file. It reads the view and the shared tables and functions only, so no place can say what the server did not send. The card and the box store tile numbers, never words: both are rewritten from every new view.
 - `net/identity.ts` is the only place that touches localStorage, the address bar and page reloads, and it works (as a no-op) where they do not exist, so the app logic is tested in plain Node. The token is also kept in memory, so an open page never forgets who it is.
-- End Turn and Cancel share one button; the controller ignores presses for 0.6 s after the button's meaning changed, which makes a double-click or a held Enter key harmless.
+- End Turn and Cancel share one button; the controller ignores presses for 0.6 s after the button's meaning changed, which makes a double-click or a held Enter key harmless. There are three such double-press guards, each where one spot of the screen changes its meaning: End Turn (0.6 s, in the controller), the Worker's Start and Stop (0.6 s, in the controller), and the rows of the build queue (0.6 s, `ui/cityPanel.ts` with `ui/pressGuard.ts`). The add buttons of the queue have none: two quick taps on "Warrior" are two Warriors.
+- A queue edit is composed from the view (`game/queueEdits.ts`) and sent as a whole list; the screen changes only when the server's view comes back.
 - The renderer owns canvas, camera and sprites. The app shell owns input events and what they mean. They meet in `render/api.ts`.
 - Sprites are authored as text (rows of characters with a small palette and reserved owner-colour characters) and rasterised at start-up behind the `SpriteSheet` interface, so PNG sheets can replace them later. No binary assets, no font files.
 - All hex shapes (hit test, fog, highlights, borders) derive from `render/geometry.ts`. Zoom is a whole number of device pixels per art pixel; one zoom step is about one CSS pixel per art pixel, which gives about six levels on every display.
 - The camera keeps the middle of the canvas on the map: the map can be dragged until its edge reaches the middle, no further. So `centerOn` really centres every tile, and a tile can always be brought out from under a panel that floats over a corner of the map.
+- When a panel lies on the marked tile (the selected unit or city, or the tile of the open tile card), the map steps aside, up or sideways (`ui/gameScreen.ts`); when a panel only changes its size, the map moves only for a tile that was in the open before, never for one the player has scrolled away. The renderer reports every camera change (`onCameraChange`), also from inside `setView` and `centerOn`; a listener may read the renderer but never move the camera. Because such a report can put a new hover tile into the store in the middle of an update, the game screen makes the overlay from the store as it is at that moment (`overlayFor(store.get())`), and its question "is the marked tile in the open?" answers no instead of throwing while the renderer already holds another map.
+- Farms and mines are part of the terrain picture (`render/terrainLayer.ts` stamps `sprites/art/improvements.ts` over the feature, with bare ground underneath). Two small signs are drawn from the view alone, not through the overlay: "at work" beside an own unit with a job, and "builds nothing" over an own city with an empty queue (`workingSignOffset` and `cityIsIdle` in `render/scene.ts`).
 - The renderer is created on a canvas that is already in the page and measures it at once (the game screen therefore puts its panels into the page first, because they take room from the map area); without a view its camera calls do nothing (`render/api.ts`). It measures the canvas again at the start of every camera and hit-test call, so no answer is ever a frame behind a resized window. Fog is applied per sprite (a fogged twin), not as a hexagon laid on top, because sprites stick out of their tile.
 
 **Tooling**
@@ -74,7 +83,7 @@ The ideas everything else follows from:
 
 ## 3. Module map
 
-Phase 1 was built in five parts at the same time, and many file headers still say which part a file belongs to: **WP1** map generation, **WP2** rules + fog of war + views, **WP3** server, **WP4** client app shell (screens, input, network), **WP5** map renderer + sprites + camera. The *scaffold* is what was written before them: the contracts, the data tables and the foundations. All five parts are merged; nothing is a stub any more.
+Phase 1 was built in five parts at the same time, and many file headers still say which part a file belongs to: **WP1** map generation, **WP2** rules + fog of war + views, **WP3** server, **WP4** client app shell (screens, input, network), **WP5** map renderer + sprites + camera. The *scaffold* is what was written before them: the contracts, the data tables and the foundations. All five parts are merged; nothing is a stub any more. Round 2 (the build queue, the Worker with farms and mines, and the words about every tile) was added on top by five packages with other borders: rules and views, server, client logic, client page, renderer and art. The files it added are marked "round 2" below; the older files it changed keep their old mark.
 
 ```
 package.json, tsconfig.base.json, vitest.config.ts, .gitignore      project set-up
@@ -89,7 +98,10 @@ packages/shared/src/                                                 THE RULES (
   actions.ts            Action, RuleError, GameEvent, ActionResult   scaffold
   viewTypes.ts          PlayerView, ViewPatch and their parts        scaffold
   protocol.ts           wire messages, PROTOCOL_VERSION              scaffold
-  data/                 terrain, units, civs, rules + map sizes      scaffold (the numbers may be tuned)
+  data/                 terrain, units, civs, rules + map sizes,
+                        improvements (farm, mine: round 2)           scaffold (the numbers may be tuned)
+  stateMigrations.ts    migrateGameState: a saved game of an older
+                        layout brought up to today's                 round 2
   hex.ts  rng.ts  ids.ts  json.ts    hex maths, seeded random,
                         ids, JSON helpers                            scaffold
   mapgen/               generateMap.ts (the contract), attempts,
@@ -97,10 +109,13 @@ packages/shared/src/                                                 THE RULES (
                         hillsAndForest, passes, starts, startRules,
                         grid, noise, tuning (the generator's knobs)  WP1
   rules/                createGame; applyAction with one file per
-                        action (moveUnit, foundCity, setProduction,
-                        endTurn); movement (Board, reachableTiles,
-                        pathTo); city; turn; invariants;
-                        results and stateQueries (internal helpers)  WP2
+                        action (moveUnit, foundCity, setBuildQueue,
+                        endTurn; unitJob holds startJob and stopJob);
+                        movement (Board, reachableTiles, pathTo);
+                        city (one turn of a city, the forecast);
+                        improvements (where one may be built); turn;
+                        invariants; results and stateQueries
+                        (internal helpers)                           WP2, round 2
   view/visibility.ts    computeVisible, updateKnowledge              WP2
   view/playerView.ts    buildPlayerView, filterEvents                WP2
   view/patch.ts         diffViews, applyViewPatch                    scaffold
@@ -112,6 +127,10 @@ packages/shared/test/
   mapgen*.test.ts                                                    WP1
   rules*.test.ts, visibility*.test.ts, and their helper files
   (rulesKit, rulesRandomPlay, visibilityOracle, visibilityScenes)    WP2
+  rulesQueue, rulesJobs, stateMigrations, contracts (.test.ts)       round 2
+  fixtures/             two games saved by phase 1 (a game state and
+                        a whole room file): read by the migration
+                        and server tests, never edited or remade     round 2
 
 packages/server/src/                                                 THE SERVER (Node)
   main.ts               entry point of "npm start"
@@ -132,7 +151,11 @@ packages/server/src/                                                 THE SERVER 
   rules.ts              the Rules bundle (the seam to packages/shared)
 packages/server/test/   one file per subject (see the top of
                         server.test.ts), plus harness.ts (real server,
-                        real sockets), fakeRules.ts and realWorld.ts  all WP3
+                        real sockets), fakeRules.ts and realWorld.ts
+                        (the real rules; also helpers for queues,
+                        ending a turn and getting a Worker built)    all WP3
+                        phaseOneSave.ts: reads the phase 1 room file
+                        for the storage and persistence tests        round 2
                         devScript.test.ts: scripts/devEnv.mjs
 
 packages/client/                                                     THE WEB PAGE (browser)
@@ -143,13 +166,20 @@ packages/client/                                                     THE WEB PAG
                         "First steps" note (startHint), End Turn
                         button, toasts, texts (the sentences), dom,
                         civColors and pressGuard (helpers)           WP4
+                        tileCard and hoverBox (what is on a tile),
+                        tileInfoView (the list both print),
+                        hoverPlacement (where the box goes)          round 2
   src/ui/testIds.ts     data-testid names (the e2e contract)         scaffold
   src/net/              connection (reconnect, liveness), identity
                         (token, address bar, storage)                WP4
   src/state/            store, serverMessages                        WP4
   src/game/             controller (what a tap means), selectors     WP4
+                        tileInfo (describeTile: every word about a
+                        tile), queueEdits (the list a queue button
+                        sends)                                       round 2
   src/input/            mapInput (browser events), gestures and keys
                         (the decisions, free of browser code)        WP4
+                        hoverInfo (when the hover box comes and goes) round 2
   src/debugHook.ts, src/demo.ts                                      WP4
   src/render/api.ts     MapRenderer, MapOverlay: the seam between
                         the app shell and the renderer               scaffold
@@ -158,7 +188,8 @@ packages/client/                                                     THE WEB PAG
                         scene, banner + bannerCache, slide, owners,
                         backingStore                                 WP5
   src/sprites/          format (sprites as text), art/ (the
-                        pictures), font, palette, catalog, looks,
+                        pictures; improvements.ts: farm and mine,
+                        round 2), font, palette, catalog, looks,
                         rim (the pale line around a unit among
                         trees), rasterize, atlas, spriteSheet, color,
                         image, canvas                                WP5
@@ -174,18 +205,18 @@ packages/client/                                                     THE WEB PAG
 | Between | Contract |
 |---|---|
 | Map generator -> rules | `generateMap(seed, mapSize, playerCount)` returns `{ map, starts }`, with the start-position guarantees H1-H5 in its doc comment. `createGame` takes the generator as an optional second argument, so tests can use hand-drawn maps (`mapFromAscii`). |
-| Rules -> server | The `Rules` bundle: `createGame`, `applyAction`, `buildPlayerView`, `filterEvents`, `checkInvariants`; plus `diffViews`. Most server tests pass a small fake bundle; the conflict, leak and restart tests use the real one. |
-| Rules -> client | `PlayerView` (render-ready), `reachableTiles(boardFromView(view), unit)`, `pathTo`, `applyViewPatch`. The controller and `overlayFor` take the reach function as an option, so their tests can pass a hand-made one. |
+| Rules -> server | The `Rules` bundle: `createGame`, `applyAction`, `buildPlayerView`, `filterEvents`, `checkInvariants`; plus `diffViews`. Most server tests pass a small fake bundle; the conflict, leak and restart tests use the real one. Beside the bundle, `storage.ts` uses `migrateGameState`, `checkInvariants` and `STATE_SCHEMA` for a save of an older layout. |
+| Rules -> client | `PlayerView` (render-ready), `reachableTiles(boardFromView(view), unit)`, `pathTo`, `applyViewPatch`. The controller and `overlayFor` take the reach function as an option, so their tests can pass a hand-made one. For the tile information only: `tileYields`, `tileMoveCost`, `tileIsWorkable`, `cityCenterYields` and `improvementSiteError(siteInView(view, tile), id)`. These and the reachable-tile highlight are the two places where the client works something out from its own view; everything else comes ready-made (the header of `viewTypes.ts` says the same). |
 | Server <-> client | `protocol.ts`, nothing else. |
-| App shell -> renderer | `createMapRenderer(canvas)` and `render/api.ts`: `setView`, `setOverlay`, `panBy`, `zoomBy`, `centerOn`, `tileAt`, `tileToScreen`, `destroy`, and its two "not ready yet" rules (the canvas is in the page before the renderer is created; without a view the camera calls do nothing). |
-| Client -> e2e | `ui/testIds.ts` and `window.__domination` (`debugHook.ts`). |
+| App shell -> renderer | `createMapRenderer(canvas)` and `render/api.ts`: `setView`, `setOverlay`, `panBy`, `zoomBy`, `centerOn`, `tileAt`, `tileToScreen`, `tileScreenRect`, `onCameraChange`, `destroy`, and its two "not ready yet" rules (the canvas is in the page before the renderer is created; without a view the camera calls do nothing). |
+| Client -> e2e | `ui/testIds.ts` and `window.__domination` (`debugHook.ts`). The script also imports three files of the client that are free of page types, to compare the page's words with what they give: `game/tileInfo.ts`, `game/selectors.ts`, `ui/texts.ts`. |
 | Server -> e2e | `loadConfig(env)` and `startServer({ config })`. |
 
 **How the parts are tested**
 
 - `npm test` runs every unit test, in plain Node. The rules are tested on hand-drawn maps and on generated ones; the server is tested through real sockets against a real `startServer()` on a free port with temporary folders; the client's logic (store, messages, controller, connection, gestures) and the renderer (against a recording stand-in canvas) run without a browser.
-- `npm run e2e` is the one test with real browsers: two players, the built page, the real server, the real rules and a generated map, including a reload and a server restart.
-- No test is skipped and none is marked "todo" (the one exception: two tests about file links, which Windows cannot run, skip themselves there). (While the parts were being built, tests that needed another part were guarded with `isImplemented`; those guards were removed at the merge. The helper stays in `shared/src/testing/notImplemented.ts` for the next phase.)
+- `npm run e2e` is the one test with real browsers: two players, the built page, the real server, the real rules and a generated map, including a reload and a server restart. It has 31 numbered steps, listed in the header comment of `e2e/two-players.ts`, plays 18 turns and takes about 40 seconds. Steps 1 to 16 are phase 1's. Steps 17 to 31 are round 2's: the hover box and the tile card with a mouse and with a finger on a phone-sized touch screen, a queue that runs empty, and a Worker that builds a farm, up to a reload that still shows it. Every press of a queue or job button is followed by a wait for the view, because nothing on the page changes before the server has answered.
+- No test is skipped and none is marked "todo" (the one exception: two tests about file links, which Windows cannot run, skip themselves there). (While the parts were being built, tests that needed another part were guarded with `isImplemented`; those guards were removed at the merge. The helper stays in `shared/src/testing/notImplemented.ts` for the next phase. Round 2 needed no such guard: the server was built after the rules, the page after the client's logic.)
 
 **Checking one part**
 
@@ -194,12 +225,22 @@ packages/client/                                                     THE WEB PAG
 | Part | Tests | Types |
 |---|---|---|
 | Map generation | `npx vitest run packages/shared/test/mapgen` | `npx tsc -p packages/shared && npx tsc -p packages/shared/test` |
-| Rules and views | `npx vitest run packages/shared/test/rules packages/shared/test/visibility` | as above |
+| Rules and views | `npx vitest run packages/shared/test/rules packages/shared/test/visibility packages/shared/test/stateMigrations packages/shared/test/contracts` | as above |
 | Server | `npx vitest run packages/server` | `npx tsc -p packages/server` |
 | App shell | `npx vitest run packages/client/test/shell` | `npx tsc -p packages/client` |
 | Renderer | `npx vitest run packages/client/test/geometry packages/client/test/render` | `npx tsc -p packages/client` |
 
-(The words after `vitest run` are matched against test file paths, so `packages/shared/test/rulesCity.test.ts` is picked up by the second command.)
+(The words after `vitest run` are matched against test file paths, so `packages/shared/test/rulesCity.test.ts`, `rulesQueue.test.ts` and `rulesJobs.test.ts` are picked up by the second command, and `shellTileInfo`, `shellHoverInfo` and `shellQueue` by the fourth. `npx vitest run packages/shared` runs everything of the rules package in about 20 seconds.)
+
+When somebody else is at work in the same folder, `tsc` still checks a whole project, so its output can hold errors in files that are not yours and are caught in mid-edit. Keep the lines that name your own files with a `grep` behind it; the part is clean when that prints nothing. `vitest` does not check types and loads only the files a test imports, so the test commands above are yours alone. The lines round 2 used:
+
+```
+npx tsc -p packages/server --pretty false | grep -E '^packages/server/'
+npx tsc -p packages/client --pretty false | grep -E '^packages/client/(src/(game|state)/|src/input/hoverInfo|src/ui/(texts|hoverPlacement)\.|test/shell)'      # the client's logic
+npx tsc -p packages/client --pretty false | grep -E '^packages/client/(src/(render|sprites|dev)/|test/(render|geometry))'                                    # renderer and art
+```
+
+(Nobody else edits `packages/shared` while the rules are worked on, so `npx tsc -p packages/shared && npx tsc -p packages/shared/test` needs no `grep`. The files of the page itself, `src/ui/` and `src/input/mapInput.ts`, have no tests in plain Node: they are tried by hand in the browser and by the end-to-end test.)
 
 When several people (or several copies of the project) run on one machine: give each development setup its own ports and, within one copy of the project, its own folder of saved games (`PORT=8801 DEV_PORT=5201 DOMINATION_DATA_DIR=data-dev-2 npm run dev`), and never test against the shared `packages/client/dist`, because every `npm run build` empties it. Two servers must never share a data folder: each would write over the other's saves. `npm run dev` therefore defaults to `data-dev/`, away from the `data/` of `npm start`. Server tests always use port 0 (a free port), a temporary data folder and a temporary client folder.
 
@@ -237,9 +278,9 @@ Where the brief or the design proposals left something open, or where the scaffo
 
 - **Six players today, eight seats by design.** Civilizations are unique per game and there are six, so `maxPlayers()` is `min(RULES.maxSeats, number of civs)`. Types, lobby layout and rules are sized for 8.
 - **Map sizes carry a recommended player count that is shown, not enforced.** The generator must always return a start for every player.
-- **Terrain is ground + feature**, with replace semantics (simple tables, matches the art, leaves a slot for phase 2 improvements).
-- **Production stays selected** after a unit is completed; a city with nothing chosen makes no progress that turn; a Settler needs population 2 and takes one.
-- **Citizens are assigned** by total yield, then food, then lower tile index. Cities never shrink in phase 1.
+- **Terrain is ground + feature**, with replace semantics (simple tables, matches the art). The slot this left for improvements is used since round 2: a farm or a mine, whose numbers are added.
+- **A city builds from a queue** (round 2; phase 1 kept one item selected and built it over and over). A completed entry leaves the queue; an empty queue loses the turn's production; a first entry that is paid for and cannot be completed holds the queue. A Settler needs population 2 and takes one.
+- **Citizens are assigned** by total yield, then food, then lower tile index; then (round 2) they give up production for food while the city would not grow. Cities never shrink in phase 1.
 - **Server-issued tokens, stored as hashes.** "Which games am I in?" is answered by the browser remembering its last game code, not by a server-side index.
 - **No journal, lock file, turn backups or async queue** in phase 1. Backup is copying `data/`.
 - **Patches are whole-section replacements** (`ViewPatch`), implemented and tested in the scaffold, with a full-sync fallback switch.
@@ -271,7 +312,7 @@ Each of the five parts reported where it had to decide something its contract le
 **Server**
 
 - A rejected action is answered with the error rebuilt from its code, so only the code and its standard sentence travel.
-- `Storage.has` also counts a save that was moved aside as `.corrupt` (its code stays reserved). The version numbers of a save are looked at before its details, so a save from another version is left alone rather than moved aside as damaged. There is no game-state migration yet, because there has only ever been one layout.
+- `Storage.has` also counts a save that was moved aside as `.corrupt` (its code stays reserved). The version numbers of a save are looked at before its details, so a save from another version is left alone rather than moved aside as damaged. Since round 2 there are two game-state layouts: `shared/src/stateMigrations.ts` holds one step per older layout (today one, from layout 1 to 2: a city's one item becomes its queue, and tiles, units and remembered tiles gain the Worker's fields), and `storage.ts` runs it when it loads an older save.
 - Name cleaning turns white space into single spaces first and removes control and invisible characters after that.
 - Static files: the "run npm run build" hint is sent with status 503; every method but GET gets 405; every answer carries `X-Content-Type-Options: nosniff`; a link that points out of the client folder is answered 404.
 - A socket is cut off (not closed politely) after 150 s of silence or when 8 MB wait to be sent to it; five bad messages or a protocol mismatch close it with code 1008.
@@ -322,7 +363,7 @@ A second group went through the finished phase 1 looking for faults, and a scept
 *Rules and map*
 
 - **Crowded maps: nobody alone on a small island.** The fallback placement used to try "every site there is" at the full distance before trying one landmass a tile closer, which put up to three of six players on islands of fewer than 30 tiles on about one small map in 200 (often with no site for a second city, and never a way off). Small islands are now the last resort (see "Rules and map" above); six players on the small map are 7 instead of 8 apart on about one map in 180.
-- **A unit a city completes appears in the city or on land of the city that is joined to it** (`findSpawnTile`): a tile the city owns across a channel is no room, where a unit used to appear that could never walk back. "Joined" means by the city's own land and by the ground alone. It looks no further on purpose: the answer is shown to the owner (`productionBlocked`), and the city's own tiles are all the owner is sure to see.
+- **A unit a city completes appears in the city or on land of the city that is joined to it** (`findSpawnTile`): a tile the city owns across a channel is no room, where a unit used to appear that could never walk back. "Joined" means by the city's own land and by the ground alone. It looks no further on purpose: the answer is shown to the owner (then `productionBlocked`; since round 2 `OwnCityDetail.held` and the forecast of `buildPlan`), and the city's own tiles are all the owner is sure to see.
 - `generateForSize` takes the placement step as an optional argument, so tests reach the generator's own checks of the start rules, which nothing could reach before.
 
 *Client*
@@ -335,10 +376,64 @@ A second group went through the finished phase 1 looking for faults, and a scept
 
 *Left as it is*
 
-- **Two tabs opened in the same instant on a browser's first visit** can each be given a token; the one that is not stored loses its seat on reload. It needs two tabs within a few milliseconds on a near-zero-latency link (the reviewer got it with a script on localhost, never with tabs opened by hand). Curing it means swapping a page's identity after the fact, in the code that guards every seat; the README names the gap instead.
+- **Two tabs on a browser's first visit can become two players.** A page says `hello` with the token it finds in the browser's storage and stores the token the server answers with (`net/connection.ts`). A second tab that says `hello` before the first has heard back finds no token and is given one of its own: the two tabs are two players from then on, the storage keeps whichever token was written last, and the other tab loses its seat on reload. The gap is open for as long as the server's first answer takes, so a SLOW answer makes it more likely, not a fast one (this paragraph first said the opposite). Measured in round 2 with Chromium: with the answer held back by 120 ms each way, a second tab opened up to 200 ms after the first became a second player five times out of five (and where it was 100 or 200 ms behind, the first tab had lost its seat after a reload every time); opened 400 ms after, never. On one computer, where the answer takes a millisecond, it took two tabs opened in the same instant (four times out of five). One thing narrows the gap in practice: Chromium opens the sockets of two tabs to one server one after the other, so when the WHOLE link was slowed down (the page's files and the opening of the socket too), the second tab asked a few milliseconds after the first had been answered, and the two stayed one player in 23 tries out of 23. That is a margin of milliseconds in one browser, on a link whose delay never varied; on a real slow link, where answers do not arrive to the millisecond, it can go either way. It is not a cure. The gap is still open: curing it means swapping a page's identity after the fact, in the code that guards every seat; the README names the gap instead.
 - **A freed seat goes to whoever joins first, and several freed seats in join order.** That is the documented rescue (section 6); the README now says who "whoever" can be and to free one seat at a time. A claim word belongs with seat management in a later phase.
 - **The start placement is still greedy.** An exact search would keep the full distance on some of the crowded maps that now give up a tile; not worth its cost.
 - **Focus after End Turn** goes back to the page, by the rule in `dom.ts`; the next Tab starts from where the browser left off.
+
+**Round 2: what the owner asked for after playing**
+
+The owner played phase 1 and asked for three things, in these words: "tooltip that shows what is on each tile when clicking or hovering on it, same when clicking on a unit"; "Queue for construction in the city and ability to stop a construction, should also be able to edit queue, move units up or down in priority and remove. Currently it just keeps building the same unit over and over."; and "Should add worker option to test that." One specification was written for all three and challenged by three critics before anything was built. Then the contracts were written (types, tables, test ids, the renderer seam), and five packages built on them: rules and views, server, client logic, client page, renderer and art. The decisions, each with its reason:
+
+*For the whole round*
+
+- **One new save layout and one new protocol version**, each raised once (`STATE_SCHEMA` 2, `PROTOCOL_VERSION` 2). One migration step covers the queue and the Worker's fields, so no save can carry the new number with half of the fields; an open page is told to reload once.
+- **The server keeps no copy of a save it converts.** "Backup is copying `data/`" stays the rule, and the README tells whoever runs the server to copy the folder before updating. A converted save that fails the health check is not loaded and its file is not touched.
+- **One rule for greying buttons that give orders** (`ordersClosed`): grey for a lasting reason, with the sentence that says so; never for the blink of a round trip. Thirty buttons flashing grey at every tap read as flicker.
+- **One description column** for units and one for improvements, at most 45 characters, so that it is one line in every panel that prints it (a table test holds the length).
+
+*Words about a tile*
+
+- **One function makes every word** (`describeTile`): a title and finished lines in a fixed order. The hover box and the tile card print the same thing for the same tile, and neither can show what the server did not send. Nothing was added to the view for it.
+- **Two places on screen.** A hover box beside the tile under a resting mouse, and a tile card bottom left for a tap or click on a tile that holds nothing of the player's (touch has no hover). A tap on the player's own unit or city opens its panel as before; the unit panel gained a description and one line about its tile. Another player's unit or city is read on the card of its tile.
+- **The box sits beside the tile, never on it, and not at the pointer**, so it cannot hide what it describes and does not jitter while the mouse moves inside a tile. Where it goes is plain arithmetic on rectangles (`placeHoverBox`).
+- **When the box comes and goes** is a timer of its own (`input/hoverInfo.ts`): after 0.4 s on one tile; gone at once on the next tile, where the next box comes after 0.15 s, or after the full 0.4 s while a unit is selected that can be ordered about; gone on every press, on Escape (which then closes only the box) and on every camera move. A box that followed the mouse at once hopped over the very tiles a unit was being sent to.
+- **Taps keep their meaning.** Orders and selecting work as in phase 1. A tap on a tile with nothing of the player's still clears the selection and now also opens the card; after End Turn or without a connection every tile answers a tap the same way.
+- **The map steps aside for its own panels**, sideways too, and only for a tile that was in the open: with the taller panels a city in the left part of the screen stayed under its own panel, and watching a panel's size made the map jump back while the player looked elsewhere. In a window at most 480 pixels high the tile card is at most 150 pixels tall and the unit panel at most 220.
+
+*The build queue*
+
+- **`City.buildQueue` with one store.** The first entry is the current build; a completed entry leaves the queue; duplicates and an empty queue are allowed; no edit ever touches what the city has saved, so reordering or removing destroys nothing.
+- **One action carries the whole list.** A whole list can only make a queue that was on the sender's screen plus one edit, and it is one shape to check against a hostile client.
+- **A first entry that cannot be completed yet holds the queue** (a Settler in a city of one; no free tile): with one store, "working on the next entry" could only mean spending the savings on something ranked lower. **An empty queue loses the turn's production**, as "nothing chosen" did.
+- **"In N turns" is a forecast** made by playing the city forward with the engine's own function, growth included, for at most 50 turns. "Waiting" is said only when the first entry is paid for and held: the first wording said it from the first turn and talked players into the slower order.
+- **An idle city is hard to miss and never in the way**: the toast of the completion that emptied the queue, the first line of the End Turn hint, "Show me", a gold sign on the map and "Builds nothing" in the hover box. Nothing blocks End Turn, because with simultaneous turns nobody may be held up by a dialog.
+- **At most 8 entries** (`RULES.maxQueueLength`; the server's message check only bounds the list at 64, so a queue that is too long gets an answer, not a closed socket). Other players learn nothing about a queue.
+- **Row buttons ignore presses for 0.6 s after a row press; "Empty the queue" asks once.** A double-click on a remove button took two entries, and a double-click on an arrow undid itself.
+
+*The Worker, farms and mines*
+
+- **A fourth unit and one table of improvements** (`UNITS.worker`, `data/improvements.ts`): a farm on open grassland, plains or desert, a mine on hills, one improvement per tile, only on the builder's own land, never under a city. Every number is one table cell.
+- **Work in progress lives on the unit** (`Unit.job` stores the turns worked; the table says how many it takes). There is no half-built thing to fog, to remember or to show to others, and the numbers can be tuned under a running game.
+- **Two small actions**, `startJob` (needs no moves left: walking onto hills uses them all) and `stopJob` (the progress is lost). A unit at work does not move, so a stray tap can never throw away turns of work.
+- **Citizens put growing first.** A mined hill gives no food and would outrank coast and forest, so a mine could have stopped a city growing for good, with no way back. The second step of `cityEconomy` cures that at the root, for any numbers, and also a stall phase 1 had. A mine in a young city therefore often stands unused at first; its tile says so ("No citizen works this tile").
+- **Other players see a Worker at work as any Worker**, and the improvement once it stands and they have the tile in sight; a fogged tile shows what was last seen (`RememberedTile.improvement`).
+- **The End Turn hint, "Show me" and the N key pass a unit at work by**; it is drawn dimmed with a small white sign, and nothing is highlighted for it. It is not "a unit that can still move".
+
+*Struck on the way*
+
+- A copy of every converted save next to the original (see above).
+- A city panel that opens by itself when a city is founded: nobody asked for it, and the gold sign, the hint and "Show me" lead there.
+- An event for a job that is dropped because its site went bad (`jobCancelled`): nothing in today's rules can cause it. The check itself is in `runJobs`; the rule that first makes it possible adds the event.
+- A key for the Worker's jobs, a "build this first" button on queue rows, a line about work in progress on a tile, a job that removes an improvement.
+
+*Found by building it and trying it by hand*
+
+- The news of a city's growth named the wrong size when a city grew to 2 and released its Settler in the same turn ("grew to 1"); the event now names the size the city grew to.
+- Three of the five new pictures were redrawn after being looked at in a browser: the mine read as a tree and is now the timbered mouth of a tunnel in a pale rock; the farm's dotted fields looked like a brick wall and are furrows now; the "builds nothing" sign sat on the head of the unit standing in the city and moved to the upper left of the hall, under the name banner.
+- A panel's head (its name, the queue count and the close button) stays in place while the panel scrolls. The style rule for it had to be `top: -12px`, not `top: 0`: a sticky box is held against the inside of the scroll box's padding.
+- The new checks of the end-to-end test were tried against the game with one piece of code taken out at a time: 130 such changes, each of which made the script fail at the check it was aimed at. Three checks did not fail when first tried and were changed (the width of a queue row, "a drag is not a click", "the map stepped aside").
+- The finished round was played once more through a browser driven by a program that behaves like a person: the hover box with a mouse that moves like a hand and with the many small wheel events of a trackpad, the city panel and the Worker's job buttons under a finger in a phone-sized window upright and on its side, and a game saved by phase 1, which the server converted and four players played on for fourteen turns across a restart. Nothing had to be repaired. What that could NOT try is in the README under "Good to know": a real mouse, a real trackpad, real phones, Firefox and Safari.
 
 ## 8. Deferred to later phases (do not build now)
 
@@ -348,7 +443,11 @@ The design leaves room for each of these; the note says where it will plug in.
 |---|---|
 | Combat, hit points, ranged attacks, city defence (phase 2) | New action types and columns in `UNITS`; dice from `GameState.rng`; `Unit` gains fields |
 | Tech tree, buildings (phase 2) | New data tables; `BuildItem` gains a `kind`; a step in `resolveTurn` |
-| Workers, tile improvements, resources (phase 2) | New `Tile` fields, each with a last-seen twin in `RememberedTile` |
+| Resources, roads, more improvements | Rows in `IMPROVEMENTS`; new `Tile` fields, each with a last-seen twin in `RememberedTile` (Workers and two improvements exist since round 2) |
+| Placing citizens by hand; removing an improvement | An action that pins a citizen, read by `cityEconomy` before its two steps; a job without an improvement in `runJobs` |
+| A key for the Worker's jobs; a "build this first" button on queue rows | `input/keys.ts`; one more row button that sends the reordered list through `setBuildQueue` |
+| A hold-your-finger gesture for reading a highlighted tile on a phone | `input/gestures.ts` decides, `controller.onTileTap` gets a second entrance that only inspects |
+| An event when a job is cancelled (with land changing hands) | Step 2a of `runJobs` in `rules/turn.ts`; a new `GameEvent` addressed to the unit's owner |
 | More unit types, sea units | Rows in `UNITS`; `canEnterTile` learns about domains |
 | Multi-turn move orders (phase 2) | `Unit` gains an order; a step in `resolveTurn` paths on `boardFromView` of the owner |
 | Ordered turns and secretly planned orders between players at war (phase 3) | `GameSettings.turnMode`; a gate in `applyAction`; queued actions run through the same action code |

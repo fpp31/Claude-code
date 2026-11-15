@@ -64,6 +64,23 @@ export function ownThingsAt(view: PlayerView, tile: TileIndex): OwnThing[] {
  */
 export type ReachFunction = (view: PlayerView, unit: UnitView) => Map<TileIndex, ReachStep>;
 
+/** Why the player cannot give orders for now, for longer than the blink of a round trip. */
+export type OrdersClosed = 'offline' | 'turnEnded';
+
+/**
+ * Is there a lasting reason why the player cannot give orders? 'offline' if
+ * the connection is not 'online'; else 'turnEnded' if the player has ended
+ * their turn; else null (also when there is no game). ONE question for
+ * every button that gives an order: the panels grey their buttons by it and
+ * print the sentence that goes with it (decision G7). `busy` is NOT part of
+ * it: a round trip is over in a blink and must not make the panels flicker.
+ */
+export function ordersClosed(state: AppState): OrdersClosed | null {
+  if (state.connection !== 'online') return 'offline';
+  if (state.game !== null && myPlayer(state.game.view).endedTurn) return 'turnEnded';
+  return null;
+}
+
 /**
  * May the player give an order right now? True only if there is a game, the
  * connection is 'online', no action is in flight (`busy` is false) and the
@@ -71,12 +88,24 @@ export type ReachFunction = (view: PlayerView, unit: UnitView) => Map<TileIndex,
  * (whether reachable tiles are highlighted) and by the controller (whether a
  * tap on such a tile moves the unit), so the map never shows a move the tap
  * would not make, and the other way round.
+ *
+ * Now: there is a game, ordersClosed(state) is null and no action is in flight.
  */
 export function canActNow(state: AppState): boolean {
-  if (state.game === null) return false;
-  if (state.connection !== 'online') return false;
-  if (state.busy) return false;
-  return !myPlayer(state.game.view).endedTurn;
+  return state.game !== null && ordersClosed(state) === null && !state.busy;
+}
+
+/**
+ * The tile that carries the selection ring: the selected unit's or city's
+ * tile, or, when nothing is selected, the tile whose tile card is open.
+ * Null if there is neither.
+ */
+export function markedTile(state: AppState): TileIndex | null {
+  const unit = selectedUnit(state);
+  if (unit !== null) return unit.tile;
+  const city = selectedCity(state);
+  if (city !== null) return city.tile;
+  return state.game !== null && state.selection === null ? state.inspectedTile : null;
 }
 
 /** What reachableFor worked out last time (see there). */
@@ -89,13 +118,13 @@ let lastReach: Map<TileIndex, ReachStep> = new Map();
  * from the shared rules, so the highlight matches what the server accepts.
  * Remember the last result (same view object and same unit id -> same Map),
  * because this is asked on every pointer move.
- * Empty for foreign units and for units without moves.
+ * Empty for foreign units, for units without moves and for units at work.
  */
 export function reachableFor(view: PlayerView, unit: UnitView): Map<TileIndex, ReachStep> {
   if (view === lastReachView && unit.id === lastReachUnitId) return lastReach;
 
   let reach = new Map<TileIndex, ReachStep>();
-  if (unit.owner === view.you && unit.own !== null && unit.own.movesLeft > 0) {
+  if (unit.owner === view.you && unit.own !== null && unit.own.movesLeft > 0 && unit.own.job === null) {
     reach = reachableTiles(boardFromView(view), {
       owner: unit.owner,
       type: unit.type,
@@ -112,10 +141,12 @@ export function reachableFor(view: PlayerView, unit: UnitView): Map<TileIndex, R
 
 /**
  * The overlay for the renderer, derived from the state:
- *  - selectedTile / selectedUnitId from the selection;
+ *  - selectedTile from the selection, or the inspected tile when nothing is
+ *    selected (markedTile); selectedUnitId from the selection;
  *  - reachable: the keys of reach(view, selected unit) if canActNow(state),
  *    otherwise [] (nothing is highlighted while busy, offline, or after the
- *    player has ended their turn);
+ *    player has ended their turn; and never for a unit at work, which has
+ *    no reachable tiles);
  *  - path: pathTo(that reach map, hoverTile) if the hovered tile is among
  *    `reachable`, else [];
  *  - workedTiles: city.own.worked of the selected city if it is the
@@ -140,7 +171,7 @@ export function overlayFor(state: AppState, reach: ReachFunction = reachableFor)
   }
 
   return {
-    selectedTile: unit?.tile ?? city?.tile ?? null,
+    selectedTile: markedTile(state),
     selectedUnitId: unit?.id ?? null,
     reachable,
     path,
@@ -173,16 +204,32 @@ export function compareIds(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/** Own units that still have moves left, sorted by id (for "next unit" and the End Turn hint). */
+/** Own units that can still be given a move: moves left and no job, sorted by id (for "next unit" and the End Turn hint). */
 export function idleUnits(view: PlayerView): UnitView[] {
   return view.units
-    .filter((unit) => unit.owner === view.you && unit.own !== null && unit.own.movesLeft > 0)
+    .filter((unit) => unit.owner === view.you && unit.own !== null && unit.own.movesLeft > 0 && unit.own.job === null)
     .sort((a, b) => compareIds(a.id, b.id));
 }
 
-/** Own cities with nothing selected to build (for the End Turn hint). */
+/** Own cities with an empty build queue (for the End Turn hint). */
 export function citiesWithoutProduction(view: PlayerView): CityView[] {
   return view.cities
-    .filter((city) => city.owner === view.you && city.own !== null && city.own.production === null)
+    .filter((city) => city.owner === view.you && city.own !== null && city.own.buildQueue.length === 0)
+    .sort((a, b) => compareIds(a.id, b.id));
+}
+
+/**
+ * Own cities whose first queue entry is paid for, held, and has no end in
+ * sight (own.held !== null and own.buildQueue[0].turns === null), sorted by
+ * id: for the End Turn hint and "Show me". Everything behind such an entry
+ * waits with it, perhaps for the rest of the game.
+ */
+export function citiesWaiting(view: PlayerView): CityView[] {
+  return view.cities
+    .filter((city) => {
+      if (city.owner !== view.you || city.own === null || city.own.held === null) return false;
+      const first = city.own.buildQueue[0];
+      return first !== undefined && first.turns === null;
+    })
     .sort((a, b) => compareIds(a.id, b.id));
 }

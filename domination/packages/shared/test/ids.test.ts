@@ -25,7 +25,7 @@ function makeState(seed = 'test-seed'): GameState {
     rng: seedRng(seed, 'dice'),
     settings: { mapSize: 'small', turnMode: 'simultaneous' },
     turn: 1,
-    map: { width: 1, height: 1, tiles: [{ terrain: 'grassland', feature: null, cityId: null }] },
+    map: { width: 1, height: 1, tiles: [{ terrain: 'grassland', feature: null, improvement: null, cityId: null }] },
     players: [makePlayer(1, seed), makePlayer(2, seed)],
     units: {},
     cities: {},
@@ -84,7 +84,7 @@ describe('unit and city ids', () => {
       const id = newUnitId(state, 'p1');
       expect(seen.has(id)).toBe(false);
       seen.add(id);
-      state.units[id] = { id, type: 'warrior', owner: 'p1', tile: 0, movesLeft: 0 };
+      state.units[id] = { id, type: 'warrior', owner: 'p1', tile: 0, movesLeft: 0, job: null };
     }
   });
 
@@ -98,7 +98,7 @@ describe('unit and city ids', () => {
       idsA.push(newUnitId(a, 'p1'), newCityId(a, 'p1'));
       for (let j = 0; j < 5; j++) {
         const other = newUnitId(b, 'p2');
-        b.units[other] = { id: other, type: 'warrior', owner: 'p2', tile: 0, movesLeft: 0 };
+        b.units[other] = { id: other, type: 'warrior', owner: 'p2', tile: 0, movesLeft: 0, job: null };
         newCityId(b, 'p2');
       }
       idsB.push(newUnitId(b, 'p1'), newCityId(b, 'p1'));

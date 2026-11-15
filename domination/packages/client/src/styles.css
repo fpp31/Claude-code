@@ -780,7 +780,7 @@ select.field:disabled {
   }
 }
 
-/* ---- Unit panel and city panel ---- */
+/* ---- Unit panel, city panel and tile card ---- */
 
 .panel {
   width: 320px;
@@ -789,6 +789,8 @@ select.field:disabled {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* The city panel keeps its add list in place itself (ui/cityPanel.ts); the browser must not do it a second time. */
+  overflow-anchor: none;
   touch-action: pan-y;
   padding: 12px;
   background: var(--chrome);
@@ -797,10 +799,44 @@ select.field:disabled {
   box-shadow: inset 0 0 0 2px #4a4a74, 5px 5px 0 rgb(16 16 32 / 0.55);
 }
 
+/* The head (name and close button) stays in sight while the panel scrolls. */
 .panel-head {
+  position: sticky;
+  /*
+   * It reaches the panel's edges, so nothing shows beside or above it: the
+   * margins pull it over the panel's padding, and it carries that padding
+   * itself. A sticky box is held against the inner edge of the padding, so
+   * "at the very top of the panel" is minus the padding, not 0.
+   */
+  top: -12px;
+  z-index: 1;
   display: flex;
+  flex-wrap: wrap; /* the city panel's second line */
   align-items: center;
   gap: 8px;
+  margin: -12px -12px 0;
+  padding: 12px 12px 6px;
+  background: var(--chrome);
+  /* The panel's lighter inner line, drawn again where the head covers it. */
+  box-shadow: inset 0 2px 0 #4a4a74, inset 2px 0 0 #4a4a74, inset -2px 0 0 #4a4a74;
+}
+
+/*
+ * The heading takes the room between the swatch and the close button and
+ * breaks inside itself when it is longer. (Left to its own width, a long
+ * name would push the close button onto a line of its own.)
+ */
+.panel-head > h2 {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* The second line of the city panel's head: population and "Queue 2 of 8". */
+.panel-facts {
+  display: flex;
+  flex-basis: 100%;
+  gap: 14px;
+  font-variant-numeric: tabular-nums;
 }
 
 .panel-title {
@@ -831,6 +867,13 @@ select.field:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+/* One sentence under the unit's name: what this kind of unit is for. */
+.panel-description {
+  margin: 4px 0 0;
+  color: var(--paper-dim);
+  font-size: 13px;
+}
+
 .panel-hint {
   margin: 8px 0 0;
   color: var(--paper-dim);
@@ -852,6 +895,57 @@ select.field:disabled {
   margin: 0;
   color: var(--accent);
   font-size: 13px;
+}
+
+/* ---- Unit panel: the job block of a unit that builds improvements ---- */
+
+.unit-jobs {
+  margin-top: 10px;
+}
+
+.job-row {
+  margin-top: 6px;
+}
+
+/* Two lines: "Build Farm (4 turns)" and what it adds. */
+.job-button {
+  display: grid;
+  width: 100%;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.job-about {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--paper-dim);
+}
+
+.job-button:disabled .job-about {
+  color: inherit;
+}
+
+/* The reason stands right under the greyed button it belongs to. */
+.job-row .panel-reason {
+  margin-top: 3px;
+}
+
+/* "The work done so far is lost." on the left, "Stop work" at the right end. */
+.job-stop-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.job-stop-row .panel-hint {
+  margin: 0;
+}
+
+.job-stop-row .button {
+  flex: none;
 }
 
 .bar {
@@ -899,13 +993,14 @@ select.field:disabled {
   gap: 6px;
 }
 
+/* One button of the add list: name, "18 production, in 12 turns", and the description on one line. */
 .build-button {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-areas:
-    'name mark'
-    'detail detail';
-  gap: 0 8px;
+    'name'
+    'detail'
+    'about';
   padding: 6px 10px;
   text-align: left;
 }
@@ -921,21 +1016,161 @@ select.field:disabled {
   font-weight: 400;
 }
 
-.build-mark {
-  grid-area: mark;
-  align-self: center;
-  padding: 0 6px;
-  background: var(--good);
-  color: var(--ink);
-  font-size: 11px;
+/* Cut with "..." where a narrow panel has no room for the whole sentence. */
+.build-about {
+  grid-area: about;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--paper-dim);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-/* What the city is building now: a green frame. */
-.build-button.chosen {
-  border-color: var(--good);
-  box-shadow:
-    inset 0 0 0 2px var(--good),
-    3px 3px 0 var(--edge-dark);
+.build-button:disabled .build-about {
+  color: inherit;
+}
+
+/* "Added to the queue", for a moment after the item has arrived. */
+.build-button.added .build-detail {
+  color: var(--good);
+  font-weight: 700;
+}
+
+/* ---- City panel: the build queue ---- */
+
+/* One entry: its place, its name over when it will be done, and at the right up, down and (apart) remove. */
+.queue-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto auto auto;
+  grid-template-areas:
+    'position name up down remove'
+    'position when up down remove';
+  column-gap: 6px;
+  align-items: center;
+  padding: 4px 0;
+  border-top: 2px solid var(--edge-dark);
+}
+
+.queue-position {
+  grid-area: position;
+  color: var(--paper-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.queue-name {
+  grid-area: name;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.queue-when {
+  grid-area: when;
+  color: var(--paper-dim);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.queue-up {
+  grid-area: up;
+}
+
+.queue-down {
+  grid-area: down;
+}
+
+/* Apart from the arrows: it is the one that destroys. */
+.queue-remove {
+  grid-area: remove;
+  margin-left: 10px;
+}
+
+.queue-button {
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+}
+
+/* The arrows: triangles made of borders, so they do not depend on a font. */
+.queue-up::before,
+.queue-down::before {
+  content: '';
+  display: inline-block;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+}
+
+.queue-up::before {
+  border-bottom: 8px solid currentColor;
+}
+
+.queue-down::before {
+  border-top: 8px solid currentColor;
+}
+
+.queue-clear {
+  margin-top: 6px;
+}
+
+/* "Tap again to empty the queue": the button is asking. */
+.queue-clear.armed {
+  color: var(--accent);
+}
+
+/* ---- Tile card and hover box: what is on a tile ---- */
+
+.tile-info-title {
+  min-width: 0;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.tile-info-lines {
+  display: grid;
+  gap: 3px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.tile-info-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+
+/* "Out of sight: shown as you last saw it." */
+.tile-info-line.remembered {
+  color: var(--accent);
+}
+
+.tile-info-line .swatch {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+/* Beside the tile under a resting mouse (ui/hoverBox.ts places it). The pointer never "sees" it. */
+.hover-box {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 15; /* under the toasts, which have 20 */
+  width: max-content;
+  max-width: min(260px, calc(100vw - 16px));
+  padding: 8px 10px;
+  background: var(--chrome);
+  border: 2px solid var(--edge-dark);
+  box-shadow: inset 0 0 0 2px #4a4a74, 5px 5px 0 rgb(16 16 32 / 0.55);
+  pointer-events: none;
 }
 
 /* ---- End Turn, "Show me", zoom ---- */
@@ -1105,6 +1340,12 @@ select.field:disabled {
   .panel-close {
     width: 44px;
   }
+
+  /* The three buttons of a queue row: a finger must hit the right one. */
+  .queue-button {
+    width: 44px;
+    min-height: 44px;
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1176,6 +1417,33 @@ select.field:disabled {
 /* A low window (a phone held sideways) has no room for the explanation of the map markers either. */
 @media (max-height: 480px) {
   .city-panel .panel-hint {
+    display: none;
+  }
+
+  /* Every line counts here: the head keeps less air above and below it. */
+  .panel-head {
+    padding-top: 6px;
+    padding-bottom: 4px;
+  }
+
+  /* The card leaves the map room to bring the tile out from under it; it scrolls inside itself. */
+  .tile-card {
+    max-height: 150px;
+  }
+
+  /* The job buttons stay in view, and the map can step up from under the panel. */
+  .unit-panel {
+    max-height: 220px;
+  }
+
+  /* The low window keeps what is pressed, not what is read twice. */
+  .unit-panel .panel-description,
+  .unit-panel .hint-more {
+    display: none;
+  }
+
+  /* The job buttons say what they are by themselves ("Build Farm"); without their title both are in view on a touch screen too. */
+  .unit-jobs .build-title {
     display: none;
   }
 }
