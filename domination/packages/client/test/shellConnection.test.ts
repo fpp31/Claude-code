@@ -106,6 +106,8 @@ function fakeWorld(): FakeWorld {
           wakeListener = () => {};
         };
       },
+      // No other tab in this world (the pretend browser of shellIdentityBrowser.test.ts has them).
+      onTokenStored: () => () => {},
     },
   };
   return world;
@@ -151,6 +153,7 @@ describe('connection (WP4)', () => {
         onMessage: (message) => log.push(`message ${message.type}`),
         onDisconnect: () => log.push('disconnect'),
         onTokenNotSaved: () => log.push('token not saved'),
+        mayChangeIdentity: () => true,
       },
       world.environment,
     );

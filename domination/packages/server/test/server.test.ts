@@ -149,13 +149,67 @@ describe('connecting (WP3)', () => {
 
   it('hello with something that is not a token of ours gets a new token', async () => {
     const server = await startTestServer();
-    for (const notAToken of ['', 'short', 'FEEDFACEFEEDFACEFEEDFACEFEEDFACE', 'g'.repeat(32), 'a'.repeat(33)]) {
+    const notTokens = [
+      '',
+      'short',
+      'FEEDFACEFEEDFACEFEEDFACEFEEDFACE',
+      'g'.repeat(32),
+      'a'.repeat(33),
+      // What a page may propose as its own token is exactly 32 lower-case hex characters, nothing near it:
+      'a'.repeat(31),
+      'a'.repeat(64), // the right alphabet, twice the length (the longest text the message check lets through)
+      `${'a'.repeat(32)}\n`,
+      ` ${'a'.repeat(32)}`,
+      `${'a'.repeat(31)}A`,
+      '\uFF10'.repeat(32), // digits of another alphabet
+      'a'.repeat(16) + '\u0000' + 'a'.repeat(15),
+    ];
+    for (const notAToken of notTokens) {
       const client = await server.open();
       client.send({ type: 'hello', protocol: PROTOCOL_VERSION, token: notAToken });
       const welcome = await client.nextOfType('welcome');
-      expect(welcome.token).toMatch(/^[0-9a-f]{32}$/);
-      expect(welcome.token).not.toBe(notAToken);
+      expect(welcome.token, JSON.stringify(notAToken)).toMatch(/^[0-9a-f]{32}$/);
+      expect(welcome.token, JSON.stringify(notAToken)).not.toBe(notAToken);
     }
+    // Something huge is not a message at all: no token, no welcome.
+    const flooder = await server.open();
+    flooder.send({ type: 'hello', protocol: PROTOCOL_VERSION, token: 'a'.repeat(65) });
+    await flooder.expectError('badMessage');
+    flooder.send({ type: 'hello', protocol: PROTOCOL_VERSION, token: 'a'.repeat(5000) });
+    await flooder.expectError('badMessage');
+  });
+
+  it('a token the page made itself is as good as one the server made: two sockets that say hello with it are one player, only its hash is kept, and it is that player again after a restart', async () => {
+    const first = await startTestServer({ rules: createFakeRules().rules });
+    const made = '0123456789abcdef0123456789abcdef'; // this server has never seen it
+    const tab1 = await first.connect(made);
+    const tab2 = await first.connect(made);
+    expect(tab1.token).toBe(made);
+    expect(tab2.token).toBe(made);
+
+    // Tab 1 makes a game. Tab 2 only asks to come back (no name): it is let in, on the same seat.
+    const lobby = await tab1.createGame('Ada');
+    const seen = await tab2.joinLobby(lobby.code, null);
+    expect(seen.you).toBe('p1');
+    expect(seen.seats.map((seat) => seat.name)).toEqual(['Ada']);
+
+    // The file holds the hash of the token, never the token.
+    expect(first.saveText(lobby.code)).not.toContain(made);
+    expect(first.save(lobby.code).seats.map((seat) => seat.tokenHash)).toEqual([hashToken(made)]);
+
+    // Proposing a token gives nothing that knowing it would not give: another made-up token is a stranger.
+    const stranger = await first.connect('f'.repeat(32));
+    stranger.send({ type: 'joinGame', code: lobby.code, name: null });
+    await stranger.expectError('nameRequired');
+    // And so is a token that differs from the seat's in one character only.
+    const near = await first.connect(`${made.slice(0, 31)}e`);
+    near.send({ type: 'joinGame', code: lobby.code, name: null });
+    await near.expectError('nameRequired');
+
+    await first.close();
+    const second = await startTestServer({ rules: createFakeRules().rules, dataDir: first.dataDir });
+    const back = await second.connect(made);
+    expect((await back.joinLobby(lobby.code, null)).you).toBe('p1');
   });
 
   it('hello with the wrong protocol version gets error protocolMismatch and the socket is closed', async () => {
@@ -166,6 +220,59 @@ describe('connecting (WP3)', () => {
     await client.waitForClose();
     // Nothing else was sent, and in particular no token.
     expect(client.frames).toHaveLength(1);
+  });
+
+  it('the first page of another protocol version is written into the log, with what to do; the same version again is not (a tab that keeps reconnecting cannot fill the log)', async () => {
+    const server = await startTestServer();
+    /** The lines about pages of another version. */
+    const aboutVersions = (): string[] => server.logs.filter((line) => line.includes('protocol'));
+    /** A page that says hello with this protocol number and is turned away. */
+    const pageOf = async (protocol: number): Promise<void> => {
+      const client = await server.open();
+      client.send({ type: 'hello', protocol, token: null });
+      await client.expectError('protocolMismatch');
+      await client.waitForClose();
+    };
+
+    // Pages of this server's own version are no news.
+    await server.connect();
+    await server.connect();
+    expect(aboutVersions()).toEqual([]);
+
+    // The build was forgotten: every open page says hello with the older number, again and again.
+    for (let visit = 0; visit < 4; visit++) await pageOf(PROTOCOL_VERSION - 1);
+    expect(aboutVersions()).toHaveLength(1);
+    expect(aboutVersions()[0]).toContain(`protocol ${PROTOCOL_VERSION - 1}`);
+    expect(aboutVersions()[0]).toContain(`protocol ${PROTOCOL_VERSION}`);
+    expect(aboutVersions()[0]).toContain('older');
+    expect(aboutVersions()[0]).toContain('npm run build');
+    expect(aboutVersions()[0]).toContain('restart');
+
+    // A page that is newer than the server (built, but the server was not restarted): one more line, once.
+    for (let visit = 0; visit < 3; visit++) await pageOf(PROTOCOL_VERSION + 1);
+    expect(aboutVersions()).toHaveLength(2);
+    expect(aboutVersions()[1]).toContain(`protocol ${PROTOCOL_VERSION + 1}`);
+    expect(aboutVersions()[1]).toContain('newer');
+    expect(aboutVersions()[1]).toContain('restart');
+
+    // And the older one again changes nothing.
+    await pageOf(PROTOCOL_VERSION - 1);
+    expect(aboutVersions()).toHaveLength(2);
+  });
+
+  it('somebody who says hello with one made-up protocol number after the other gets a few lines into the log, not one each', async () => {
+    const server = await startTestServer();
+    for (let number = 100; number < 130; number++) {
+      const client = await server.open();
+      client.send({ type: 'hello', protocol: number, token: null });
+      await client.expectError('protocolMismatch');
+      await client.waitForClose();
+    }
+    const lines = server.logs.filter((line) => line.includes('protocol'));
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.length).toBeLessThanOrEqual(10);
+    // The last line says that it is the last.
+    expect(lines[lines.length - 1]).toContain('no longer');
   });
 
   it('any message before hello gets error notReady', async () => {

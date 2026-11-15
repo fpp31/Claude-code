@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { cloneJson, RULE_ERROR_MESSAGES, SERVER_ERROR_MESSAGE } from '@domination/shared';
+import { cloneJson, IMPROVEMENT_IDS, IMPROVEMENTS, RULE_ERROR_MESSAGES, SERVER_ERROR_MESSAGE } from '@domination/shared';
 import type { ClientMessage, GameEvent, ServerMessage } from '@domination/shared';
 import { sampleLobby, sampleView } from '@domination/shared/testing';
 import {
   NO_LONGER_IN_GAME_MESSAGE,
   STARTED_BEFORE_LEAVE_MESSAGE,
   TURN_TOAST_SLOT,
+  VERSION_MISMATCH_MESSAGE,
   describeEvent,
+  foldedNewsText,
   handleServerMessage,
+  improvementsFinishedText,
 } from '../src/state/serverMessages';
 import { createStore, currentScreen, initialState } from '../src/state/store';
 import type { AppState, JoinProblem, Store } from '../src/state/store';
@@ -208,9 +211,15 @@ describe('handleServerMessage (WP4)', () => {
     expect(store.get().toasts.map((toast) => toast.kind)).toEqual(['error']);
   });
 
-  /** The four answers to `joinGame` that mean "you are not in that game", with what the home screen is told afterwards. */
-  const REFUSED_REJOINS: { code: 'noSuchGame' | 'nameRequired' | 'gameAlreadyStarted' | 'gameFull'; problem: JoinProblem | null; toast: string }[] = [
+  /** The five answers to `joinGame` that mean "you are not in that game", with what the home screen is told afterwards. */
+  const REFUSED_REJOINS: {
+    code: 'noSuchGame' | 'gameNotLoaded' | 'nameRequired' | 'gameAlreadyStarted' | 'gameFull';
+    problem: JoinProblem | null;
+    toast: string;
+  }[] = [
     { code: 'noSuchGame', problem: 'noSuchGame', toast: 'the server text' },
+    // The save is on the server's disk but was not loaded: the server has no such game to be in right now.
+    { code: 'gameNotLoaded', problem: 'gameNotLoaded', toast: 'the server text' },
     { code: 'gameAlreadyStarted', problem: 'gameAlreadyStarted', toast: 'the server text' },
     { code: 'gameFull', problem: 'gameFull', toast: 'the server text' },
     // The game is there and has a seat: no "problem", but a word on why the page is back on the first screen.
@@ -299,7 +308,7 @@ describe('handleServerMessage (WP4)', () => {
   });
 
   it('a refused join that trying again cannot cure is remembered, so the home screen can go on saying why', () => {
-    for (const code of ['noSuchGame', 'gameAlreadyStarted', 'gameFull'] as const) {
+    for (const code of ['noSuchGame', 'gameNotLoaded', 'gameAlreadyStarted', 'gameFull'] as const) {
       const store = createStore(initialState('Cleo', SAMPLE.code));
       deliver(store, { type: 'error', code, message: 'the server text' });
       expect(store.get().joinProblem).toBe(code);
@@ -358,6 +367,14 @@ describe('handleServerMessage (WP4)', () => {
     expect(store.get().fatalMessage).not.toBeNull();
     expect(store.get().toasts).toEqual([]);
     expect(store.get().busy).toBe(false);
+    // The sentence says what to do in each case: reload; wait and reload; and,
+    // when waiting does not help (the build was forgotten), whom to tell and what they must do.
+    expect(store.get().fatalMessage).toBe(VERSION_MISMATCH_MESSAGE);
+    expect(VERSION_MISMATCH_MESSAGE).toContain('Reload the page');
+    expect(VERSION_MISMATCH_MESSAGE).toContain('wait a minute and reload once more');
+    expect(VERSION_MISMATCH_MESSAGE).toContain('tell the person who runs the server');
+    expect(VERSION_MISMATCH_MESSAGE).toContain('"npm run build"');
+    expect(VERSION_MISMATCH_MESSAGE).toContain('restart');
     expect(store.get().joining).toBeNull();
   });
 
@@ -556,6 +573,130 @@ describe('handleServerMessage (WP4)', () => {
       deliver(store, { type: 'gameUpdate', seq: 10 + turn, patch: { turn }, events: [{ type: 'turnStarted', turn }] });
     }
     expect(store.get().toasts.filter((toast) => toast.text.includes('has begun')).map((toast) => toast.text)).toEqual(['Turn 20 has begun.']);
+  });
+
+  describe('the news of one message: counted, and folded when it is more than the list holds', () => {
+    const built = (improvement: 'farm' | 'mine', cityName: string, tile: number): GameEvent => ({
+      type: 'improvementBuilt', playerId: 'p1', unitId: SAMPLE.workerId, improvement, tile, cityName,
+    });
+    const completed = (cityName: string, unitType: 'warrior' | 'scout' | 'worker', queueEmpty: boolean): GameEvent => ({
+      type: 'unitBuilt', playerId: 'p1', cityId: `c1_${cityName}`, cityName, unitId: `u1_${cityName}`, unitType, queueEmpty,
+    });
+    const grew = (name: string, population: number): GameEvent => ({ type: 'cityGrew', playerId: 'p1', cityId: `c1_${name}`, name, population });
+    /** The toasts a turn's events leave in a store that showed none. */
+    const newsOf = (events: GameEvent[]): string[] => {
+      const store = storeInGame();
+      deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 31 }, events });
+      return store.get().toasts.map((toast) => toast.text);
+    };
+
+    it('two Workers that finish farms near one city in one turn are "2 Farms were finished near Rome.", not one farm', () => {
+      expect(newsOf([built('farm', 'Rome', 10), built('farm', 'Rome', 11), { type: 'turnStarted', turn: 31 }])).toEqual([
+        '2 Farms were finished near Rome.',
+        'Turn 31 has begun.',
+      ]);
+      expect(newsOf([built('farm', 'Rome', 10), built('farm', 'Rome', 11), built('farm', 'Rome', 12)])).toEqual(['3 Farms were finished near Rome.']);
+      expect(newsOf([built('mine', 'Ostia', 10), built('mine', 'Ostia', 11)])).toEqual(['2 Mines were finished near Ostia.']);
+      // Away from every city the words "near ..." are left out, as in the sentence about one.
+      expect(newsOf([built('farm', '', 10), built('farm', '', 11)])).toEqual(['2 Farms were finished.']);
+    });
+
+    it('one of a kind keeps the sentence about one; a farm and a mine, or farms near two cities, are counted apart', () => {
+      expect(newsOf([built('farm', 'Rome', 10)])).toEqual(['Your Worker finished a Farm near Rome.']);
+      expect(newsOf([built('farm', 'Rome', 10), built('mine', 'Rome', 11), built('farm', 'Ostia', 12), built('farm', 'Rome', 13)])).toEqual([
+        '2 Farms were finished near Rome.',
+        'Your Worker finished a Mine near Rome.',
+        'Your Worker finished a Farm near Ostia.',
+      ]);
+    });
+
+    it('improvementsFinishedText: the count, the plural of the name, and the city; every name in the table takes a plain "s"', () => {
+      expect(improvementsFinishedText(2, 'farm', 'Rome')).toBe('2 Farms were finished near Rome.');
+      expect(improvementsFinishedText(12, 'mine', '')).toBe('12 Mines were finished.');
+      // The plural is the name with an "s". A name that needs another plural (a Quarry) must bring its own word along.
+      for (const id of IMPROVEMENT_IDS) expect(IMPROVEMENTS[id].name, id).toMatch(/[a-rt-wA-Z]$/);
+      for (const id of IMPROVEMENT_IDS) expect(IMPROVEMENTS[id].name, id).not.toMatch(/(ch|sh|[^aeiou]y)$/);
+    });
+
+    it('the same sentence a turn later still takes the place of the one on screen (only ONE message is counted)', () => {
+      const store = storeInGame();
+      deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 8 }, events: [built('farm', 'Rome', 10), { type: 'turnStarted', turn: 8 }] });
+      deliver(store, { type: 'gameUpdate', seq: 7, patch: { turn: 9 }, events: [built('farm', 'Rome', 11), { type: 'turnStarted', turn: 9 }] });
+      expect(store.get().toasts.map((toast) => toast.text)).toEqual(['Your Worker finished a Farm near Rome.', 'Turn 9 has begun.']);
+    });
+
+    it('eight events of one turn: the farms are counted, "nothing left to build" is kept, what does not fit is one last line', () => {
+      // The reviewer's turn: Rome grew and ran out of work, Ostia built a Worker, three farms near Rome, a mine near Ostia.
+      const events: GameEvent[] = [
+        grew('Rome', 4),
+        completed('Rome', 'scout', true),
+        completed('Ostia', 'worker', false),
+        built('farm', 'Rome', 10),
+        built('farm', 'Rome', 11),
+        built('farm', 'Rome', 12),
+        built('mine', 'Ostia', 13),
+        { type: 'turnStarted', turn: 31 },
+      ];
+      // Six lines for a list of five: the first city's news is no longer the part that is cut.
+      expect(MAX_TOASTS).toBe(5);
+      expect(newsOf(events)).toEqual([
+        'Rome grew to 4.',
+        'Scout completed in Rome. Rome has nothing left to build.',
+        'Worker completed in Ostia.',
+        'And 2 more pieces of news.',
+        'Turn 31 has begun.',
+      ]);
+      // One line fewer and nothing is folded: the count is on screen.
+      expect(newsOf(events.slice(1))).toEqual([
+        'Scout completed in Rome. Rome has nothing left to build.',
+        'Worker completed in Ostia.',
+        '3 Farms were finished near Rome.',
+        'Your Worker finished a Mine near Ostia.',
+        'Turn 31 has begun.',
+      ]);
+    });
+
+    it('a line that asks for something is kept before one that does not, wherever it stands in the message', () => {
+      // Capua, the third city, is the one with nothing left to build; its line comes after four others.
+      const events: GameEvent[] = [
+        grew('Rome', 5),
+        completed('Rome', 'warrior', false),
+        grew('Ostia', 3),
+        completed('Ostia', 'worker', false),
+        completed('Capua', 'scout', true),
+        built('farm', 'Rome', 10),
+        { type: 'turnStarted', turn: 31 },
+      ];
+      expect(newsOf(events)).toEqual([
+        'Rome grew to 5.',
+        'Warrior completed in Rome.',
+        'Scout completed in Capua. Capua has nothing left to build.',
+        'And 3 more pieces of news.',
+        'Turn 31 has begun.',
+      ]);
+    });
+
+    it('more cities with nothing left to build than the list holds: the last line says how many more', () => {
+      const cities = ['Rome', 'Ostia', 'Capua', 'Ravenna', 'Pisa'];
+      const events: GameEvent[] = [...cities.map((name) => completed(name, 'warrior', true)), grew('Rome', 2), { type: 'turnStarted', turn: 31 }];
+      expect(newsOf(events)).toEqual([
+        'Warrior completed in Rome. Rome has nothing left to build.',
+        'Warrior completed in Ostia. Ostia has nothing left to build.',
+        'Warrior completed in Capua. Capua has nothing left to build.',
+        'And 3 more pieces of news: 2 more cities have nothing left to build.',
+        'Turn 31 has begun.',
+      ]);
+      expect(foldedNewsText(4, 0)).toBe('And 4 more pieces of news.');
+      expect(foldedNewsText(2, 1)).toBe('And 2 more pieces of news: 1 more city has nothing left to build.');
+    });
+
+    it('news that was on screen before makes room, oldest first; the new message is folded by its own size only', () => {
+      const store = storeInGame();
+      showToast(store, 'old one', 'info');
+      showToast(store, 'old two', 'info');
+      deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 31 }, events: [grew('Rome', 2), grew('Ostia', 2), grew('Capua', 2), { type: 'turnStarted', turn: 31 }] });
+      expect(store.get().toasts.map((toast) => toast.text)).toEqual(['old two', 'Rome grew to 2.', 'Ostia grew to 2.', 'Capua grew to 2.', 'Turn 31 has begun.']);
+    });
   });
 
   it('ends up with the same state whether events are present or stripped from the messages', () => {

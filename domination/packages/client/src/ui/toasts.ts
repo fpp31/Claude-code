@@ -37,7 +37,11 @@ const lastToastId = new WeakMap<Store, number>();
  * A message is never on screen twice: a new toast that says exactly what
  * one already showing says takes that one's place (as the newest, with its
  * four seconds starting again). Otherwise pressing a button that is refused
- * three times in a row stacks up three copies of the same sentence.
+ * three times in a row stacks up three copies of the same sentence. (The
+ * news of ONE server message never meets this rule with itself: equal
+ * sentences in it are counted before they get here, and a message with more
+ * news than the list holds is folded; see eventToasts in
+ * state/serverMessages.ts.)
  *
  * In the same way a toast with a `slot` takes the place of the one that
  * holds that slot, whatever it says: "Turn 9 has begun." replaces "Turn 8
@@ -66,7 +70,10 @@ export function showToast(store: Store, text: string, kind: 'info' | 'error'): v
  * Shows store.toasts (each with TEST_IDS.toast) in a corner, newest last,
  * at most five at a time; 'error' toasts look different from 'info' ones.
  * Each toast removes itself from the store about four seconds after it
- * first appeared. Toast text is untrusted: textContent only.
+ * first appeared; a press on it removes it sooner. (Not on the game screen
+ * of a low or narrow window or of a touch screen: there the stylesheet lets
+ * a press through to the map under the toast, see "pointer-events" at
+ * `.toast` in styles.css.) Toast text is untrusted: textContent only.
  */
 export function mountToasts(parent: HTMLElement, store: Store): Unmount {
   // aria-live makes screen readers read a new toast out without moving the focus.

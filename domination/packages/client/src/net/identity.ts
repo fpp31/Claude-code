@@ -2,8 +2,9 @@
  * Who this browser is, and which game the address bar points at
  * (work package WP4).
  *
- * There are no accounts. The server gives each browser a secret token on its
- * first visit; keeping it in localStorage is what lets a player come back to
+ * There are no accounts. On its first visit a browser makes a secret token
+ * and stores it (tokenForHello; the server makes one for a page that cannot);
+ * keeping it in localStorage is what lets a player come back to
  * their seat after a reload or days later. Losing it (clearing site data)
  * loses the seat; only the server's owner can free it again (README).
  *
@@ -35,14 +36,24 @@ export const STORAGE_KEYS = {
   lastGame: 'domination.lastGame',
 } as const;
 
-/** sessionStorage key of the "this tab has already been reloaded once" flag (see reloadPageOnce). */
+/** sessionStorage key of the "this tab has reloaded itself and was not welcomed since" flag (see reloadPageOnce). */
 const RELOADED_FLAG_KEY = 'domination.reloaded';
 
 /** What a `?profile=` value must look like to be used. */
 const PROFILE_PATTERN = /^[A-Za-z0-9]{1,16}$/;
 
-/** The token as last given to saveToken. Wins over the stored copy (see loadToken). */
+/** The token this page goes by: made by tokenForHello, given to saveToken, or taken over by adoptStoredToken. Wins over the stored copy (see loadToken). */
 let tokenInMemory: string | null = null;
+
+/** What a token looks like: 32 lower-case hex characters. The server makes and accepts exactly these (server/src/tokens.ts). */
+const TOKEN_PATTERN = /^[0-9a-f]{32}$/;
+
+/**
+ * True once this page load has found NO token in the browser (a first
+ * visit): its identity is new, and nothing can hang on it but what this
+ * very page does. Only such a page may still change who it is (adoptStoredToken).
+ */
+let identityIsNew = false;
 
 // ---------------------------------------------------------------------------
 // Safe access to the browser. Each helper returns null where the thing does
@@ -145,17 +156,101 @@ export function cleanGameCode(text: string | null): GameCode | null {
 // ---------------------------------------------------------------------------
 
 /**
- * The player's token, or null on the first visit.
+ * The player's token, or null if the page has none yet.
  *
- * The token is ALSO kept in a variable inside this module (set by saveToken),
- * and that copy wins. So a page that is open never forgets who it is, even
- * where storage is blocked: without this, the first network hiccup would
- * send `hello` with no token, get a new identity and lose the seat.
+ * The token is ALSO kept in a variable inside this module (set by
+ * tokenForHello and saveToken), and that copy wins. So a page that is open
+ * never forgets who it is, even where storage is blocked: without this, the
+ * first network hiccup would send `hello` with no token, get a new identity
+ * and lose the seat.
  */
 export function loadToken(): string | null {
-  if (tokenInMemory !== null) return tokenInMemory;
+  return tokenInMemory ?? storedToken();
+}
+
+/** The token in the browser's storage, or null if there is none. */
+function storedToken(): string | null {
   const stored = readStored(STORAGE_KEYS.token);
   return stored === null || stored === '' ? null : stored;
+}
+
+/** A new token: 32 lower-case hex characters (128 bits) from the browser's own source of random numbers; null where it has none. */
+function makeToken(): string | null {
+  try {
+    if (typeof crypto === 'undefined' || typeof crypto.getRandomValues !== 'function') return null;
+    let token = '';
+    for (const byte of crypto.getRandomValues(new Uint8Array(16))) token += byte.toString(16).padStart(2, '0');
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The token to say `hello` with.
+ *
+ * A page that has one (in memory or in the storage) says hello with it. On
+ * a FIRST VISIT the page makes its own and stores it BEFORE it talks to the
+ * server, so that a second tab opened a moment later finds it and is the
+ * same player. (When the server made the token, the storage stayed empty
+ * until its answer had arrived, and every tab opened in that time became a
+ * player of its own.) The server accepts any token of the right form; it
+ * only ever compares the hash of a token with the hashes on the seats.
+ *
+ * null where the browser has no source of random numbers or stores nothing:
+ * the server then makes the token, as it always did.
+ */
+export function tokenForHello(): string | null {
+  const known = loadToken();
+  if (known !== null) return known;
+  identityIsNew = true;
+  const made = makeToken();
+  if (made === null || !writeStored(STORAGE_KEYS.token, made)) return null;
+  // Two tabs can still find the storage empty in the same instant and each
+  // write a token. What the storage holds now is what both will read.
+  tokenInMemory = storedToken() ?? made;
+  return tokenInMemory;
+}
+
+/**
+ * The second net under a first visit in several tabs: this page takes over
+ * the token in the browser's storage if another tab has put a different one
+ * there. Returns true if the page's token changed; the connection then says
+ * hello again, as that player.
+ *
+ * Only a page whose identity is new (see identityIsNew) ever does this, and
+ * the connection asks only while the app shows no lobby and no game
+ * (ConnectionHandlers.mayChangeIdentity): a page that came back with a
+ * stored token may own seats, and never forgets who it is. What is taken
+ * over must have the form of a token. Nothing is written: the storage
+ * decides, so two tabs cannot swap identities.
+ */
+export function adoptStoredToken(): boolean {
+  if (!identityIsNew) return false;
+  const stored = storedToken();
+  if (stored === null || stored === tokenInMemory || !TOKEN_PATTERN.test(stored)) return false;
+  tokenInMemory = stored;
+  return true;
+}
+
+/**
+ * Calls `changed` whenever ANOTHER tab of this browser changes the stored
+ * token (the browser's `storage` event; a tab is never told about its own
+ * writes). Returns a function that stops that. Does nothing where there is
+ * no browser.
+ */
+export function onTokenStoredElsewhere(changed: () => void): () => void {
+  try {
+    if (typeof window === 'undefined') return () => {};
+    const key = STORAGE_KEYS.token + profileSuffix();
+    const listener = (event: StorageEvent): void => {
+      if (event.key === key) changed();
+    };
+    window.addEventListener('storage', listener);
+    return () => window.removeEventListener('storage', listener);
+  } catch {
+    return () => {};
+  }
 }
 
 /**
@@ -300,10 +395,12 @@ export function webSocketUrl(): string | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Reloads the page, at most once per browser tab (a sessionStorage flag
- * remembers that it happened). Returns true if a reload was started, false
- * if this tab has already been reloaded once, cannot reload (no browser),
- * or cannot keep the flag (then "at most once" could not be promised).
+ * Reloads the page, at most once until the server has welcomed this tab
+ * again (a sessionStorage flag remembers that it happened; pageWasWelcomed
+ * takes it away). Returns true if a reload was started, false if this tab
+ * has already reloaded itself and was not welcomed since, cannot reload (no
+ * browser), or cannot keep the flag (then "at most once" could not be
+ * promised).
  * Used after `error protocolMismatch`: one reload fetches the new client; a
  * second mismatch means reloading does not help, and the app shows a fatal
  * message instead of looping.
@@ -322,6 +419,22 @@ export function reloadPageOnce(): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * The server has welcomed this page: if the tab had reloaded itself for an
+ * update, that reload has done its job, and the flag of reloadPageOnce is
+ * taken away. So the tab may reload itself once again at the NEXT update,
+ * days later (tabs of this game stay open that long). The guard against a
+ * reload loop is not weakened: a page that is still of the wrong version
+ * after its reload is never welcomed.
+ */
+export function pageWasWelcomed(): void {
+  try {
+    tabStorage()?.removeItem(RELOADED_FLAG_KEY);
+  } catch {
+    // A flag that cannot be removed only means that the next update asks for a press on Reload.
   }
 }
 

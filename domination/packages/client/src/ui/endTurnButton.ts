@@ -25,12 +25,20 @@ import { todoHints, waitingForText } from './texts';
  *    the button's meaning has changed, which is what makes a double-click
  *    harmless (see Controller.toggleEndTurn). The end-to-end script must
  *    therefore wait that long between two presses of this button.
- *  - disabled while `busy` or while the connection is not 'online'.
+ *  - GREYING, by the rule of every button that gives an order: disabled
+ *    only for a lasting reason, here while the connection is not 'online'.
+ *    Never for the blink of a round trip (`busy`): the button would turn
+ *    from gold to grey and back at every tap in a panel. A press in that
+ *    blink is ignored by the controller.
  *
  * Two additions that make the hint something a player can act on:
  *  - while there is something still to do, a small "Show me" button above
  *    End Turn selects the next such city or unit (controller.selectNextTask:
- *    idle cities, then waiting cities, then units) and scrolls the map to it;
+ *    idle cities, then waiting cities, then units) and scrolls the map to it.
+ *    (On a phone held upright it stands above the zoom buttons instead, and
+ *    the row of the three has a fixed height, whatever the hint says: the
+ *    panel above that row must not move when a tap changes the hint. See
+ *    the upright deck in styles.css.);
  *  - once the turn is ended, the hint names who the game is waiting for.
  *
  * @param showTile  scrolls the map to a tile (the game screen passes the
@@ -77,7 +85,7 @@ export function mountEndTurnButton(
 
     setAttribute(button, 'data-ended', ended ? 'true' : 'false');
     setClass(button, 'ended', ended);
-    setDisabled(button, state.busy || state.connection !== 'online');
+    setDisabled(button, state.connection !== 'online');
     setText(label, ended ? 'Waiting for others - tap to cancel' : 'End Turn');
 
     // One sentence per line (the stylesheet keeps the line breaks).

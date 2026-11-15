@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { CIVS, CIV_IDS } from '@domination/shared';
 import { setCivColors } from '../src/ui/civColors';
-import { PRESS_GUARD_MS, createPressGuard } from '../src/ui/pressGuard';
+import { PRESS_GUARD_MS, createKeyedPressGuard, createPressGuard } from '../src/ui/pressGuard';
 
 /**
  * Two small pieces of the screens that hold a decision and need no browser:
- * the guard against a press arriving twice (ui/pressGuard.ts) and the
+ * the guards against a press arriving twice (ui/pressGuard.ts: one for a
+ * single button, one with a key for the rows of the build queue) and the
  * colours a page element is handed for a civilization (ui/civColors.ts).
  */
 
@@ -60,6 +61,103 @@ describe('press guard (WP4)', () => {
       press('first');
       expect(sent).toEqual(['first']);
     }
+  });
+});
+
+describe('keyed press guard: the row buttons of the build queue', () => {
+  const GUARD_MS = 600;
+
+  /** A keyed guard on a clock the test sets, and the keys of the presses that went out. */
+  function guardAt(start = 5000) {
+    const clock = { now: start };
+    const sent: string[] = [];
+    const guard = createKeyedPressGuard(GUARD_MS, () => clock.now);
+    const press = (key: string, accepted = true): void =>
+      guard.press(key, () => {
+        if (accepted) sent.push(key);
+        return accepted;
+      });
+    return { clock, sent, press, guard };
+  }
+
+  it('a double-click on one button counts once: the second press on the SAME key within the guard time is ignored', () => {
+    const { clock, sent, press } = guardAt();
+    press('up:2');
+    clock.now += 120;
+    press('up:2');
+    clock.now += GUARD_MS - 121;
+    press('up:2'); // still inside the guard, one millisecond before it runs out
+    expect(sent).toEqual(['up:2']);
+    clock.now += 1;
+    press('up:2');
+    expect(sent).toEqual(['up:2', 'up:2']);
+  });
+
+  it('a press on another row\'s button counts at once, at any pace: up on row 6, 5, 4, 3, 2 carries one entry to the top', () => {
+    for (const gap of [0, 100, 300, 500, 700, 900]) {
+      const { clock, sent, press } = guardAt();
+      for (const row of [5, 4, 3, 2, 1]) {
+        press(`up:${row}`);
+        clock.now += gap;
+      }
+      expect(sent, `${gap} ms between the presses`).toEqual(['up:5', 'up:4', 'up:3', 'up:2', 'up:1']);
+    }
+  });
+
+  it('the other button of the same row counts at once too', () => {
+    const { clock, sent, press } = guardAt();
+    press('up:3');
+    clock.now += 50;
+    press('down:3');
+    clock.now += 50;
+    press('remove:3');
+    expect(sent).toEqual(['up:3', 'down:3', 'remove:3']);
+  });
+
+  it('each key has its own time: a press elsewhere in between does not end the guard of the first', () => {
+    const { clock, sent, press } = guardAt();
+    press('remove:2');
+    clock.now += 200;
+    press('up:4');
+    clock.now += 200;
+    press('remove:2'); // 400 ms after the accepted press on this very button
+    expect(sent).toEqual(['remove:2', 'up:4']);
+    clock.now += 200;
+    press('remove:2');
+    expect(sent).toEqual(['remove:2', 'up:4', 'remove:2']);
+  });
+
+  it('a press that did not go out starts no guard, and an ignored press does not start the time again', () => {
+    const { clock, sent, press } = guardAt();
+    press('remove:0', false); // the answer to another action was on its way
+    clock.now += 10;
+    press('remove:0');
+    clock.now += GUARD_MS - 1;
+    press('remove:0'); // ignored...
+    clock.now += 1;
+    press('remove:0'); // ...and the guard still ends 600 ms after the press that went out
+    expect(sent).toEqual(['remove:0', 'remove:0']);
+  });
+
+  it('carryOver: the button the keyboard focus was moved to is guarded for the rest of the last press\'s time, and no longer', () => {
+    const { clock, sent, press, guard } = guardAt();
+    guard.carryOver('remove:1'); // nothing was pressed yet: nothing to carry
+    press('remove:1');
+    expect(sent).toEqual(['remove:1']);
+
+    clock.now += 1000;
+    press('remove:2'); // Enter on the x of the last row: the row goes away...
+    clock.now += 20;
+    guard.carryOver('remove:1'); // ...and the focus is moved to the x of the new last row
+    clock.now += 280;
+    press('remove:1'); // the second Enter, 300 ms after the first
+    expect(sent).toEqual(['remove:1', 'remove:2']);
+    clock.now += 299;
+    press('remove:1'); // 599 ms after the press that removed the row
+    expect(sent).toEqual(['remove:1', 'remove:2']);
+    clock.now += 1;
+    press('remove:1');
+    expect(sent).toEqual(['remove:1', 'remove:2', 'remove:1']);
   });
 });
 

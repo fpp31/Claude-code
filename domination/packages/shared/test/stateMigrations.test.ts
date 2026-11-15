@@ -414,6 +414,40 @@ describe('migrateGameState: what it does with other things', () => {
     expect(migrateGameState({ schema: STATE_SCHEMA })).toEqual({ schema: STATE_SCHEMA });
   });
 
+  it('a layout 1 city whose field "production" is missing is tolerated: it builds nothing, keeps what it had stored, and the game is healthy and plays on', () => {
+    const save = shortSave();
+    // Rome was building a Warrior and had production stored for it; the line is lost (a slip while the save was edited by hand).
+    const [romeId, rome] = Object.entries(save.cities).find(([, city]) => city.production !== null && city.productionStored > 0) ?? [];
+    if (romeId === undefined || rome === undefined) throw new Error('the short save has no city that is building something');
+    const stored = rome.productionStored;
+    delete (rome as { production?: unknown }).production;
+    expect(Object.hasOwn(save.cities[romeId], 'production')).toBe(false);
+
+    const state = migrated(save);
+    expect(state.schema).toBe(STATE_SCHEMA);
+    expect(state.cities[romeId].buildQueue).toEqual([]);
+    expect(state.cities[romeId].productionStored).toBe(stored);
+    expect(state.cities[romeId]).not.toHaveProperty('production');
+    expect(checkInvariants(state)).toEqual([]);
+    // Every other city is converted as usual.
+    for (const [id, city] of Object.entries(save.cities)) {
+      if (id !== romeId) expect(state.cities[id].buildQueue, id).toEqual(city.production === null ? [] : [city.production]);
+    }
+
+    // The game goes on, and the city is idle like any city with an empty
+    // queue: what it had saved stays, and a queue can be given to it.
+    let played = state;
+    for (const player of played.players) {
+      if (!player.endedTurn) played = act(played, player.id, { type: 'endTurn' });
+    }
+    expect(played.turn).toBe(state.turn + 1);
+    expect(played.cities[romeId].productionStored).toBe(stored);
+    const owner = played.cities[romeId].owner;
+    played = act(played, owner, { type: 'setBuildQueue', cityId: romeId, queue: queueOf('warrior') });
+    expect(played.cities[romeId].buildQueue).toEqual(queueOf('warrior'));
+    expect(checkInvariants(played)).toEqual([]);
+  });
+
   it('a layout 1 state without its cities, with a production that is not an item, or whose tiles are not a list throws, and the input is untouched', () => {
     const firstCity = Object.keys(shortSave().cities)[0];
     const firstUnit = Object.keys(shortSave().units)[0];

@@ -33,13 +33,13 @@ export type MapSelection = { kind: 'unit'; unitId: UnitId } | { kind: 'city'; ci
 
 /**
  * The answers to "let me into this game" that pressing Join again will not
- * change: the game does not exist, it has started without this player, or
- * every seat is taken.
+ * change: the game does not exist, the server has it on disk but could not
+ * load it, it has started without this player, or every seat is taken.
  */
-export type JoinProblem = Extract<ProtocolErrorCode, 'noSuchGame' | 'gameAlreadyStarted' | 'gameFull'>;
+export type JoinProblem = Extract<ProtocolErrorCode, 'noSuchGame' | 'gameNotLoaded' | 'gameAlreadyStarted' | 'gameFull'>;
 
 /** The JoinProblem codes as a list (for telling them apart from the other errors). */
-export const JOIN_PROBLEMS: readonly JoinProblem[] = ['noSuchGame', 'gameAlreadyStarted', 'gameFull'];
+export const JOIN_PROBLEMS: readonly JoinProblem[] = ['noSuchGame', 'gameNotLoaded', 'gameAlreadyStarted', 'gameFull'];
 
 /** A short message that pops up and fades away. */
 export interface Toast {
@@ -121,7 +121,9 @@ export interface AppState {
    * True while a game action is waiting for the server's answer. Only one
    * action is in flight at a time, so the client never has to reorder
    * anything; buttons and map taps that would send an action are ignored
-   * while it is set.
+   * while it is set. (One exception: a press on an add button of the build
+   * queue waits for the answer to an edit of the same queue, see
+   * Controller.addToQueue.)
    */
   busy: boolean;
   toasts: Toast[];

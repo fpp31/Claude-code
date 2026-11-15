@@ -40,3 +40,58 @@ export function createPressGuard(guardMs: number = PRESS_GUARD_MS, now: () => nu
     },
   };
 }
+
+/**
+ * A press guard for a GROUP of buttons, each with a key of its own (the
+ * rows of the build queue: 'up:2' is the up arrow of the third row place).
+ *
+ * A row button keeps its place on the screen while the entries move through
+ * the rows. So the second click of a double-click lands on the SAME button,
+ * which by then holds another entry: that press must be ignored. A press on
+ * another button is a new decision of the player's and counts at once,
+ * however soon it comes: "up on row 6, up on row 5, up on row 4" carries
+ * one entry to the top at any pace.
+ */
+export interface KeyedPressGuard {
+  /**
+   * Runs `send` unless a press with the SAME key went out less than the
+   * guard time ago. `send` answers whether its message really went out;
+   * only then does the guard time of that key start.
+   */
+  press(key: string, send: () => boolean): void;
+  /**
+   * The button that was pressed last has gone from the screen, and the
+   * keyboard focus was moved to the button with this key (see the city
+   * panel). A press on that button is then ignored for the rest of the
+   * guard time of that last press: the second Enter of a double press must
+   * not count there. Does nothing if no press went out within the guard time.
+   */
+  carryOver(key: string): void;
+}
+
+/**
+ * @param guardMs  how long a press on a key is ignored after one on the same key that went out
+ * @param now      the clock in milliseconds; only tests pass one
+ */
+export function createKeyedPressGuard(guardMs: number, now: () => number = Date.now): KeyedPressGuard {
+  /** When the last press that went out was, key by key. */
+  const sentAt = new Map<string, number>();
+  let lastSentAt: number | null = null;
+  return {
+    press(key, send) {
+      const time = now();
+      const before = sentAt.get(key);
+      if (before !== undefined && time - before < guardMs) return;
+      if (!send()) return;
+      // Times that are over are of no use any more: the map never holds more than the presses of one guard time.
+      for (const [other, at] of sentAt) if (time - at >= guardMs) sentAt.delete(other);
+      sentAt.set(key, time);
+      lastSentAt = time;
+    },
+    carryOver(key) {
+      if (lastSentAt === null || now() - lastSentAt >= guardMs) return;
+      const before = sentAt.get(key);
+      if (before === undefined || before < lastSentAt) sentAt.set(key, lastSentAt);
+    },
+  };
+}

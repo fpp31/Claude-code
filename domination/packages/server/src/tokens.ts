@@ -2,12 +2,20 @@
  * Secrets and codes. All randomness here comes from node:crypto; it has
  * nothing to do with the seeded game randomness in packages/shared.
  *
- * Identity model: there are no accounts. On a browser's first visit the
- * server makes a random TOKEN and the browser keeps it in localStorage. A
- * seat in a game remembers only the SHA-256 hash of its owner's token.
- * Whoever presents a token with that hash is that player: this is how a
- * player gets back to their seat after a reload, days later, or after a
- * server restart.
+ * Identity model: there are no accounts. A browser keeps a random TOKEN in
+ * localStorage. On its first visit the page makes the token itself and
+ * stores it before it says hello (so that every tab of the browser finds
+ * the same one); for a page that sends none, or something that is not a
+ * token, the server makes one. A seat in a game remembers only the SHA-256
+ * hash of its owner's token. Whoever presents a token with that hash is
+ * that player: this is how a player gets back to their seat after a
+ * reload, days later, or after a server restart.
+ *
+ * The server keeps no list of tokens. A token it has never seen is
+ * therefore as good as one it made, and that gives a client no power: a
+ * token only ever matters through its hash on a seat, and to present the
+ * token of somebody else's seat one must know it (128 random bits).
+ * A page that proposes a weak token of its own weakens only its own seats.
  */
 
 import { createHash, randomBytes, randomInt } from 'node:crypto';

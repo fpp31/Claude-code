@@ -59,21 +59,34 @@ const hover: SpriteSource = {
   rows: hexRows((_x, _y, ring) => (ring === 0 ? 'h' : '.')),
 };
 
-/** A tile worked by a citizen: a small gold token. */
+/**
+ * A tile worked by a citizen: a small gold token in the top point of the
+ * tile's hexagon (x 9 to 17, y 0 to 5), drawn after the units.
+ *
+ * Why there. The token used to lie in the middle of the tile, under
+ * whatever stood on it, and the worked tiles are where the Workers stand:
+ * with a city selected most tokens could not be seen. The top point is the
+ * one place of a tile that is free of everything else: a unit's head begins
+ * at y 5 (the token's last row lies on the dark line around the head, dark
+ * on dark), a farm at y 7, a mine at y 9, the "at work" sign at y 6 at the
+ * highest, and the name banner of a city further down lies on the LOWER
+ * part of the tiles above it. It is six rows tall, not seven as it was, so
+ * that it ends on that line. One thing it does cover: the feather on a
+ * Scout's cap, which is the only part of a unit that reaches higher.
+ */
 const worked: SpriteSource = {
-  width: 9,
-  height: 7,
-  offsetX: 10,
-  offsetY: 11,
+  width: 10,
+  height: 6,
+  offsetX: 9,
+  offsetY: 0,
   colors: { l: PALETTE.tokenLight, g: PALETTE.gold, d: PALETTE.tokenShade },
   rows: [
-    '..###....',
-    '.#lgg#...',
-    '#lgggd#..',
-    '#ggggd#..',
-    '#gggdd#::',
-    '.#ddd#:::',
-    '..###::::',
+    '..####....',
+    '.#lggg#...',
+    '#lggggd#..',
+    '#ggggdd#::',
+    '.#dddd#:::',
+    '..####::..',
   ],
 };
 

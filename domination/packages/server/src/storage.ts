@@ -97,6 +97,24 @@ export interface Storage {
  */
 const ROOM_FILE_MIGRATIONS: Record<number, (older: Record<string, unknown>) => Record<string, unknown>> = {};
 
+/** How many problems of a converted save the log line names. */
+const PROBLEMS_NAMED = 3;
+
+/**
+ * What the log line about a converted save that is not healthy ends with.
+ * The likeliest reason by far is a game played with numbers that were tuned
+ * by hand and are back at their defaults after the update.
+ */
+const TUNED_NUMBERS_REMEDY =
+  'If you changed numbers in packages/shared/src/data, make the same change again and restart. The file has not been touched.';
+
+/** "2 problem(s): A. B." or "5 problem(s), the first 3: A. B. C.": how many there are, and the first few in full. */
+function firstProblems(problems: readonly string[]): string {
+  const named = problems.slice(0, PROBLEMS_NAMED).join(' ');
+  const intro = problems.length <= PROBLEMS_NAMED ? ':' : `, the first ${PROBLEMS_NAMED}:`;
+  return `${problems.length} problem(s)${intro} ${named}`;
+}
+
 /** How often a rename is tried before a save gives up, and the pause between tries. */
 const RENAME_ATTEMPTS = 5;
 const RENAME_PAUSE_MS = 20;
@@ -231,16 +249,28 @@ export function createStorage(dataDir: string, log: (line: string) => void, writ
       // A conversion that leaves a game the rules call unhealthy must never
       // reach the file: the first accepted action would save it over what
       // the older version wrote. So it counts as a failed conversion.
+      //
+      // Some of the health check's questions read the number tables (a
+      // unit's moves left, the distance between cities). A game that was
+      // played with tuned numbers is therefore refused here when this
+      // version runs with other numbers. Nothing is lost by that (the file
+      // stays as it is), and the log line says what to do.
       let problems: string[];
       try {
         problems = checkInvariants(converted);
       } catch (error) {
-        problems = [`the health check itself failed: ${describe(error)}`];
+        // A guard that no known save reaches: every damaged save that was
+        // tried either stopped the conversion above or was named by the
+        // health check. It is here for a check that meets something it was
+        // not written for, and it has no test: the check is imported
+        // straight from the shared package (not through the Rules bundle a
+        // test can replace), so nothing can make it throw on command.
+        problems = [`The health check itself failed: ${describe(error)}.`];
       }
       if (problems.length > 0) {
         log(
           `Saved games: ${name} was left alone and NOT loaded. Its game state has layout ${schema}; brought up to ` +
-            `layout ${STATE_SCHEMA} it has ${problems.length} problem(s), the first: ${problems[0]}`,
+            `layout ${STATE_SCHEMA} it has ${firstProblems(problems)} ${TUNED_NUMBERS_REMEDY}`,
         );
         return null;
       }

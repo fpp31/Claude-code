@@ -44,8 +44,11 @@ export interface HoverInfoTimer {
   mapMoved(tile: TileIndex | null, byPointer: boolean): void;
   /**
    * A press on the map, the Escape key, the window lost the focus: away with
-   * the box, and quiet until the mouse is on another tile. Returns true if
-   * a box was showing (Escape then does nothing else).
+   * the box, and quiet until the mouse is on another tile than the one it
+   * is on now. It gets there by moving onto one; or the map puts one under
+   * it by moving by itself (a key, centring, the map stepping aside), and
+   * the quiet is then over when the mouse next moves. Returns true if a box
+   * was showing (Escape then does nothing else).
    */
   dismiss(): boolean;
   /** A mouse drag of the map has ended: the quiet ends, and the tile under the mouse gets its box after the full delay. */
@@ -72,7 +75,10 @@ function realTimers(): HoverInfoEnvironment {
  *  - it goes the moment the mouse is on another tile, and the next one comes
  *    after the short delay ("warm"), unless the caller asks for patience;
  *  - after a dismiss nothing is shown until the mouse is on another tile
- *    ("quiet"); the end of a drag ends the quiet;
+ *    than the dismissed one ("quiet"): one it moved onto, or one the map
+ *    put under it by moving by itself, as soon as the mouse then moves (the
+ *    player is plainly asking about a new tile). A map moved by the pointer
+ *    (the wheel) does not end the quiet; the end of a drag does;
  *  - after the map moved by itself nothing is shown until the mouse itself
  *    moves ("still"); after the pointer moved the map, the tile under the
  *    mouse gets its box a full delay after the last move.
@@ -83,6 +89,7 @@ export function createHoverInfoTimer(commands: HoverInfoCommands, environment: H
   let tile: TileIndex | null = null; // under the mouse
   let shown: TileIndex | null = null; // what the box describes
   let quiet = false; // dismissed: nothing until the mouse is on another tile
+  let quietOn: TileIndex | null = null; // the tile the mouse was on at the dismiss
   let still = false; // the map moved by itself: nothing until the mouse itself moves
   let warm = false; // a box was showing a moment ago: the next one comes sooner
   let timer: unknown = null;
@@ -116,9 +123,12 @@ export function createHoverInfoTimer(commands: HoverInfoCommands, environment: H
     pointerOver(next, patient) {
       const moved = next !== tile;
       if (!moved && !still) return; // the same tile, and nothing to wake up (also while quiet)
+      // The mouse moved. It is on another tile than at the dismiss if it
+      // crossed onto one, or if the map moved by itself meanwhile (`still`)
+      // and left another one under it.
+      if (moved || (still && next !== quietOn)) quiet = false;
       tile = next;
       still = false;
-      if (moved) quiet = false;
       cancel();
       setShown(null); // a box never follows the mouse: it goes away at once
       if (next === null) {
@@ -145,6 +155,7 @@ export function createHoverInfoTimer(commands: HoverInfoCommands, environment: H
     dismiss() {
       const was = shown !== null;
       quiet = true;
+      quietOn = tile;
       warm = false;
       cancel();
       setShown(null);

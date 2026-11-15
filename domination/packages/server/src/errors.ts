@@ -14,6 +14,7 @@ export const PROTOCOL_ERROR_MESSAGES: Record<ProtocolErrorCode, string> = {
   badMessage: 'The server did not understand that message.',
   notReady: 'The connection is not ready yet.',
   noSuchGame: 'There is no game with that code.',
+  gameNotLoaded: 'This game is on the server but could not be opened. Ask the person who runs the server.',
   nameRequired: 'Enter a name to join this game.',
   badName: 'Please enter a name.',
   gameFull: 'This game is full.',

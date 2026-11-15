@@ -808,10 +808,10 @@ describe('citizens: food before production while the city would not grow', () =>
     const map = state.map;
     const [grassA, grassB] = [at(map, 3, 2), at(map, 4, 3)];
     const [forest, mine, coast] = [at(map, 2, 3), at(map, 3, 4), at(map, 4, 4)];
-    expect(tileYields(map.tiles[mine])).toEqual({ food: 0, production: 3 });
+    expect(tileYields(map.tiles[mine])).toEqual({ food: 0, production: 4 });
 
-    // The first choice would be grassland, grassland and the mine (3 + 3 + 3):
-    // food 2 + 2 + 2 + 0 = 6 for three citizens who eat 6. The mine is given up for the coast.
+    // The first choice would be the mine, grassland and grassland (4 + 3 + 3):
+    // food 2 + 0 + 2 + 2 = 6 for three citizens who eat 6. The mine is given up for the coast.
     const economy = cityEconomy(state, city);
     expect(economy.worked).toEqual([grassA, grassB, coast].sort((a, b) => a - b));
     expect(economy.worked).not.toContain(mine);
@@ -824,7 +824,8 @@ describe('citizens: food before production while the city would not grow', () =>
     const grown = playUntilGrown(state, city.id);
     expect(grown.cities[city.id].population).toBe(4);
 
-    // With fewer citizens the first choice already feeds the city: nothing is swapped.
+    // With fewer citizens it is the same: the mine is the first choice,
+    // feeds nobody, and is given up for the best grassland tile not yet worked.
     expect(cityEconomy(mineTown(1).state, mineTown(1).city).worked).toEqual([grassA]);
     expect(cityEconomy(mineTown(2).state, mineTown(2).city).worked).toEqual([grassA, grassB].sort((a, b) => a - b));
   });
@@ -844,11 +845,89 @@ describe('citizens: food before production while the city would not grow', () =>
     const state = arrange(bare.state, (draft) => improve(draft, farm, 'farm'));
     const city = state.cities[bare.city.id];
 
-    // Farm 3 + 1, grassland 2 + 1, mine 0 + 3: food 2 + 3 + 2 + 0 = 7 against 6 eaten. Nothing to swap.
+    // Farm 3 + 1, mine 0 + 4, grassland 2 + 1: food 2 + 3 + 0 + 2 = 7 against 6 eaten. Nothing to swap.
     const economy = cityEconomy(state, city);
     expect(economy.worked).toEqual([at(map, 3, 2), farm, at(map, 3, 4)].sort((a, b) => a - b));
     expect(economy.foodSurplus).toBe(1);
-    expect(economy.production).toBe(1 + 1 + 1 + 3);
+    expect(economy.production).toBe(1 + 1 + 1 + 4);
+  });
+
+  /**
+   * A city drawn like a real capital: the city at (3,3) on grassland, and
+   * around it eight open grassland tiles, eight plains tiles, one hill (3,4)
+   * and one mountain (3,5). (The small MINE_TOWN above has two grassland
+   * tiles; a generated capital has about fourteen open tiles, and there a
+   * mine must still be worth its five Worker turns.)
+   */
+  const CAPITAL: readonly string[] = [
+    'm m m m m m m',
+    ' m m g g p m m',
+    'm m g g p p m',
+    ' m g g g p p m',
+    'm m g h p p m',
+    ' m m g m p m m',
+    'm m m m m m m',
+  ];
+
+  /** CAPITAL with two citizens and a Mine on its hill; `farm` puts a Farm on the grassland at (4,3). */
+  function capitalWithMine(farm: boolean): { state: GameState; city: City; mine: TileIndex; farmTile: TileIndex } {
+    const bare = cityAtCentre(CAPITAL, 2);
+    const mine = at(bare.state.map, 3, 4);
+    const farmTile = at(bare.state.map, 2, 3);
+    const state = arrange(bare.state, (draft) => {
+      improve(draft, mine, 'mine');
+      if (farm) improve(draft, farmTile, 'farm');
+    });
+    return { state, city: state.cities[bare.city.id], mine, farmTile };
+  }
+
+  it('the land of CAPITAL is what its comment says: 8 open grassland, 8 plains, one hill and one mountain around the city', () => {
+    const { state, city } = cityAtCentre(CAPITAL, 2);
+    const kinds = state.map.tiles
+      .filter((tile, index) => tile.cityId === city.id && index !== city.tile)
+      .map((tile) => tile.feature ?? tile.terrain)
+      .sort();
+    expect(kinds).toEqual([...Array<string>(8).fill('grassland'), 'hills', 'mountains', ...Array<string>(8).fill('plains')]);
+  });
+
+  it('a capital of two citizens with ONE farmed grassland works its mine: the farm feeds the citizen in the mine', () => {
+    const { state, city, mine, farmTile } = capitalWithMine(true);
+
+    // Farm 3 + 1 and mine 0 + 4 are the two best tiles; food 2 + 3 + 0 = 5 against 4 eaten: the city still grows.
+    const economy = cityEconomy(state, city);
+    expect(economy.worked).toEqual([farmTile, mine].sort((a, b) => a - b));
+    expect(tileYields(state.map.tiles[mine])).toEqual({ food: 0, production: 4 });
+    expect(tileYields(state.map.tiles[farmTile])).toEqual({ food: 3, production: 1 });
+    expect(economy.foodSurplus).toBe(1);
+    expect(economy.production).toBe(1 + 1 + 4);
+  });
+
+  it('the same capital WITHOUT the farm does not work its mine: the centre feeds one citizen and no bare tile feeds a second, so a citizen in the mine would stop the city growing', () => {
+    const { state, city, mine } = capitalWithMine(false);
+    const map = state.map;
+
+    // The first choice is the mine and a grassland tile: food 2 + 0 + 2 = 4
+    // against 4 eaten. The mine is given up for the next grassland tile.
+    const economy = cityEconomy(state, city);
+    expect(economy.worked).not.toContain(mine);
+    expect(economy.worked).toEqual([at(map, 2, 1), at(map, 3, 1)]);
+    expect(economy.foodSurplus).toBe(2);
+    expect(economy.production).toBe(1 + 1 + 1);
+
+    // Growing does not bring the mine into use: at every size at which the
+    // city can still grow, the city without a farm leaves it alone.
+    for (let population = 1; population <= 9; population++) {
+      const growing = cityEconomy(state, { ...city, population });
+      expect(growing.foodSurplus, `population ${population}`).toBeGreaterThanOrEqual(RULES.minFoodSurplus);
+      expect(growing.worked, `population ${population}`).not.toContain(mine);
+    }
+    // Only a city that has grown as large as its land can feed works it:
+    // ten citizens eat 20, and the centre, eight grassland and two plains
+    // tiles give 20. Nothing lets this city grow, so the first choice
+    // stands, and the mine is the best tile of the first choice.
+    const full = cityEconomy(state, { ...city, population: 10 });
+    expect(full.foodSurplus).toBeLessThanOrEqual(0);
+    expect(full.worked).toContain(mine);
   });
 
   it('a city of 2 on plains that owns coast gives up one plains tile for the coast and grows', () => {
@@ -882,79 +961,93 @@ describe('citizens: food before production while the city would not grow', () =>
   });
 
   it('the swap gives up the tile with the least food and takes the spare tile with the most, and breaks ties as documented', () => {
-    // WHICH TILE IS GIVEN UP. Three citizens; a mined hill (X: 0 food, 3
-    // production), two bare hills (h: 0 food, 2 production) and ocean (~: 1
-    // food) around the city. First choice: the mine and both hills, no food
-    // at all. One swap is possible, for the ocean. All three chosen tiles
-    // have the least food; the tie goes to the lower total (a hill, not the
-    // mine), and then to the HIGHER tile index. The two drawings put the
-    // same tiles in another order; the rule does not care.
+    // WHICH TILE IS GIVEN UP. Seven citizens; around the city a mined hill
+    // (X: 0 food, 4 production), two bare hills (h: 0 food, 2 production)
+    // and ocean (~: 1 food), and in the city's own row four grassland tiles
+    // that all carry a farm (3 food, 1 production). First choice: the four
+    // farms, the mine and both hills, 14 food for 14 eaten. One swap, for
+    // the ocean, lets the city grow. The mine and both hills have the least
+    // food; the tie goes to the lower total (a hill, not the mine), and then
+    // to the HIGHER tile index. The four drawings put the same tiles in
+    // another order; the rule does not care.
     for (const ring of ['X h h ~', '~ h h X', 'h X ~ h', 'h ~ X h']) {
       const [a, b, c, d] = ring.split(' ');
       const rows = [
         'm m m m m m m',
         ' m m m m m m m',
         `m m m ${a} ${b} m m`,
-        ' m m m g m m m',
+        ' m g g g g g m',
         `m m m ${c} ${d} m m`,
         ' m m m m m m m',
         'm m m m m m m',
       ].map((row) => row.replaceAll('X', 'h'));
-      const spots = [at({ width: 7, height: 7 }, 3, 2), at({ width: 7, height: 7 }, 4, 2), at({ width: 7, height: 7 }, 3, 4), at({ width: 7, height: 7 }, 4, 4)];
+      const size = { width: 7, height: 7 };
+      const spots = [at(size, 3, 2), at(size, 4, 2), at(size, 3, 4), at(size, 4, 4)];
+      const farms = [at(size, 1, 3), at(size, 2, 3), at(size, 4, 3), at(size, 5, 3)];
       const drawn = [a, b, c, d];
       const mine = spots[drawn.indexOf('X')];
       const ocean = spots[drawn.indexOf('~')];
       const hills = spots.filter((_, index) => drawn[index] === 'h');
-      const bare = cityAtCentre(rows, 3);
-      const state = arrange(bare.state, (draft) => improve(draft, mine, 'mine'));
+      const bare = cityAtCentre(rows, 7);
+      const state = arrange(bare.state, (draft) => {
+        improve(draft, mine, 'mine');
+        for (const tile of farms) improve(draft, tile, 'farm');
+      });
       const economy = cityEconomy(state, state.cities[bare.city.id]);
-      expect(economy.worked, ring).toEqual([mine, Math.min(...hills), ocean].sort((x, y) => x - y));
-      expect(economy.food, ring).toBe(2 + 1);
+      expect(economy.worked, ring).toEqual([...farms, mine, Math.min(...hills), ocean].sort((x, y) => x - y));
+      expect(economy.food, ring).toBe(2 + 4 * 3 + 1);
+      expect(economy.foodSurplus, ring).toBe(1);
     }
 
     // WHICH SPARE TILE IS TAKEN. Two mined hills (X) are the first choice of
-    // two citizens; spare are a forest (f: 1 food, 1 production) and two
+    // the citizens; spare are a forest (f: 1 food, 1 production) and two
     // ocean tiles (~: 1 food). All three have the most food; the tie goes to
     // the higher total (the forest), and then to the LOWER tile index.
     for (const ring of ['X X f ~ ~', '~ ~ f X X', '~ f ~ X X', 'X ~ X ~ f', 'f X ~ X ~']) {
       const drawn = ring.split(' ');
-      const rows = [
-        'm m m m m m m',
-        ' m m m m m m m',
-        `m m m ${drawn[0]} ${drawn[1]} m m`,
-        ` m m ${drawn[2]} g m m m`,
-        `m m m ${drawn[3]} ${drawn[4]} m m`,
-        ' m m m m m m m',
-        'm m m m m m m',
-      ].map((row) => row.replaceAll('X', 'h'));
+      /** The land with the tile east of the city as mountains ('m') or as grassland that carries a farm ('g'). */
+      const rowsWith = (east: 'm' | 'g'): string[] =>
+        [
+          'm m m m m m m',
+          ' m m m m m m m',
+          `m m m ${drawn[0]} ${drawn[1]} m m`,
+          ` m m ${drawn[2]} g ${east} m m`,
+          `m m m ${drawn[3]} ${drawn[4]} m m`,
+          ' m m m m m m m',
+          'm m m m m m m',
+        ].map((row) => row.replaceAll('X', 'h'));
       const size = { width: 7, height: 7 };
       const spots = [at(size, 3, 2), at(size, 4, 2), at(size, 2, 3), at(size, 3, 4), at(size, 4, 4)];
+      const east = at(size, 4, 3);
       const mines = spots.filter((_, index) => drawn[index] === 'X');
       const oceans = spots.filter((_, index) => drawn[index] === '~');
       const forest = spots[drawn.indexOf('f')];
 
-      const withMines = (population: number): { state: GameState; city: City } => {
-        const bare = cityAtCentre(rows, population);
+      const withMines = (population: number, farm: boolean): { state: GameState; city: City } => {
+        const bare = cityAtCentre(rowsWith(farm ? 'g' : 'm'), population);
         const state = arrange(bare.state, (draft) => {
           for (const tile of mines) improve(draft, tile, 'mine');
+          if (farm) improve(draft, east, 'farm');
         });
         return { state, city: state.cities[bare.city.id] };
       };
 
       // One citizen: the first mine (lower index) is the first choice; it is given up for the forest.
-      const one = withMines(1);
+      const one = withMines(1, false);
       expect(cityEconomy(one.state, one.city).worked, ring).toEqual([forest]);
 
-      // Two citizens: the forest first, then the ocean tile with the lower
-      // index. A third swap (the other ocean for the first) would not raise the food.
-      const two = withMines(2);
-      const economy = cityEconomy(two.state, two.city);
-      expect(economy.worked, ring).toEqual([forest, Math.min(...oceans)].sort((x, y) => x - y));
-      expect(economy.foodSurplus, ring).toBe(0);
+      // Three citizens and a farm east of the city: the first choice is the
+      // farm and both mines, 5 food for 6 eaten. The first swap takes the
+      // forest, the second the ocean tile with the lower index; then the
+      // city grows, and the other ocean tile stays spare.
+      const three = withMines(3, true);
+      const economy = cityEconomy(three.state, three.city);
+      expect(economy.worked, ring).toEqual([east, forest, Math.min(...oceans)].sort((x, y) => x - y));
+      expect(economy.foodSurplus, ring).toBe(1);
     }
   });
 
-  it('a city that cannot reach the aim ends with the most food its land gives; a city with more citizens than tiles is left alone', () => {
+  it('a city that cannot reach the aim keeps its first choice (it used to end with the most food its land gives); a city with more citizens than tiles is left alone', () => {
     // Around the city: two mined hills (X), bare hills (h), two ocean tiles
     // (~) and desert (d). Three citizens would need 6 food; the land gives
     // the centre's 2 and one more from each ocean tile.
@@ -984,11 +1077,13 @@ describe('citizens: food before production while the city would not grow', () =>
       .sort((a, b) => b - a);
     const most = cityCenterYields(state.map.tiles[city.tile]).food + foods[0] + foods[1] + foods[2];
     expect(most).toBe(4);
-    expect(economy.food).toBe(most);
-    expect(economy.foodSurplus).toBe(most - 6); // still short: the city does not grow, and never shrinks
-    // Both ocean tiles, and of the tiles without food the best one: the mine with the lower index.
-    expect(economy.worked).toEqual([mines[0], at(map, 4, 3), at(map, 3, 4)].sort((a, b) => a - b));
-    expect(economy.production).toBe(1 + 3);
+    expect(most - 6).toBeLessThan(RULES.minFoodSurplus); // whatever the citizens do, the city does not grow
+    // So nothing is given up for food that would change nothing: both mines
+    // and the bare hills, the three best tiles, as the first choice has it.
+    expect(economy.worked).toEqual([mines[0], mines[1], at(map, 2, 3)].sort((a, b) => a - b));
+    expect(economy.food).toBe(2);
+    expect(economy.foodSurplus).toBe(2 - 6); // short: the store runs empty, and the city never shrinks
+    expect(economy.production).toBe(1 + 4 + 4 + 2);
 
     // More citizens than tiles: every tile is worked, nothing is spare, nothing is swapped.
     const crowded = cityAtCentre(SAMPLER, 10);
@@ -999,6 +1094,84 @@ describe('citizens: food before production while the city would not grow', () =>
     expect(new Set(economy.worked).size).toBe(economy.worked.length);
   });
 
+  /**
+   * Plains by the sea, a common start: the city at (3,3) on plains, and
+   * around it twelve plains tiles (1 food, 2 production), five coast tiles
+   * (2 food) and one ocean tile (1 food).
+   */
+  const PLAINS_BY_THE_SEA: readonly string[] = [
+    'm m m m m m m',
+    ' m m , , , m m',
+    'm m p p , , m',
+    ' m p p p p ~ m',
+    'm m p p p p m',
+    ' m m p p p m m',
+    'm m m m m m m',
+  ];
+
+  it('a city that cannot grow whatever its citizens do keeps its first choice: seven citizens on twelve plains, five coast and one ocean work seven plains', () => {
+    const { state, city } = cityAtCentre(PLAINS_BY_THE_SEA, 7);
+    const map = state.map;
+    const own = map.tiles.map((_, tile) => tile).filter((tile) => map.tiles[tile].cityId === city.id && tile !== city.tile);
+    expect(own.map((tile) => map.tiles[tile].terrain).sort()).toEqual([
+      ...Array<string>(5).fill('coast'),
+      'ocean',
+      ...Array<string>(12).fill('plains'),
+    ]);
+
+    // The most food seven citizens can find: the centre's 2, five coast
+    // tiles and two plains tiles, 14 in all, and they eat 14. The city
+    // cannot grow, wherever they work.
+    const foods = own.map((tile) => tileYields(map.tiles[tile]).food).sort((a, b) => b - a);
+    const most = cityCenterYields(map.tiles[city.tile]).food + foods.slice(0, 7).reduce((sum, food) => sum + food, 0);
+    expect(most - RULES.foodPerCitizen * 7).toBe(0);
+
+    // So they stay where the first choice put them, on the seven plains
+    // tiles with the lowest index: 14 production from the tiles and 2 from
+    // the centre. (Swapped for the coast they made 6, for food nobody could use.)
+    const plains = own.filter((tile) => map.tiles[tile].terrain === 'plains');
+    const economy = cityEconomy(state, city);
+    expect(economy.worked).toEqual(plains.slice(0, 7));
+    expect(economy.production).toBe(2 + 14);
+    expect(economy.food).toBe(2 + 7);
+    expect(economy.foodSurplus).toBe(9 - 14);
+
+    // The shortage empties the food store and never costs a citizen.
+    let played = arrange(state, (draft) => {
+      draft.cities[city.id].foodStored = 7;
+    });
+    for (let turn = 1; turn <= 5; turn++) {
+      played = endTurnForAll(played).state;
+      expect(played.cities[city.id].population, `after ${turn} turns`).toBe(7);
+      expect(played.cities[city.id].foodStored, `after ${turn} turns`).toBe(turn === 1 ? 2 : 0);
+    }
+
+    // Growing first stays the rule for a city that CAN grow: with six
+    // citizens the same land gives 13 food for 12 eaten, so five of them go
+    // to sea and the city makes 4 production until it has grown.
+    const six = cityAtCentre(PLAINS_BY_THE_SEA, 6);
+    const growing = cityEconomy(six.state, six.city);
+    expect(growing.foodSurplus).toBe(1);
+    expect(growing.production).toBe(2 + 2);
+    expect(growing.worked.filter((tile) => map.tiles[tile].terrain === 'coast')).toHaveLength(5);
+  });
+
+  it('with RULES.minFoodSurplus set to 2 for a moment, a city whose land gives a surplus of 1 at most keeps its swaps and goes on growing', () => {
+    // The first choice comes back only for a city that cannot grow at all,
+    // not for one that grows more slowly than the aim asks for.
+    const { state, city } = cityAtCentre(PLAINS_BY_THE_SEA, 6);
+    const before = RULES.minFoodSurplus;
+    try {
+      RULES.minFoodSurplus = 2;
+      const economy = cityEconomy(state, city);
+      expect(economy.foodSurplus).toBe(1);
+      expect(economy.production).toBe(2 + 2);
+    } finally {
+      RULES.minFoodSurplus = before;
+    }
+    expect(RULES.minFoodSurplus).toBe(before);
+  });
+
   it('with RULES.minFoodSurplus set to 0 for a moment, a city that makes exactly what it eats keeps its first choice', () => {
     const { state, city } = mineTown(3);
     const map = state.map;
@@ -1006,10 +1179,17 @@ describe('citizens: food before production while the city would not grow', () =>
     try {
       RULES.minFoodSurplus = 0;
       const economy = cityEconomy(state, city);
-      // Grassland, grassland and the mine: 6 food for 6 eaten is enough now.
+      // The mine, grassland and grassland: 6 food for 6 eaten is enough now.
       expect(economy.worked).toEqual([at(map, 3, 2), at(map, 4, 3), at(map, 3, 4)].sort((a, b) => a - b));
       expect(economy.foodSurplus).toBe(0);
-      expect(economy.production).toBe(1 + 1 + 1 + 3);
+      expect(economy.production).toBe(1 + 1 + 1 + 4);
+
+      // And an aim of 0 that the swaps reach is reached: seven citizens by
+      // the sea give up plains for coast until they make what they eat, and
+      // keep those swaps (with the usual aim of 1 they could not grow, and
+      // kept their first choice).
+      const bySea = cityAtCentre(PLAINS_BY_THE_SEA, 7);
+      expect(cityEconomy(bySea.state, bySea.city)).toMatchObject({ foodSurplus: 0, production: 2 + 2 * 2 });
     } finally {
       RULES.minFoodSurplus = before;
     }
@@ -1104,6 +1284,9 @@ describe('citizens: food before production while the city would not grow', () =>
         chosen[0] = spare[0];
         spare[0] = given;
       }
+      // No placement lets the city grow: the first choice stands.
+      const cannotGrow = foodOf(chosen) - eaten < RULES.minFoodSurplus && foodOf(chosen) - eaten <= 0;
+      if (cannotGrow) chosen.splice(0, chosen.length, ...firstChoice);
 
       const economy = cityEconomy(state, city);
       expect(economy.worked, what).toEqual(chosen.map((candidate) => candidate.tile).sort((a, b) => a - b));
@@ -1122,8 +1305,11 @@ describe('citizens: food before production while the city would not grow', () =>
         expect(economy.foodSurplus, what).toBeGreaterThanOrEqual(RULES.minFoodSurplus);
         swapped += 1;
       } else {
-        // The land cannot: the city gets the most food its land gives.
-        expect(economy.food, what).toBe(mostFood);
+        // The land cannot, and the city cannot grow whatever its citizens
+        // do: they keep their first choice.
+        expect(mostFood - eaten, what).toBeLessThanOrEqual(0);
+        expect(economy.worked, what).toEqual(firstChoice.map((candidate) => candidate.tile).sort((a, b) => a - b));
+        expect(economy.food, what).toBe(foodOf(firstChoice));
         short += 1;
       }
     }

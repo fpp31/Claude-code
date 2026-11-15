@@ -93,7 +93,8 @@ export interface RulesTable {
   /**
    * Citizens give up production for food until the city's food surplus per
    * turn is at least this much, as far as its land allows (cityEconomy,
-   * step 2). 1 = a city that could grow does grow.
+   * step 2). 1 = a city that could grow does grow. A city that cannot grow
+   * whatever its citizens do gives up nothing (cityEconomy, step 3).
    */
   minFoodSurplus: number;
 }

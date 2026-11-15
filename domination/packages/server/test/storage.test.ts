@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
-import { STATE_SCHEMA, checkInvariants, createGame, migrateGameState } from '@domination/shared';
+import { STATE_SCHEMA, UNITS, checkInvariants, createGame, migrateGameState } from '@domination/shared';
 import type { GameState } from '@domination/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ROOM_FILE_FORMAT } from '../src/roomFile';
@@ -654,12 +654,107 @@ describe('storage: a game saved by an older version (WP3, the phase 1 save)', ()
       expect(server.logs).toContain('Saved games loaded: 0.');
       const ada = await server.connect('a'.repeat(32));
       ada.send({ type: 'joinGame', code: PHASE_ONE_CODE, name: null });
-      await ada.expectError('noSuchGame');
+      await ada.expectError('gameNotLoaded');
       await ada.createGame('Ada');
       expect(readFileSync(path, 'utf8'), what).toBe(text);
       expect(readdirSync(roomsDir).sort(), what).toHaveLength(2);
       await cleanUp();
     }
+  });
+
+  /** What the log line of a converted save that is not healthy ends with: what to do, and that nothing was lost. */
+  const REMEDY =
+    'If you changed numbers in packages/shared/src/data, make the same change again and restart. The file has not been touched.';
+
+  /** The phase 1 save with its first `count` Scouts given one move more than the table of this version allows. */
+  function saveWithFastScouts(count: number): string {
+    return phaseOneSaveTextWith((game) => {
+      const scouts = Object.values(game.units).filter((unit) => unit.type === 'scout');
+      expect(scouts.length).toBeGreaterThanOrEqual(count);
+      for (const scout of scouts.slice(0, count)) scout.movesLeft = UNITS.scout.moves + 1;
+    });
+  }
+
+  it('a phase 1 game played with tuned numbers (a Scout with one move more than the table allows) is not loaded, the log line ends with what to do, and the file is byte for byte unchanged', () => {
+    const text = saveWithFastScouts(1);
+    const converted = migrateGameState(JSON.parse(text).game);
+    if (converted === null) throw new Error('the save was not converted');
+    const problems = checkInvariants(converted);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain(`has ${UNITS.scout.moves + 1} moves left, expected 0 to ${UNITS.scout.moves}.`);
+
+    const { storage, logs, roomsDir, path } = storageWithPhaseOneSave(text);
+    expect(storage.loadAll()).toEqual([]);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain(`${PHASE_ONE_CODE}.json was left alone and NOT loaded.`);
+    expect(logs[0]).toContain(`1 problem(s): ${problems[0]} `);
+    expect(logs[0].endsWith(REMEDY)).toBe(true);
+
+    // Nothing is lost: the file is where it was, with every byte phase 1 wrote, and its code stays reserved.
+    expect(readFileSync(path).equals(Buffer.from(text, 'utf8'))).toBe(true);
+    expect(readdirSync(roomsDir)).toEqual([`${PHASE_ONE_CODE}.json`]);
+    expect(storage.has(PHASE_ONE_CODE)).toBe(true);
+  });
+
+  it('the log line of a converted save that is not healthy names up to three problems: two of two, and the first three of five', () => {
+    for (const count of [2, 5]) {
+      const text = saveWithFastScouts(count);
+      const converted = migrateGameState(JSON.parse(text).game);
+      if (converted === null) throw new Error('the save was not converted');
+      const problems = checkInvariants(converted);
+      expect(problems, `${count} Scouts`).toHaveLength(count);
+      expect(new Set(problems).size).toBe(count);
+
+      const { storage, logs, path } = storageWithPhaseOneSave(text);
+      expect(storage.loadAll(), `${count} Scouts`).toEqual([]);
+      expect(logs, `${count} Scouts`).toHaveLength(1);
+      const named = problems.slice(0, 3);
+      const intro = count <= 3 ? `${count} problem(s): ` : `${count} problem(s), the first 3: `;
+      expect(logs[0], `${count} Scouts`).toContain(`${intro}${named.join(' ')} ${REMEDY}`);
+      for (const problem of problems.slice(3)) expect(logs[0], `${count} Scouts`).not.toContain(problem);
+      expect(logs[0].endsWith(REMEDY)).toBe(true);
+      expect(readFileSync(path).equals(Buffer.from(text, 'utf8'))).toBe(true);
+    }
+  });
+
+  it('a layout number that is not a whole number (1.5) is no layout number: the save is moved aside as damaged, byte for byte', () => {
+    const text = phaseOneSaveTextWith((game) => {
+      game.schema = 1.5;
+    });
+    expect(JSON.parse(text).game.schema).toBe(1.5);
+    const { storage, logs, roomsDir, path } = storageWithPhaseOneSave(text);
+
+    expect(storage.loadAll()).toEqual([]);
+
+    // Not "another version" (no version writes such a number): damaged, and moved aside like every damaged save.
+    expect(readdirSync(roomsDir)).toEqual([`${PHASE_ONE_CODE}.json.corrupt`]);
+    expect(readFileSync(`${path}.corrupt`).equals(Buffer.from(text, 'utf8'))).toBe(true);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain(`${PHASE_ONE_CODE}.json is damaged (the game state has no layout number).`);
+    expect(logs[0]).toContain('moved aside');
+    expect(logs[0]).not.toContain('left alone');
+    expect(storage.has(PHASE_ONE_CODE)).toBe(true);
+  });
+
+  it('a layout older than the oldest one this version can convert (0) is left alone, byte for byte, with "Run the matching version"', () => {
+    const text = phaseOneSaveTextWith((game) => {
+      game.schema = 0;
+    });
+    expect(JSON.parse(text).game.schema).toBe(0);
+    expect(migrateGameState(JSON.parse(text).game)).toBeNull();
+    const { storage, logs, roomsDir, path } = storageWithPhaseOneSave(text);
+
+    expect(storage.loadAll()).toEqual([]);
+
+    expect(readdirSync(roomsDir)).toEqual([`${PHASE_ONE_CODE}.json`]);
+    expect(readFileSync(path).equals(Buffer.from(text, 'utf8'))).toBe(true);
+    // The whole sentence: nothing was converted and nothing was checked, so it speaks of no "problem".
+    expect(logs).toEqual([
+      `Saved games: ${PHASE_ONE_CODE}.json was left alone and NOT loaded. Its game state has layout 0, ` +
+        `this version of the game plays layout ${STATE_SCHEMA}. Run the matching version to play it.`,
+    ]);
+    expect(storage.has(PHASE_ONE_CODE)).toBe(true);
   });
 
   it('an older save that was edited by hand: a tokenHash set to null loads and is converted; a seat renamed by mistake is moved aside as damaged, byte for byte', () => {

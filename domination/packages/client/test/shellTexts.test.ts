@@ -143,7 +143,7 @@ describe('city panel texts (WP4)', () => {
     expect(foodText(rome({ foodPerTurn: -1 }))).toBe('Food 4/16 (-1 per turn)');
   });
 
-  it('productionText names the current build ("4 turns", "1 turn", no turns without a number), or says there is nothing to build and what is saved', () => {
+  it('productionText names the current build ("4 turns", "1 turn", no turns without a number), or says there is nothing to build', () => {
     expect(productionText(rome())).toBe('Warrior 6/18 (+3 per turn, 4 turns)');
     expect(productionText(romeBuilding([entry('warrior', 1)], { productionStored: 15 }))).toBe('Warrior 15/18 (+3 per turn, 1 turn)');
     // Only the first entry is the current build, whatever follows it.
@@ -161,8 +161,9 @@ describe('city panel texts (WP4)', () => {
     // The store can hold more than the first entry costs while it waits.
     expect(productionText(romeBuilding([entry('warrior', null, 'noRoom')], { productionStored: 30, held: 'noRoom' }))).toBe('Warrior 30/18 (+3 per turn)');
 
+    // An empty queue: what is saved, and what is lost, is the note's to say (productionNoteText).
     expect(productionText(romeBuilding([], { productionStored: 0 }))).toBe('Nothing to build.');
-    expect(productionText(romeBuilding([], { productionStored: 7 }))).toBe('Nothing to build (7 production saved).');
+    expect(productionText(romeBuilding([], { productionStored: 7 }))).toBe('Nothing to build.');
   });
 
   it('productionNoteText says "Waiting: ..." exactly when held is set, warns about an idle city, and is null for a first entry that has no number but is not paid for', () => {
@@ -182,16 +183,29 @@ describe('city panel texts (WP4)', () => {
     expect(productionNoteText(romeBuilding([entry('settler', null, 'tooFar')]))).toBeNull();
     expect(productionNoteText(romeBuilding([entry('settler', null, 'needsPopulation')], { productionStored: 12 }))).toBeNull();
 
-    expect(productionNoteText(romeBuilding([]))).toBe("This city's production is lost every turn.");
-    expect(productionNoteText(romeBuilding([], { productionStored: 7 }))).toBe("This city's production is lost every turn.");
+    // An idle city. (The sample Rome has 6 production saved: the next test is about the sentence for that.)
+    expect(productionNoteText(romeBuilding([], { productionStored: 0 }))).toBe("This city's production is lost every turn.");
   });
 
-  it('queueRowText: "now, 4 turns", "now, 1 turn", "in 8 turns", and the reason where there is no number, for the first row too', () => {
-    expect(queueRowText(entry('warrior', 4), 0)).toBe('now, 4 turns');
-    expect(queueRowText(entry('warrior', 1), 0)).toBe('now, 1 turn');
-    expect(queueRowText(entry('scout', 8), 1)).toBe('in 8 turns');
-    expect(queueRowText(entry('scout', 1), 1)).toBe('in 1 turn');
-    expect(queueRowText(entry('scout', 21), 7)).toBe('in 21 turns');
+  it('an idle city with production saved says that it is kept, and that only what is made from now on is lost ("1 production is", "7 production are")', () => {
+    expect(productionNoteText(romeBuilding([], { productionStored: 7 }))).toBe('7 production are saved for the next item; what the city makes meanwhile is lost.');
+    expect(productionNoteText(romeBuilding([], { productionStored: 1 }))).toBe('1 production is saved for the next item; what the city makes meanwhile is lost.');
+    expect(productionNoteText(romeBuilding([]))).toBe('6 production are saved for the next item; what the city makes meanwhile is lost.');
+    // The panel prints the two parts in one element, with a space between them.
+    const idle = romeBuilding([], { productionStored: 6 });
+    expect(`${productionText(idle)} ${productionNoteText(idle)}`).toBe(
+      'Nothing to build. 6 production are saved for the next item; what the city makes meanwhile is lost.',
+    );
+    // "Saved" is never said of a city that is building something: its first row has the numbers.
+    expect(productionNoteText(rome({ productionStored: 7 }))).toBeNull();
+  });
+
+  it('queueRowText: "building now, ready in 4 turns", "building now, ready in 1 turn", "ready in 8 turns", and the reason where there is no number, for the first row too', () => {
+    expect(queueRowText(entry('warrior', 4), 0)).toBe('building now, ready in 4 turns');
+    expect(queueRowText(entry('warrior', 1), 0)).toBe('building now, ready in 1 turn');
+    expect(queueRowText(entry('scout', 8), 1)).toBe('ready in 8 turns');
+    expect(queueRowText(entry('scout', 1), 1)).toBe('ready in 1 turn');
+    expect(queueRowText(entry('scout', 21), 7)).toBe('ready in 21 turns');
 
     expect(queueRowText(entry('settler', null, 'needsPopulation'), 0)).toBe('the city must grow first');
     expect(queueRowText(entry('warrior', null, 'noRoom'), 0)).toBe('no free tile for the unit');
@@ -201,10 +215,10 @@ describe('city panel texts (WP4)', () => {
     expect(queueRowText(entry('warrior', null, 'earlier'), 1)).toBe('after the item above');
 
     // The sample queue, as the panel prints it.
-    expect(rome().buildQueue.map(queueRowText)).toEqual(['now, 4 turns', 'in 7 turns']);
+    expect(rome().buildQueue.map(queueRowText)).toEqual(['building now, ready in 4 turns', 'ready in 7 turns']);
 
     // A row with neither a number nor a reason (the server never sends one) still says something true.
-    expect(queueRowText(entry('warrior', null, null), 0)).toBe('now');
+    expect(queueRowText(entry('warrior', null, null), 0)).toBe('building now');
     expect(queueRowText(entry('warrior', null, null), 3)).toBe('after the item above');
   });
 
@@ -228,7 +242,7 @@ describe('city panel texts (WP4)', () => {
     }
   });
 
-  it('buildOptionText gives cost, turns ("in 1 turn", "in 4 turns") and population, and the reason in brackets where there is no number', () => {
+  it('buildOptionText gives cost ("costs 18"), turns ("ready in 1 turn", "ready in 4 turns") and population, and the reason in brackets where there is no number', () => {
     const options = rome().buildOptions;
     const warrior = options.find((candidate) => candidate.item.unitType === 'warrior');
     const settler = options.find((candidate) => candidate.item.unitType === 'settler');
@@ -236,25 +250,25 @@ describe('city panel texts (WP4)', () => {
 
     // The sample menu: when each would be done if added now, behind the Warrior and the Scout.
     expect(options.map(buildOptionText)).toEqual([
-      '18 production, in 12 turns',
-      '12 production, in 10 turns',
-      '30 production, in 14 turns, uses 1 population',
-      '20 production, in 12 turns',
+      'costs 18, ready in 12 turns',
+      'costs 12, ready in 10 turns',
+      'costs 30, ready in 14 turns, uses 1 population',
+      'costs 20, ready in 12 turns',
     ]);
-    expect(buildOptionText({ ...warrior, turns: 4 })).toBe('18 production, in 4 turns');
-    expect(buildOptionText({ ...warrior, turns: 1 })).toBe('18 production, in 1 turn');
-    expect(buildOptionText({ ...settler, turns: 18 })).toBe(`30 production, in 18 turns, uses ${UNITS.settler.populationCost} population`);
+    expect(buildOptionText({ ...warrior, turns: 4 })).toBe('costs 18, ready in 4 turns');
+    expect(buildOptionText({ ...warrior, turns: 1 })).toBe('costs 18, ready in 1 turn');
+    expect(buildOptionText({ ...settler, turns: 18 })).toBe(`costs 30, ready in 18 turns, uses ${UNITS.settler.populationCost} population`);
 
     // No number: the reason in brackets...
-    expect(buildOptionText({ ...settler, turns: null, wait: 'needsPopulation' })).toBe('30 production, uses 1 population (the city must grow first)');
-    expect(buildOptionText({ ...warrior, turns: null, wait: 'tooFar' })).toBe('18 production (more than 50 turns)');
-    expect(buildOptionText({ ...warrior, turns: null, wait: 'noRoom' })).toBe('18 production (no free tile for the unit)');
-    expect(buildOptionText({ ...warrior, turns: null, wait: 'noProduction' })).toBe('18 production (this city makes no production)');
+    expect(buildOptionText({ ...settler, turns: null, wait: 'needsPopulation' })).toBe('costs 30, uses 1 population (the city must grow first)');
+    expect(buildOptionText({ ...warrior, turns: null, wait: 'tooFar' })).toBe('costs 18 (more than 50 turns)');
+    expect(buildOptionText({ ...warrior, turns: null, wait: 'noRoom' })).toBe('costs 18 (no free tile for the unit)');
+    expect(buildOptionText({ ...warrior, turns: null, wait: 'noProduction' })).toBe('costs 18 (this city makes no production)');
     // ...except behind a queue that has no end: the rows above already say why.
-    expect(buildOptionText({ ...warrior, turns: null, wait: 'earlier' })).toBe('18 production');
-    expect(buildOptionText({ ...settler, turns: null, wait: 'earlier' })).toBe('30 production, uses 1 population');
+    expect(buildOptionText({ ...warrior, turns: null, wait: 'earlier' })).toBe('costs 18');
+    expect(buildOptionText({ ...settler, turns: null, wait: 'earlier' })).toBe('costs 30, uses 1 population');
     // A full queue changes nothing in this line: the note under the queue title says it.
-    expect(buildOptionText({ ...warrior, addError: 'queueFull' })).toBe('18 production, in 12 turns');
+    expect(buildOptionText({ ...warrior, addError: 'queueFull' })).toBe('costs 18, ready in 12 turns');
   });
 
   it('queueNoteText says why the queue cannot be changed: no connection, turn ended, queue full', () => {
@@ -578,7 +592,7 @@ describe('job texts (the unit panel of a Worker)', () => {
 
   it('what a job adds is said in the words of the tile information ("+1 food")', () => {
     expect(improvementBonusText('farm')).toBe('+1 food');
-    expect(improvementBonusText('mine')).toBe('+1 production');
+    expect(improvementBonusText('mine')).toBe('+2 production');
     expect(improvementBonusText).toBe(bonusTextOfTileInfo);
   });
 });
@@ -593,7 +607,7 @@ describe('home screen texts', () => {
   });
 
   it('nobody is "invited" to a game that cannot be joined', () => {
-    for (const problem of ['noSuchGame', 'gameAlreadyStarted', 'gameFull'] as const) {
+    for (const problem of ['noSuchGame', 'gameNotLoaded', 'gameAlreadyStarted', 'gameFull'] as const) {
       const text = homeIntroText('K7QXM', false, problem);
       expect(text).toBe(welcome);
       expect(text).not.toContain('invited');
@@ -605,6 +619,12 @@ describe('home screen texts', () => {
     expect(usual).toBe('Your friend sees the code and a link when they create a game.');
 
     expect(codeHintText(false, 'noSuchGame')).toContain('no game with this code');
+    // A game the server has on disk but could not load is NOT "no game": the player is sent to
+    // the person who can repair it, and told how to get back afterwards.
+    expect(codeHintText(false, 'gameNotLoaded')).toBe(
+      'This game is on the server but could not be opened. Ask the person who runs the server. When they have put it right, reload this page.',
+    );
+    expect(codeHintText(false, 'gameNotLoaded')).not.toContain('new game');
     expect(codeHintText(false, 'gameAlreadyStarted')).toContain('already started');
     expect(codeHintText(false, 'gameFull')).toContain('full');
     for (const problem of ['gameAlreadyStarted', 'gameFull'] as const) {

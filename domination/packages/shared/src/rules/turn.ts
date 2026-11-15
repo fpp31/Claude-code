@@ -29,8 +29,8 @@ export function isTurnComplete(state: GameState): boolean {
  * It does not check isTurnComplete (applyAction does, before calling it; a
  * phase 3 timer may force a resolution).
  *
- * Write the body as a short list of calls to named step functions, so the
- * order can be read in one place and phase 2 can add lines:
+ * The body is a short list of calls to named step functions, so the order
+ * can be read in one place and a later phase can add lines:
  *
  *  1. runCities      For each player in seat order, for each of their cities
  *                    in founding order (the order of `state.cities`):

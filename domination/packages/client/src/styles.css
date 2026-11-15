@@ -26,6 +26,8 @@
   --accent: #f8c020;        /* buttons that matter (End Turn, Start), things that need attention */
   --good: #a8e038;          /* food, "connected", "online" */
   --danger: #e85048;        /* "not connected", errors */
+  /* A dark veil over a civilization's colour where it is dimmed: a taken civilization, a player who is not connected. */
+  --veil: rgb(24 24 40 / 0.6);
 
   --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-display: ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
@@ -159,9 +161,15 @@ canvas {
     1px 1px 0 var(--edge-dark);
 }
 
+/*
+ * Cannot be pressed: flat, on a duller face. Its words are still read (the
+ * add buttons of a city during the wait after End Turn: cost, turns, what a
+ * unit is for), so they keep a contrast of 5 to 1; a test reads the two
+ * colours from here and holds them to 4.5 (test/shellStyles.test.ts).
+ */
 .button:disabled {
   background: #36364e;
-  color: #8a88a4;
+  color: #a9a7c0;
   cursor: not-allowed;
   box-shadow: 3px 3px 0 var(--edge-dark);
 }
@@ -534,9 +542,16 @@ select.field:disabled {
     0 0 0 3px #ffffff;
 }
 
-/* Somebody else's (or no connection): washed out and flat. */
+/*
+ * Somebody else's (or no connection): flat, and its colour under a dark
+ * veil. The words are light on it, not in the civilization's own text
+ * colour, which is chosen for the bright colour: "Taken by Ben" has to be
+ * read on every one of them (a test holds 4.5 to 1, test/shellStyles.test.ts).
+ * No `filter` here: it dims the words together with their ground.
+ */
 .civ-button:disabled {
-  filter: saturate(0.35) brightness(0.62);
+  background: linear-gradient(var(--veil), var(--veil)), var(--civ);
+  color: var(--paper);
   box-shadow: none;
   cursor: not-allowed;
 }
@@ -593,7 +608,10 @@ select.field:disabled {
  * The bottom panels float over the lower edge of the map. The strip itself
  * is see-through for the pointer: taps and drags between the panels reach
  * the canvas underneath. Only the panels themselves (pointer-events: auto
- * below) catch them.
+ * below) catch them. The box around "Show me" and End Turn is as wide as
+ * End Turn and see-through as well; its two buttons catch what is theirs.
+ * (The whole box used to: a strip of the map beside "Show me", two thirds
+ * of the box's width, took no tap and no hover.)
  */
 .hud-bottom {
   position: absolute;
@@ -633,7 +651,7 @@ select.field:disabled {
 
 .panel,
 .zoom-buttons,
-.end-turn {
+.end-turn > .button {
   pointer-events: auto;
 }
 
@@ -722,9 +740,10 @@ select.field:disabled {
   transform: rotate(45deg);
 }
 
-/* Not connected: greyed out. */
+/* Not connected: dimmed, as a taken civilization is in the lobby (see .civ-button:disabled), with the name still readable. */
 .chip[data-connected='false'] {
-  filter: grayscale(1) brightness(0.75);
+  background: linear-gradient(var(--veil), var(--veil)), var(--civ);
+  color: var(--paper);
 }
 
 /*
@@ -791,6 +810,15 @@ select.field:disabled {
   overscroll-behavior: contain;
   /* The city panel keeps its add list in place itself (ui/cityPanel.ts); the browser must not do it a second time. */
   overflow-anchor: none;
+  /*
+   * Where a browser shows scroll bars (Windows, Linux), the panel's is thin
+   * and in the panel's colours, not the browser's pale one; and its room is
+   * kept free all the time, so that nothing inside the panel gets narrower
+   * or is cut the moment the queue grows long enough to scroll.
+   */
+  scrollbar-width: thin;
+  scrollbar-color: var(--edge) transparent;
+  scrollbar-gutter: stable;
   touch-action: pan-y;
   padding: 12px;
   background: var(--chrome);
@@ -803,10 +831,14 @@ select.field:disabled {
 .panel-head {
   position: sticky;
   /*
-   * It reaches the panel's edges, so nothing shows beside or above it: the
-   * margins pull it over the panel's padding, and it carries that padding
-   * itself. A sticky box is held against the inner edge of the padding, so
-   * "at the very top of the panel" is minus the padding, not 0.
+   * It reaches the panel's top edge, so nothing shows above it: the margins
+   * pull it over the panel's padding, and it carries that padding itself.
+   * A sticky box is held against the inner edge of the padding, so "at the
+   * very top of the panel" is minus the padding, not 0. At the sides it
+   * stops two pixels short of the panel's edge: that is where the panel's
+   * lighter inner line runs, and nothing ever scrolls there. (It used to
+   * cover that line and draw it again. Beside a scroll bar, which stands
+   * between the head and the panel's edge, the line was then drawn twice.)
    */
   top: -12px;
   z-index: 1;
@@ -814,11 +846,11 @@ select.field:disabled {
   flex-wrap: wrap; /* the city panel's second line */
   align-items: center;
   gap: 8px;
-  margin: -12px -12px 0;
-  padding: 12px 12px 6px;
+  margin: -12px -10px 0;
+  padding: 12px 10px 6px;
   background: var(--chrome);
-  /* The panel's lighter inner line, drawn again where the head covers it. */
-  box-shadow: inset 0 2px 0 #4a4a74, inset 2px 0 0 #4a4a74, inset -2px 0 0 #4a4a74;
+  /* The panel's lighter inner line along the top, drawn again where the head covers it. */
+  box-shadow: inset 0 2px 0 #4a4a74;
 }
 
 /*
@@ -837,6 +869,15 @@ select.field:disabled {
   flex-basis: 100%;
   gap: 14px;
   font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Its last line, when there is one: why the queue cannot be changed. It is
+ * part of the head so that it stays in sight with the greyed buttons,
+ * however far the panel is scrolled.
+ */
+.panel-head > .panel-reason {
+  flex-basis: 100%;
 }
 
 .panel-title {
@@ -931,7 +972,7 @@ select.field:disabled {
   margin-top: 3px;
 }
 
-/* "The work done so far is lost." on the left, "Stop work" at the right end. */
+/* "Stopping loses the work done so far." on the left, "Stop work" at the right end (also when it stands alone, greyed out). */
 .job-stop-row {
   display: flex;
   align-items: center;
@@ -946,6 +987,7 @@ select.field:disabled {
 
 .job-stop-row .button {
   flex: none;
+  margin-left: auto;
 }
 
 .bar {
@@ -993,7 +1035,7 @@ select.field:disabled {
   gap: 6px;
 }
 
-/* One button of the add list: name, "18 production, in 12 turns", and the description on one line. */
+/* One button of the add list: name, "costs 18, ready in 12 turns", and the description. */
 .build-button {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -1014,18 +1056,18 @@ select.field:disabled {
   font-family: var(--font-ui);
   font-size: 12px;
   font-weight: 400;
+  /* Where the line has to break, it breaks into two parts of a like length, not into a line and one lost word. */
+  text-wrap: balance;
 }
 
-/* Cut with "..." where a narrow panel has no room for the whole sentence. */
+/* One line where there is room; in a narrow panel, or with a wide font, it takes a second line and is never cut. */
 .build-about {
   grid-area: about;
   font-family: var(--font-ui);
   font-size: 12px;
   font-weight: 400;
   color: var(--paper-dim);
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  text-wrap: balance;
 }
 
 .build-button:disabled .build-about {
@@ -1039,6 +1081,13 @@ select.field:disabled {
 }
 
 /* ---- City panel: the build queue ---- */
+
+/* One small line under the title: what the x of a row does. It has to stay one line (ui/texts.ts REMOVE_HINT). */
+.queue-hint {
+  margin: 0 0 6px;
+  color: var(--paper-dim);
+  font-size: 12px;
+}
 
 /* One entry: its place, its name over when it will be done, and at the right up, down and (apart) remove. */
 .queue-row {
@@ -1072,6 +1121,8 @@ select.field:disabled {
   color: var(--paper-dim);
   font-size: 12px;
   overflow-wrap: anywhere;
+  /* "building now, ready in 8 turns" is wider than a narrow row: it then reads "building now," over "ready in 8 turns". */
+  text-wrap: balance;
 }
 
 .queue-up {
@@ -1291,6 +1342,22 @@ select.field:disabled {
   color: #ffffff;
 }
 
+/*
+ * On the game screen of a low or narrow window, and on every device with a
+ * touch screen, a press goes THROUGH a toast to the map under it, and the
+ * toast goes by time only. There the stack of a turn's news reaches down to
+ * the middle of the map, where the selected unit stands, and a tap meant
+ * for a tile used to close a toast and do nothing else. In a large window
+ * with a mouse, and on the first screen and in the lobby, a press on a
+ * toast still closes it. (The breakpoints are the ones of the narrow and
+ * the low layout further down.)
+ */
+@media (max-width: 720px), (max-height: 480px), (any-pointer: coarse) {
+  [data-screen='game'] .toast {
+    pointer-events: none;
+  }
+}
+
 @keyframes toast-in {
   from {
     transform: translateY(-8px);
@@ -1327,7 +1394,15 @@ select.field:disabled {
  * Touch screens: bigger targets
  * ------------------------------------------------------------------------- */
 
-@media (pointer: coarse) {
+/*
+ * For every device that HAS a touch screen (any-pointer), not only for one
+ * whose first pointer is a finger (pointer): a laptop with a touch screen
+ * names its mouse first, and a finger there used to get the small buttons.
+ * A mouse on such a laptop gets roomier buttons, nothing else: this block
+ * holds sizes only. (Tried on phone-sized touch screens; a real laptop with
+ * a touch screen has not been tried.)
+ */
+@media (any-pointer: coarse) {
   .button {
     min-height: 44px;
   }
@@ -1442,6 +1517,16 @@ select.field:disabled {
     display: none;
   }
 
+  /*
+   * Less air around the job block: after End Turn its first line says why
+   * the buttons are grey, and "Stop work" must still be in view under it
+   * on a touch screen, where the buttons are taller.
+   */
+  .unit-jobs,
+  .job-stop-row {
+    margin-top: 4px;
+  }
+
   /* The job buttons say what they are by themselves ("Build Farm"); without their title both are in view on a touch screen too. */
   .unit-jobs .build-title {
     display: none;
@@ -1476,10 +1561,61 @@ select.field:disabled {
     pointer-events: auto;
   }
 
+  /*
+   * The row under the panel: zoom bottom left with "Show me" above it, End
+   * Turn on the right, as tall as the two together. The row's height is
+   * FIXED: it depends neither on End Turn's hint nor on whether "Show me"
+   * is there (its place stays free). So the panel above the row never
+   * moves when a tap changes the hint, and a second tap on an add button
+   * lands on the same button. (When the row grew and shrank with the hint,
+   * the first item added to an idle city moved the add buttons 64 pixels.)
+   */
   .hud-right {
-    flex-direction: row;
-    align-items: flex-end;
+    display: grid;
+    grid-template-columns: auto minmax(0, 230px);
+    grid-template-rows: 44px 48px;
+    grid-template-areas:
+      'show end'
+      'zoom end';
+    gap: 8px 10px;
     justify-content: space-between;
+    align-items: end;
+  }
+
+  /* The box around "Show me" and End Turn steps aside: the two are placed in the row's grid themselves. */
+  .end-turn {
+    display: contents;
+  }
+
+  .zoom-buttons {
+    grid-area: zoom;
+  }
+
+  .show-next {
+    grid-area: show;
+    justify-self: start;
+  }
+
+  .end-turn-button {
+    grid-area: end;
+    align-self: stretch;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* The button has room for four lines of hint; more than that (several cities with long names) is cut with an ellipsis. */
+  .end-turn-hint:not([hidden]) {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    overflow: hidden;
+  }
+
+  /* "Waiting for others - tap to cancel" takes two lines here, which leaves three for who is waited for. */
+  .end-turn-button.ended .end-turn-hint:not([hidden]) {
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
   }
 
   /* The panel may not swallow the map: it scrolls inside itself instead. */
@@ -1487,9 +1623,5 @@ select.field:disabled {
     width: 100%;
     max-height: 44vh;
     box-shadow: inset 0 0 0 2px #4a4a74;
-  }
-
-  .end-turn {
-    width: 230px;
   }
 }

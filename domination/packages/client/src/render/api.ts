@@ -85,8 +85,9 @@ export interface MapOverlay {
   path: TileIndex[];
   /**
    * Tiles worked by the citizens of the selected city (OwnCityDetail.worked):
-   * each gets a small marker, so the player sees where the city's food and
-   * production come from. Empty unless an own city is selected.
+   * each gets a small gold token in its top point, drawn over the units, so
+   * the player sees where the city's food and production come from whatever
+   * stands on the tile. Empty unless an own city is selected.
    */
   workedTiles: TileIndex[];
   /** Tile under the mouse pointer: gets a faint outline. Always null on touch screens. */

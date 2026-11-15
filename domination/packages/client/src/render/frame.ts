@@ -18,7 +18,21 @@ import { cityIsIdle, pathMarks, workingSignOffset } from './scene';
 import type { UnitDrawing } from './scene';
 import { LAYER_PADDING } from './terrainLayer';
 
-/** The lower edge of a banner sits this many art pixels below the top of the city's tile box: on the flag. */
+/**
+ * The lower edge of a banner sits this many art pixels below the top of the
+ * city's tile box: on the flag, where its colour begins.
+ *
+ * The banner therefore lies on the lower third of the two tiles above the
+ * city, at every zoom, and on the feet of a Worker or the lower rows of a
+ * farm or a mine there. The review of round 2 tried it lower, on the
+ * city's own tile: at 7 (its lower edge on the roof) those two tiles are
+ * clear at every zoom but the smallest, and the flag is gone under the
+ * banner at every zoom; at 4 neither is true. Nothing in between keeps both
+ * the flag and the neighbors in view (the flag is six art pixels tall, the
+ * banner six and a half to eight), so the place stayed. A render test holds
+ * it; whoever moves it looks at a farm, a mine and a Worker on both tiles
+ * above a city at three zooms first.
+ */
 const BANNER_BOTTOM = 2;
 
 /** A banner never reaches further sideways than this many tiles from its city (the longest name, zoomed out). */
@@ -87,17 +101,17 @@ export function drawFrame(context: CanvasRenderingContext2D, frame: FrameInput):
   // 2-4. Ground, borders, features and improvements: the part of the finished picture that is on screen.
   drawTerrain(context, frame.terrain, viewport, zoom, originX, originY);
 
-  // 5. Highlights from the overlay.
+  // 5. Highlights from the overlay (all but the worked tiles: see step 6).
   for (const tile of overlay.reachable) drawOnTile('marker.reachable', tile);
   for (const mark of pathMarks(view, overlay.selectedTile, overlay.path)) {
     drawSprite(sheet.get(mark.kind === 'end' ? 'marker.pathEnd' : 'marker.pathStep'), mark.px, mark.py);
   }
-  for (const tile of overlay.workedTiles) drawOnTile('marker.worked', tile);
   if (overlay.selectedTile !== null) drawOnTile('marker.selection', overlay.selectedTile);
   if (overlay.hoverTile !== null && overlay.hoverTile !== overlay.selectedTile) drawOnTile('marker.hover', overlay.hoverTile);
 
-  // 6. Cities, then units, then the "builds nothing" signs. Both signs are
-  // drawn from the view alone: the overlay knows nothing about them.
+  // 6. Cities, then units, then the "builds nothing" signs, then the tokens
+  // of the worked tiles. Both signs are drawn from the view alone: the
+  // overlay knows nothing about them.
   for (const city of frame.cities) {
     if (!onScreen(city.tile)) continue;
     const origin = tileOrigin(tileCoord(city.tile, view));
@@ -128,6 +142,12 @@ export function drawFrame(context: CanvasRenderingContext2D, frame: FrameInput):
   for (const city of frame.cities) {
     if (cityIsIdle(city)) drawOnTile('marker.idle', city.tile);
   }
+  // The tokens of the worked tiles, the one highlight of the overlay that is
+  // not drawn in step 5: under the units a token was hidden by whatever
+  // stood on its tile, and the worked tiles are where the Workers stand. It
+  // lies in the top point of the tile, which a unit does not reach
+  // (sprites/art/markers.ts).
+  for (const tile of overlay.workedTiles) drawOnTile('marker.worked', tile);
 
   // 7. City banners, on top of everything. Zoomed out, a banner is much
   // wider than its tile, so a city is only skipped when it is well off screen.

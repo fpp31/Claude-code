@@ -1,6 +1,6 @@
 /**
  * A tiny helper for building DOM elements (work package WP4). The UI is
- * plain DOM: no framework. Phase 1 has six small panels, which does not
+ * plain DOM: no framework. The panels are few and small, which does not
  * justify a library or the extra concepts that come with one.
  *
  * HOW EVERY PANEL IS WRITTEN (the rule that keeps clicks from getting lost

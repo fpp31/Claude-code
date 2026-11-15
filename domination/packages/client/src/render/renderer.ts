@@ -97,9 +97,8 @@ import { createTerrainLayer } from './terrainLayer';
  *  5. Highlights from the overlay (sprites/art/markers.ts), in this order:
  *     reachable tiles (a white ring and a light wash: unmistakable on every
  *     ground), the path preview (a dotted line from the selected tile, with
- *     a ring on the tile where the unit will stop), worked tiles (a small
- *     gold token in the middle of each tile of overlay.workedTiles), the
- *     selection ring, the hover outline.
+ *     a ring on the tile where the unit will stop), the selection ring,
+ *     the hover outline. (The worked tiles are drawn in step 6.)
  *  6. Cities, then units, row by row from the top, in their owner's colours
  *     (scene.ts). A remembered city (CityView.visible false) stands on a
  *     fogged tile and is drawn with its fogged twin. On a tile with two
@@ -117,6 +116,11 @@ import { createTerrainLayer } from './terrainLayer';
  *       units, so that a unit standing in the city never hides it.
  *     Neither is ever drawn for another player's unit or city: their jobs
  *     and queues are not in the view.
+ *     Last of this step, over all units and both signs: the worked tiles, a
+ *     small gold token in the top point of each tile of
+ *     overlay.workedTiles, where no unit, improvement or sign reaches
+ *     (sprites/art/markers.ts), so that a unit on a worked tile never hides
+ *     its token.
  *  7. City banners in the pixel font (banner.ts): the name (upper case) and
  *     the population, written in the owner's SECONDARY colour
  *     (CIVS[civ].secondary) on a plate of the owner's PRIMARY colour with a
@@ -125,7 +129,10 @@ import { createTerrainLayer } from './terrainLayer';
  *     remembered city gets the fog look. Text is drawn at a whole-number
  *     scale: max(1, ceil(zoom / 2)) device pixels per font pixel. (The
  *     scaffold said floor; see `bannerScale` in banner.ts for why it is
- *     rounded up.) The frame is one art pixel thick.
+ *     rounded up.) The frame is one art pixel thick. The banner hangs over
+ *     the city with its lower edge on the flag, and so lies on the lower
+ *     part of the two tiles above the city (see BANNER_BOTTOM in frame.ts
+ *     for why it is not lower).
  *
  * ANIMATION is purely cosmetic: a short slide when a unit that existed in
  * the previous view has a new tile in the next one (slide.ts). Nothing

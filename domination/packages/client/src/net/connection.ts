@@ -8,7 +8,7 @@
 import { PING_INTERVAL_MS, PONG_TIMEOUT_MS, PROTOCOL_VERSION } from '@domination/shared';
 import type { ClientMessage, ServerMessage } from '@domination/shared';
 import type { ConnectionStatus } from '../state/store';
-import { loadToken, saveToken, webSocketUrl } from './identity';
+import { adoptStoredToken, onTokenStoredElsewhere, pageWasWelcomed, saveToken, tokenForHello, webSocketUrl } from './identity';
 
 export interface ConnectionHandlers {
   /** The connection status changed (shown in the top bar). */
@@ -33,6 +33,13 @@ export interface ConnectionHandlers {
    * closing the tab loses their seat. Called at most once.
    */
   onTokenNotSaved(): void;
+  /**
+   * True while the app shows no lobby and no game, that is, while this page
+   * holds no seat anybody could see. Only then may a page on its first visit
+   * still become the player another tab of the same browser has stored
+   * (identity.ts, adoptStoredToken); the connection asks before every such change.
+   */
+  mayChangeIdentity(): boolean;
 }
 
 export interface Connection {
@@ -94,6 +101,11 @@ export interface ConnectionEnvironment {
    * becomes visible again. Returns a function that stops that.
    */
   onWake(wake: () => void): () => void;
+  /**
+   * Calls `stored` whenever another tab of this browser changes the stored
+   * token. Returns a function that stops that.
+   */
+  onTokenStored(stored: () => void): () => void;
 }
 
 /** The real thing: a browser WebSocket, the browser's clock and timers. */
@@ -137,6 +149,8 @@ export function browserEnvironment(): ConnectionEnvironment {
         document.removeEventListener('visibilitychange', whenVisible);
       };
     },
+
+    onTokenStored: (stored) => onTokenStoredElsewhere(stored),
   };
 }
 
@@ -146,10 +160,18 @@ export function browserEnvironment(): ConnectionEnvironment {
  *  - URL: `ws://` or `wss://` (matching the page) + location.host + WS_PATH.
  *    The same address works in development (Vite passes /ws on to the
  *    server) and in production (the server serves the page itself).
- *  - On open: send `hello` with PROTOCOL_VERSION and loadToken().
+ *  - On open: send `hello` with PROTOCOL_VERSION and tokenForHello(): the
+ *    page's token, which on a first visit it has just made and stored.
+ *  - ONE BROWSER, ONE PLAYER, also on a first visit in several tabs. Two
+ *    tabs that found the storage empty in the same instant each made a
+ *    token. So before a `welcome` is taken, and whenever the browser says
+ *    that another tab has stored a token, a page whose identity is new and
+ *    that shows no lobby and no game takes over the token in the storage
+ *    (adoptStoredToken) and says hello again on a new socket, as that player.
  *  - On `welcome`: saveToken(token) (THIS module is the one place that
  *    stores the token; if saveToken returns false, tell the app through
- *    onTokenNotSaved), status 'online', call onReady.
+ *    onTokenNotSaved), pageWasWelcomed() (the tab may reload itself again
+ *    at the next update), status 'online', call onReady.
  *  - Liveness: remember the time of the last frame RECEIVED (any frame) and
  *    of the last `ping` SENT. Send `ping` every PING_INTERVAL_MS. The socket
  *    is dead if a ping was sent at least PONG_TIMEOUT_MS ago and no frame
@@ -238,7 +260,7 @@ export function createConnection(
     try {
       mine = environment.openSocket(url, {
         opened() {
-          if (isCurrent()) transmit({ type: 'hello', protocol: PROTOCOL_VERSION, token: loadToken() });
+          if (isCurrent()) transmit({ type: 'hello', protocol: PROTOCOL_VERSION, token: tokenForHello() });
         },
         frame(text) {
           if (isCurrent()) receive(text);
@@ -273,6 +295,39 @@ export function createConnection(
       // A socket that cannot even be closed is gone all the same.
     }
     lostSocket();
+  }
+
+  /**
+   * This page has just become the player another tab of the same browser
+   * stored (see "ONE BROWSER, ONE PLAYER" above). A socket belongs to the
+   * token of its `hello`, so the socket is given up and a new one says
+   * hello at once. An app that had been told "online" hears that it is
+   * connecting again (not "connection lost": nothing was).
+   */
+  function helloAgain(): void {
+    if (socket === null) return; // waiting to try again: the next hello carries the new token anyway
+    const wasReady = ready;
+    const old = socket;
+    socket = null; // first, so that the old socket's own "closed" event is ignored
+    stopSocketTimers();
+    ready = false;
+    try {
+      old.close();
+    } catch {
+      // A socket that cannot even be closed is gone all the same.
+    }
+    if (wasReady) {
+      handlers.onDisconnect();
+      handlers.onStatus('connecting');
+      if (closedForGood) return; // the app closed the connection from inside one of those two calls
+    }
+    connect();
+  }
+
+  /** The browser says that another tab has stored a token. */
+  function tokenStoredElsewhere(): void {
+    if (closedForGood) return;
+    if (handlers.mayChangeIdentity() && adoptStoredToken()) helloAgain();
   }
 
   /** Tells the app, and schedules the next attempt: 0.5 s, 1 s, 2 s ... 8 s, plus a little jitter. */
@@ -310,10 +365,17 @@ export function createConnection(
     const serverMessage = message as ServerMessage;
 
     if (serverMessage.type === 'welcome' && !ready) {
+      // A first visit in two tabs at once: the other tab's token is the one
+      // in the storage. Become that player before anything is built on this one.
+      if (handlers.mayChangeIdentity() && adoptStoredToken()) {
+        helloAgain();
+        return;
+      }
       ready = true;
       failures = 0;
       handshakeTimer = stopTimer(handshakeTimer);
       pingTimer = environment.setTimer(pingTick, PING_INTERVAL_MS);
+      pageWasWelcomed(); // this page and the server are the same version: a reload for an update has done its job
       const stored = saveToken(serverMessage.token);
       if (!stored && !tokenWarningGiven) {
         tokenWarningGiven = true;
@@ -387,6 +449,7 @@ export function createConnection(
   }
 
   const stopWakeListener = environment.onWake(wake);
+  const stopStorageListener = environment.onTokenStored(tokenStoredElsewhere);
   connect();
 
   return {
@@ -399,6 +462,7 @@ export function createConnection(
       if (closedForGood) return;
       closedForGood = true;
       stopWakeListener();
+      stopStorageListener();
       reconnectTimer = stopTimer(reconnectTimer);
       stopSocketTimers();
       const old = socket;

@@ -12,7 +12,7 @@ import { clickWasByPointer } from '../input/keys';
 import { attachMapInput } from '../input/mapInput';
 import type { Connection } from '../net/connection';
 import { EMPTY_OVERLAY } from '../render/api';
-import type { MapOverlay, MapRenderer, ScreenPoint } from '../render/api';
+import type { MapOverlay, MapRenderer, ScreenPoint, ScreenRect } from '../render/api';
 import { createMapRenderer } from '../render/renderer';
 import type { AppState, Store } from '../state/store';
 import { mountCityPanel } from './cityPanel';
@@ -20,22 +20,14 @@ import { h } from './dom';
 import type { Unmount } from './dom';
 import { mountEndTurnButton } from './endTurnButton';
 import { mountHoverBox } from './hoverBox';
+import { isInTheOpen, sidewaysStep, upOrDownStep } from './mapReveal';
+import type { RevealSurroundings } from './mapReveal';
 import { mountStartHint } from './startHint';
 import { TEST_IDS } from './testIds';
 import { tabTitleText } from './texts';
 import { mountTileCard } from './tileCard';
 import { mountTopBar } from './topBar';
 import { mountUnitPanel } from './unitPanel';
-
-/** The marked tile is kept at least this far (in CSS pixels, about one tile) clear of the panels and of the map's edges. */
-const REVEAL_MARGIN = 44;
-/**
- * When the map steps aside it aims this much further than the margin asks
- * for. The camera is drawn on whole device pixels, so a tile can land a
- * fraction of a pixel short of where it was sent; with this to spare it is
- * in the open for certain afterwards.
- */
-const REVEAL_SLACK = 1;
 
 /**
  * Builds the game screen and keeps it in step with the store.
@@ -69,10 +61,14 @@ const REVEAL_SLACK = 1;
  * it is about (the marked tile: the selected unit or city, or the tile
  * whose card is open). The map then moves just far enough to bring that
  * tile into the open: up, or sideways when there is no room above the
- * panel. It does so when the marked tile changes. When only a size changes
- * (a panel grows by a queue row, the window is resized) it does so only for
- * a tile that was in the open before; a tile the player has scrolled away
- * is never pulled back.
+ * panel, and back from beyond a side edge of the map (a window that got
+ * narrower, a phone that was turned). It does so when the marked tile
+ * changes. When only a size changes (a panel grows by a queue row, the
+ * window is resized) it does so only for a tile that was in the open
+ * before; a tile the player has scrolled away is never pulled back.
+ * What "in the open" is and how far the map moves is the arithmetic of
+ * ui/mapReveal.ts (rectangles in, a pan out; tested in plain Node). This
+ * file measures the rectangles, decides WHEN to step aside, and pans.
  *
  * ORDER AS BUILT: steps 3 and 5 (controller, panels) are carried out before
  * step 2 (renderer). The top bar and, on a narrow screen, the bottom panels
@@ -88,7 +84,7 @@ const REVEAL_SLACK = 1;
  *
  * Layout: laptop first; must stay usable on a touch screen (panels do not
  * cover the whole map, buttons are at least 44 CSS px tall under
- * `@media (pointer: coarse)`).
+ * `@media (any-pointer: coarse)`).
  */
 export function mountGameScreen(parent: HTMLElement, store: Store, connection: Connection): Unmount {
   // 1. The whole screen goes into the page first: the top bar, the map area
@@ -177,22 +173,18 @@ export function mountGameScreen(parent: HTMLElement, store: Store, connection: C
   let wasOpen = false; // was the marked tile in the open when last looked at?
   let lookedAtSize = ''; // the canvas's width and height at that look
 
-  /** How far down the screen a tile at this x may sit before a floating bottom panel covers it. */
-  function lowestUncoveredY(x: number, mapBottom: number): number {
-    let lowest = mapBottom;
-    for (const corner of [hudLeft, hudRight]) {
-      const box = corner.getBoundingClientRect();
-      if (box.width === 0 || box.height === 0) continue;
-      if (x > box.left - REVEAL_MARGIN && x < box.right + REVEAL_MARGIN) lowest = Math.min(lowest, box.top - REVEAL_MARGIN);
-    }
-    return lowest;
+  /** The rectangles the map steps aside for, as they are on screen right now. */
+  function surroundings(): RevealSurroundings {
+    const rect = (element: HTMLElement): ScreenRect => {
+      const box = element.getBoundingClientRect();
+      return { left: box.left, top: box.top, right: box.right, bottom: box.bottom };
+    };
+    return { map: rect(canvas), leftCorner: rect(hudLeft), rightCorner: rect(hudRight) };
   }
 
   /**
-   * Is there a marked tile, and is it in the open right now? In the open
-   * means: its middle lies on the canvas, at least REVEAL_MARGIN below the
-   * canvas's top, and not below lowestUncoveredY (the bottom edge and the
-   * two corner panels, each with the margin). False without a view.
+   * Is there a marked tile, and is it in the open right now (isInTheOpen in
+   * ui/mapReveal.ts)? False without a view.
    */
   function markedIsOpen(): boolean {
     const tile = shownOverlay.selectedTile;
@@ -206,10 +198,7 @@ export function mountGameScreen(parent: HTMLElement, store: Store, connection: C
       // does not exist. Nothing is in the open then.
       return false;
     }
-    const map = canvas.getBoundingClientRect();
-    if (point.x < map.left || point.x > map.right) return false;
-    if (point.y < map.top + REVEAL_MARGIN) return false;
-    return point.y <= lowestUncoveredY(point.x, map.bottom - REVEAL_MARGIN);
+    return isInTheOpen(point, surroundings());
   }
 
   /** The canvas's width and height on screen (getBoundingClientRect), as one string. */
@@ -250,34 +239,18 @@ export function mountGameScreen(parent: HTMLElement, store: Store, connection: C
     });
   }
 
-  /** Moves the map just far enough to bring the tile into the open. */
+  /**
+   * Moves the map just far enough to bring the tile into the open: first
+   * sideways, then up or down (ui/mapReveal.ts says how far). The tile's
+   * place is read again between the two: the camera stops at the map's
+   * edge, so the first pan may have ended short of where it was sent.
+   */
   function bringOut(tile: TileIndex): void {
-    const map = canvas.getBoundingClientRect();
-    const highest = map.top + REVEAL_MARGIN;
-    const mapBottom = map.bottom - REVEAL_MARGIN;
-    let point = renderer.tileToScreen(tile);
-
-    // 1. Is there room above the panels at the tile's x? If not (a tall
-    //    panel, a low window): step aside SIDEWAYS first, to the nearest x
-    //    that has room: just right of the left corner's box, or just left
-    //    of the right corner's. If no x on the canvas has room, the map is
-    //    left alone.
-    if (lowestUncoveredY(point.x, mapBottom) <= highest) {
-      const left = hudLeft.getBoundingClientRect();
-      const right = hudRight.getBoundingClientRect();
-      const roomy = [left.right + REVEAL_MARGIN + REVEAL_SLACK, right.left - REVEAL_MARGIN - REVEAL_SLACK]
-        .filter((x) => x >= map.left && x <= map.right && lowestUncoveredY(x, mapBottom) > highest)
-        .sort((a, b) => Math.abs(a - point.x) - Math.abs(b - point.x));
-      if (roomy.length === 0) return;
-      renderer.panBy(roomy[0] - point.x, 0);
-      point = renderer.tileToScreen(tile);
-    }
-
-    // 2. Then up or down.
-    const lowest = lowestUncoveredY(point.x, mapBottom);
-    if (lowest <= highest) return; // the camera stopped at the map's edge on the way: nothing more can be done
-    if (point.y > lowest) renderer.panBy(0, lowest - REVEAL_SLACK - point.y);
-    else if (point.y < highest) renderer.panBy(0, highest + REVEAL_SLACK - point.y);
+    const sideways = sidewaysStep(renderer.tileToScreen(tile), surroundings());
+    if (sideways === null) return; // no place on the map has room: it is left alone
+    if (sideways !== 0) renderer.panBy(sideways, 0);
+    const upOrDown = upOrDownStep(renderer.tileToScreen(tile), surroundings());
+    if (upOrDown !== 0) renderer.panBy(0, upOrDown);
   }
 
   // A panel that opens, closes or grows changes the size of a corner, and

@@ -3,7 +3,7 @@
  * selected.
  */
 
-import { IMPROVEMENT_IDS, RULE_ERROR_MESSAGES, UNITS } from '@domination/shared';
+import { IMPROVEMENT_IDS, UNITS } from '@domination/shared';
 import type { ImprovementId, UnitId } from '@domination/shared';
 import type { Controller } from '../game/controller';
 import { myPlayer, ordersClosed, selectedUnit } from '../game/selectors';
@@ -12,17 +12,9 @@ import type { AppState, Store } from '../state/store';
 import { setCivColors } from './civColors';
 import { h, setBar, setDisabled, setHidden, setText } from './dom';
 import type { Unmount } from './dom';
+import { unitPanelButtons } from './panelButtons';
 import { TEST_IDS } from './testIds';
-import {
-  improvementBonusText,
-  jobButtonText,
-  jobProgressText,
-  jobReasonText,
-  jobsReasonText,
-  movesText,
-  progressFraction,
-  unitHintParts,
-} from './texts';
+import { improvementBonusText, jobProgressText, movesText, progressFraction } from './texts';
 
 /** The parts of one job row: the button that starts the job and the line that says why it cannot be started. */
 interface JobRow {
@@ -49,27 +41,42 @@ interface JobRow {
  *    (RULE_ERROR_MESSAGES[foundCityError]) is shown next to it.
  *    Click: controller.foundCity();
  *  - for units that can build improvements (unit.own.jobOptions is not
- *    empty, or the unit has a job): the job block (unitJobs). Without a job
- *    it holds one button per improvement (`job-start-<id>`: "Build Farm
- *    (4 turns)" and what it adds) with the reason under a button that is
- *    greyed out (`job-reason-<id>`), or ONE sentence over the buttons when
- *    all of them are impossible for the same reason (unitJobsReason).
+ *    empty, or the unit has a job): the job block (unitJobs). Its first
+ *    line, while no order can be given at all, says why (unitJobsClosed:
+ *    no connection, turn ended). Without a job it holds one button per
+ *    improvement (`job-start-<id>`: "Build Farm (4 turns)" and what it
+ *    adds) with the reason under a button that is greyed out
+ *    (`job-reason-<id>`), or ONE sentence over the buttons when all of
+ *    them are impossible for the same reason (unitJobsReason).
  *    Click: controller.startJob(id). With a job it holds the progress
  *    ("Building a Farm: 3 turns left", unitJob), a bar, and "Stop work"
- *    (jobStop) with the warning that the work done is lost.
+ *    (jobStop) with, while it can be pressed, the warning "Stopping loses
+ *    the work done so far." (jobStopWarning).
  *    Click: controller.stopJob();
  *  - one line about the tile the unit stands on (unitTile; unitTileText in
  *    game/tileInfo.ts, the words of the tile card);
  *  - what can be done with the unit right now ("Choose a highlighted tile
  *    to move there.") and, when something else of the player's stands on
  *    the same tile, how to select that (unitHintParts in texts.ts; the
- *    second sentence is left out in a low window).
+ *    second sentence is left out in a low window). The first sentence is
+ *    left out when the job block has already said why nothing can be
+ *    ordered.
  *
- * GREYING (one rule for every button that gives an order): a button is
- * disabled when the player cannot give orders for a lasting reason
- * (ordersClosed: no connection, turn ended; the hint says which) or when
- * its own reason says so. It is never disabled for the blink of a round
- * trip (`busy`): a press in that blink is ignored by the controller.
+ * A PANEL THAT HAS JUST OPENED: for half a second after the selection went
+ * to another unit, Found City, the job buttons and "Stop work" do nothing
+ * (the controller's selection guard, Controller.foundCity). The panel comes
+ * up where the map was, on a phone where the tapped unit itself stood, and
+ * the second tap of a double tap would land on one of them. Nothing is
+ * greyed for that half second.
+ *
+ * GREYING (one rule for every button that gives an order): which button
+ * is greyed out, and the sentence that says why, is the answer of one plain
+ * function (unitPanelButtons in ui/panelButtons.ts); the panel prints it.
+ * A button is disabled when the player cannot give orders for a lasting
+ * reason (ordersClosed: no connection, turn ended; the first line of the
+ * job block says which, or the hint for a unit without one) or when its
+ * own reason says so. It is never disabled for the blink of a round trip
+ * (`busy`): a press in that blink is ignored by the controller.
  *
  * Built once; updated in place. When the panel shows another unit than at
  * its last update, or was hidden before, it starts at its top again.
@@ -98,6 +105,7 @@ export function mountUnitPanel(parent: HTMLElement, store: Store, controller: Co
 
   // ---- The job block: the buttons that start a job, or the job in progress ----
   const jobsTitle = h('h3', { className: 'build-title', text: 'Work on this tile' });
+  const jobsClosed = h('p', { className: 'panel-reason', testId: TEST_IDS.unitJobsClosed });
   const jobsReason = h('p', { className: 'panel-reason', testId: TEST_IDS.unitJobsReason });
   const jobRows = new Map<ImprovementId, JobRow>();
   for (const improvement of IMPROVEMENT_IDS) {
@@ -126,16 +134,13 @@ export function mountUnitPanel(parent: HTMLElement, store: Store, controller: Co
     attributes: { title: 'Stop this work (what was done so far is lost)' },
     onClick: () => controller.stopJob(),
   });
-  const stopRow = h(
-    'div',
-    { className: 'job-stop-row' },
-    h('p', { className: 'panel-hint', text: 'The work done so far is lost.' }),
-    stopButton,
-  );
+  const stopWarning = h('p', { className: 'panel-hint', testId: TEST_IDS.jobStopWarning });
+  const stopRow = h('div', { className: 'job-stop-row' }, stopWarning, stopButton);
   const jobs = h(
     'div',
     { className: 'unit-jobs', testId: TEST_IDS.unitJobs },
     jobsTitle,
+    jobsClosed,
     jobsReason,
     ...[...jobRows.values()].map((parts) => parts.row),
     jobProgress,
@@ -168,65 +173,68 @@ export function mountUnitPanel(parent: HTMLElement, store: Store, controller: Co
   function update(state: AppState): void {
     const unit = selectedUnit(state);
     const view = state.game?.view ?? null;
-    if (unit === null || view === null || unit.own === null || unit.owner !== view.you) {
+    /** What is greyed out and why: the panel only prints it. Null for a unit that is not the player's own. */
+    const buttons = unit === null || view === null ? null : unitPanelButtons(view, unit, ordersClosed(state));
+    if (unit === null || view === null || unit.own === null || buttons === null) {
       setHidden(panel, true);
       shownUnit = null;
       return;
     }
     setHidden(panel, false);
-    const own = unit.own;
-    const closed = ordersClosed(state) !== null;
 
     setCivColors(swatch, myPlayer(view).civ);
     setText(name, UNITS[unit.type].name);
     setText(description, UNITS[unit.type].description);
     setText(moves, movesText(unit));
 
-    const canFound = UNITS[unit.type].canFoundCity;
-    setHidden(foundRow, !canFound);
-    if (canFound) {
-      const error = own.foundCityError;
-      setDisabled(foundButton, error !== null || closed);
-      setText(foundReason, error === null ? '' : RULE_ERROR_MESSAGES[error]);
-      setHidden(foundReason, error === null);
+    setHidden(foundRow, buttons.found === null);
+    if (buttons.found !== null) {
+      setDisabled(foundButton, buttons.found.disabled);
+      setText(foundReason, buttons.found.reason ?? '');
+      setHidden(foundReason, buttons.found.reason === null);
     }
 
-    const job = own.job;
-    const atWork = job !== null;
-    setHidden(jobs, own.jobOptions.length === 0 && !atWork);
+    const block = buttons.jobs;
+    setHidden(jobs, block === null);
+    if (block !== null) {
+      setHidden(jobsTitle, !block.showTitle);
+      setText(jobsClosed, block.closed ?? '');
+      setHidden(jobsClosed, block.closed === null);
+      setText(jobsReason, block.reason ?? '');
+      setHidden(jobsReason, block.reason === null);
 
-    // Without a job: the buttons, each with its reason, or one reason for them all.
-    const oneReason = atWork ? null : jobsReasonText(own.jobOptions);
-    setHidden(jobsTitle, atWork);
-    setText(jobsReason, oneReason ?? '');
-    setHidden(jobsReason, oneReason === null);
-    for (const [improvement, parts] of jobRows) {
-      const option = own.jobOptions.find((candidate) => candidate.improvement === improvement);
-      setHidden(parts.row, atWork || option === undefined);
-      if (option === undefined) continue;
-      setText(parts.name, jobButtonText(option));
-      setDisabled(parts.button, option.error !== null || closed);
-      // Its own reason, unless one sentence says it for all, or the unit is at work (the block then shows the work).
-      const reason = atWork || oneReason !== null ? null : jobReasonText(option);
-      setText(parts.reason, reason ?? '');
-      setHidden(parts.reason, reason === null);
-    }
+      // Without a job: the buttons, each with its reason, or one reason for them all.
+      for (const [improvement, parts] of jobRows) {
+        const start = block.start.find((candidate) => candidate.improvement === improvement);
+        setHidden(parts.row, start === undefined);
+        if (start === undefined) continue;
+        setText(parts.name, start.label);
+        setDisabled(parts.button, start.disabled);
+        setText(parts.reason, start.reason ?? '');
+        setHidden(parts.reason, start.reason === null);
+      }
 
-    // With a job: how far it is, and the way out.
-    setHidden(jobProgress, !atWork);
-    setHidden(jobBar, !atWork);
-    setHidden(stopRow, !atWork);
-    if (job !== null) {
-      setText(jobProgress, jobProgressText(job));
-      setBar(jobFill, progressFraction(job.turnsWorked, job.turnsTotal));
-      setDisabled(stopButton, closed);
+      // With a job: how far it is, and the way out.
+      const job = unit.own.job;
+      setHidden(jobProgress, job === null);
+      setHidden(jobBar, job === null);
+      setHidden(stopRow, block.stop === null);
+      if (job !== null) {
+        setText(jobProgress, jobProgressText(job));
+        setBar(jobFill, progressFraction(job.turnsWorked, job.turnsTotal));
+      }
+      if (block.stop !== null) {
+        setDisabled(stopButton, block.stop.disabled);
+        setText(stopWarning, block.stop.warning ?? '');
+        setHidden(stopWarning, block.stop.warning === null);
+      }
     }
 
     setText(tileLine, unitTileText(view, unit));
-    const parts = unitHintParts(view, unit, state.connection === 'online');
-    setText(hintMain, parts.main);
-    setText(hintMore, parts.more === '' ? '' : ` ${parts.more}`);
-    setHidden(hintMore, parts.more === '');
+    setText(hintMain, buttons.hint.main);
+    setText(hintMore, buttons.hint.more === '' ? '' : `${buttons.hint.main === '' ? '' : ' '}${buttons.hint.more}`);
+    setHidden(hintMore, buttons.hint.more === '');
+    setHidden(hint, buttons.hint.main === '' && buttons.hint.more === '');
 
     // A new subject starts at the top.
     if (unit.id !== shownUnit) panel.scrollTop = 0;

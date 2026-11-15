@@ -88,7 +88,7 @@ const LONGEST_FRAME_SECONDS = 0.05;
  *  - Enter: controller.toggleEndTurn().
  *  - Escape: closes the hover box if one is showing, otherwise
  *    controller.deselect().
- *  - F: controller.foundCity().
+ *  - F: controller.foundCity('key') (a key is not held back by the selection guard).
  *  - N: tile = controller.selectNextIdleUnit(); if not null, renderer.centerOn(tile).
  *
  * @param canvas  the map canvas (CSS gives it `touch-action: none`, so the
@@ -276,7 +276,7 @@ export function attachMapInput(canvas: HTMLCanvasElement, renderer: MapRenderer,
         if (!hoverInfo.dismiss()) controller.deselect();
         break;
       case 'foundCity':
-        controller.foundCity();
+        controller.foundCity('key');
         break;
       case 'nextUnit': {
         const tile = controller.selectNextIdleUnit();

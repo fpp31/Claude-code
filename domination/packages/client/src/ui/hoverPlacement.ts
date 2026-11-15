@@ -59,7 +59,7 @@ export function placeHoverBox(input: HoverPlacementInput): { left: number; top: 
   // Beside the tile the box keeps the tile's top; above and below it the
   // box is centred on the tile. Both are pushed back into `free`.
   const besideTop = within(Math.round(tile.top), Math.ceil(free.top), Math.floor(free.bottom - box.height));
-  const centredLeft = within(
+  const centeredLeft = within(
     Math.round((tile.left + tile.right) / 2 - box.width / 2),
     Math.ceil(free.left),
     Math.floor(free.right - box.width),
@@ -67,8 +67,8 @@ export function placeHoverBox(input: HoverPlacementInput): { left: number; top: 
   const places = [
     { left: Math.ceil(tile.right + HOVER_BOX_GAP), top: besideTop },
     { left: Math.floor(tile.left - HOVER_BOX_GAP - box.width), top: besideTop },
-    { left: centredLeft, top: Math.floor(tile.top - HOVER_BOX_GAP - box.height) },
-    { left: centredLeft, top: Math.ceil(tile.bottom + HOVER_BOX_GAP) },
+    { left: centeredLeft, top: Math.floor(tile.top - HOVER_BOX_GAP - box.height) },
+    { left: centeredLeft, top: Math.ceil(tile.bottom + HOVER_BOX_GAP) },
   ];
 
   const fitting = places.filter((place) => inside(boxAt(place, box), free));

@@ -8,9 +8,9 @@
  */
 
 import { IMPROVEMENTS, UNITS, applyViewPatch } from '@domination/shared';
-import type { ClientMessage, GameEvent, PlayerView, ServerMessage } from '@domination/shared';
+import type { ClientMessage, GameEvent, ImprovementId, PlayerView, ServerMessage } from '@domination/shared';
 import { loadLastGame, reloadPageOnce, saveLastGame, setGameCodeInUrl } from '../net/identity';
-import { toastsWith } from '../ui/toasts';
+import { MAX_TOASTS, toastsWith } from '../ui/toasts';
 import type { NewToast } from '../ui/toasts';
 import { JOIN_PROBLEMS } from './store';
 import type { AppState, JoinProblem, MapSelection, Store } from './store';
@@ -18,7 +18,8 @@ import type { AppState, JoinProblem, MapSelection, Store } from './store';
 /** Shown instead of the whole app when reloading did not cure a version mismatch. */
 export const VERSION_MISMATCH_MESSAGE =
   'This page and the game server are not the same version. Reload the page to get the newest one. ' +
-  'If you see this again, the server is still being updated: wait a minute and reload once more.';
+  'If you see this again, the server is still being updated: wait a minute and reload once more. ' +
+  'If that does not help either, tell the person who runs the server: they have to run "npm run build" and restart it.';
 
 /** Shown when the server asks a page for a name although it was showing that very game: its seat there is gone. */
 export const NO_LONGER_IN_GAME_MESSAGE = 'You are no longer in this game. Press Join to take a seat in it again.';
@@ -27,7 +28,7 @@ export const NO_LONGER_IN_GAME_MESSAGE = 'You are no longer in this game. Press 
 export const STARTED_BEFORE_LEAVE_MESSAGE = 'The game started before you could leave, so you are still in it.';
 
 /** The answers to `joinGame` that mean "you are not in that game" (see "Refused while in a game" below). */
-const REJOIN_REFUSALS: readonly string[] = ['noSuchGame', 'nameRequired', 'gameAlreadyStarted', 'gameFull'];
+const REJOIN_REFUSALS: readonly string[] = ['noSuchGame', 'gameNotLoaded', 'nameRequired', 'gameAlreadyStarted', 'gameFull'];
 
 /**
  * Applies one message from the server. `send` is used for the rare replies
@@ -82,23 +83,29 @@ const REJOIN_REFUSALS: readonly string[] = ['noSuchGame', 'nameRequired', 'gameA
  *                  'nameRequired' shows no toast (the home screen, with the
  *                  code already filled in, asks for the name), and clears
  *                  joinProblem (the game can be joined).
- *                  'noSuchGame', 'gameAlreadyStarted' and 'gameFull' also
- *                  set joinProblem to that code: a toast is gone after a
- *                  few seconds, and the home screen must go on saying why
- *                  the game it names cannot be joined.
- *                  Each of these four, arriving while a lobby or a game is
+ *                  'gameNotLoaded' (the save is on the server's disk but
+ *                  could not be loaded) forgets NOTHING: ?g= stays in the
+ *                  address and the game stays remembered, so the page's
+ *                  next automatic rejoin (after the server was repaired
+ *                  and restarted, or after a reload) brings the player
+ *                  straight back.
+ *                  'noSuchGame', 'gameNotLoaded', 'gameAlreadyStarted' and
+ *                  'gameFull' also set joinProblem to that code: a toast is
+ *                  gone after a few seconds, and the home screen must go on
+ *                  saying why the game it names cannot be joined.
+ *                  Each of these five, arriving while a lobby or a game is
  *                  on screen, also takes that screen down (lobby = null,
  *                  game = null, the map's four = null). See "refused while
  *                  in a game" below.
  *  pong            nothing (the connection module tracks liveness).
  *
- * Refused while in a game. 'noSuchGame', 'nameRequired', 'gameAlreadyStarted'
- * and 'gameFull' are answers to `joinGame` only, and a page that shows a
- * lobby or a game sends `joinGame` only to get back in after a new
- * connection (rejoin in ui/app.ts). So one of them arriving there means
- * that the server no longer has this page in that game: the save was
- * deleted or could not be loaded, the seat was freed by hand, or a Leave
- * went through just before the connection dropped. The old lobby or game
+ * Refused while in a game. 'noSuchGame', 'gameNotLoaded', 'nameRequired',
+ * 'gameAlreadyStarted' and 'gameFull' are answers to `joinGame` only, and a
+ * page that shows a lobby or a game sends `joinGame` only to get back in
+ * after a new connection (rejoin in ui/app.ts). So one of them arriving
+ * there means that the server no longer has this page in that game: the
+ * save was deleted or could not be loaded, the seat was freed by hand, or a
+ * Leave went through just before the connection dropped. The old lobby or game
  * must not stay up as if nothing had happened, with "online" in the corner
  * and every button answered "You are not in a game": the home screen
  * appears, with the reason. ('nameRequired', which has no toast of its own,
@@ -273,7 +280,7 @@ const NOTHING_ON_THE_MAP: Pick<AppState, 'selection' | 'inspectedTile' | 'hoverT
 
 /**
  * What the home screen should say about the game it names, after an error:
- * the three answers that mean "you cannot get into this game" are kept;
+ * the four answers that mean "you cannot get into this game" are kept;
  * 'nameRequired' means the game is there and has a seat, so an older problem
  * is forgotten; any other error (a full message queue, a server hiccup) says
  * nothing about the game and leaves things as they were.
@@ -297,17 +304,105 @@ function validSelection(selection: MapSelection | null, view: PlayerView): MapSe
 /** The slot (see Toast.slot) of the "Turn 8 has begun." toast: at most one of them is on screen, the newest. */
 export const TURN_TOAST_SLOT = 'turn';
 
-/** The toasts for a list of events (events that need no toast are left out). */
+/** One line of a message's news, before it becomes a toast. */
+interface NewsLine {
+  text: string;
+  /** See Toast.slot. */
+  slot: string | undefined;
+  /** It tells the player that something waits for them (a city with nothing left to build). */
+  asks: boolean;
+  /** How many events of the message said exactly this. */
+  count: number;
+  event: GameEvent;
+}
+
+/**
+ * The toasts for the events of ONE message (events that need no toast are
+ * left out).
+ *
+ * Counted, not merged. A sentence that several events of the message give
+ * is one line, and for finished improvements that line says how many: two
+ * Workers that finish farms near Rome in one turn are "2 Farms were
+ * finished near Rome.", not one farm. (Nothing else can come twice in one
+ * message today: a city grows once and completes one unit in a turn.) The
+ * rule of toastsWith, that a sentence already on screen is replaced, is
+ * about OTHER messages: a refusal repeated, the same news a turn later.
+ *
+ * Folded when it is too much. The list holds MAX_TOASTS lines and a turn's
+ * news comes cities first, in founding order; cutting the oldest used to
+ * cut the capital's. When one message brings more lines than the list
+ * holds, these go in: the turn's own line; the lines that ask for
+ * something ("... has nothing left to build."), which is the first place
+ * that tells the player about an idle city; then the other lines in the
+ * message's order, as many as still fit beside one last line that stands
+ * for everything left out (foldedNewsText).
+ */
 function eventToasts(events: GameEvent[], view: PlayerView): NewToast[] {
-  const toasts: NewToast[] = [];
+  const lines: NewsLine[] = [];
   for (const event of events) {
     const text = describeEvent(event, view);
     if (text === null) continue;
-    // Turns can go by in a second (a game alone, or everybody pressing End
-    // Turn): only the latest "has begun" is news.
-    toasts.push(event.type === 'turnStarted' ? { text, kind: 'info', slot: TURN_TOAST_SLOT } : { text, kind: 'info' });
+    const said = lines.find((line) => line.text === text);
+    if (said !== undefined) {
+      said.count += 1;
+      continue;
+    }
+    lines.push({
+      text,
+      // Turns can go by in a second (a game alone, or everybody pressing End
+      // Turn): only the latest "has begun" is news.
+      slot: event.type === 'turnStarted' ? TURN_TOAST_SLOT : undefined,
+      asks: event.type === 'unitBuilt' && event.queueEmpty,
+      count: 1,
+      event,
+    });
   }
-  return toasts;
+
+  const toast = (line: NewsLine): NewToast => {
+    const event = line.event;
+    const text = line.count > 1 && event.type === 'improvementBuilt' ? improvementsFinishedText(line.count, event.improvement, event.cityName) : line.text;
+    return line.slot === undefined ? { text, kind: 'info' } : { text, kind: 'info', slot: line.slot };
+  };
+  if (lines.length <= MAX_TOASTS) return lines.map(toast);
+
+  // Too many for the list. The lines with a slot (the turn's) stay last; one place is the folding line's.
+  const last = lines.filter((line) => line.slot !== undefined);
+  const others = lines.filter((line) => line.slot === undefined);
+  const room = Math.max(0, MAX_TOASTS - last.length - 1);
+  const kept = new Set([...others.filter((line) => line.asks), ...others.filter((line) => !line.asks)].slice(0, room));
+  const folded = others.filter((line) => !kept.has(line));
+  return [
+    ...others.filter((line) => kept.has(line)).map(toast),
+    { text: foldedNewsText(folded.length, folded.filter((line) => line.asks).length), kind: 'info' },
+    ...last.map(toast),
+  ];
+}
+
+/**
+ * The news of several improvements of one kind finished in one turn near
+ * one city: "3 Farms were finished near Rome."; away from every city the
+ * words "near ..." are left out, as in the sentence about one. `count` is
+ * 2 or more (one improvement keeps its own sentence, which names the
+ * unit). The plural is the name with an "s"; a test holds every name of
+ * the table to that.
+ */
+export function improvementsFinishedText(count: number, improvement: ImprovementId, cityName: string): string {
+  const where = cityName === '' ? '' : ` near ${cityName}`;
+  return `${count} ${IMPROVEMENTS[improvement].name}s were finished${where}.`;
+}
+
+/**
+ * The last line of a turn's news that did not fit into the list: "And 3
+ * more pieces of news." `count` is the number of lines it stands for (2 or
+ * more), `asking` how many of them said that a city has nothing left to
+ * build. Those are folded only when more cities ran empty in one turn than
+ * the list has room for, and then the line says so: the End Turn hint and
+ * the gold sign on the map name the cities.
+ */
+export function foldedNewsText(count: number, asking: number): string {
+  const more = `And ${count} more pieces of news`;
+  if (asking === 0) return `${more}.`;
+  return `${more}: ${asking} more ${asking === 1 ? 'city has' : 'cities have'} nothing left to build.`;
 }
 
 /**

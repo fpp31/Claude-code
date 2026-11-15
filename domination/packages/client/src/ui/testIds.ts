@@ -64,18 +64,24 @@ export const TEST_IDS = {
   unitJobsReason: 'unit-jobs-reason',
   /** One per improvement: `job-reason-<improvementId>`: why its button is disabled. Hidden when it is not, and when unitJobsReason says it for all. */
   jobReason: 'job-reason-',
+  /** The first line of the job block while no order can be given (no connection, turn ended): why its buttons are greyed out. Hidden otherwise. */
+  unitJobsClosed: 'unit-jobs-closed',
   /** "Building a Farm: 3 turns left". Hidden while the unit has no job. */
   unitJob: 'unit-job',
   /** The "Stop work" button. Hidden while the unit has no job. */
   jobStop: 'job-stop',
+  /** The small print beside "Stop work": "Stopping loses the work done so far." Hidden while the button is greyed out. */
+  jobStopWarning: 'job-stop-warning',
 
   cityPanel: 'city-panel',
   cityName: 'city-name',
   cityPopulation: 'city-population',
   cityFood: 'city-food',
   cityProduction: 'city-production',
-  /** The line under the queue title that says why the queue cannot be changed (hidden when there is nothing to say). */
+  /** The line in the panel's head that says why the queue cannot be changed (hidden when there is nothing to say). It stays in sight while the panel scrolls. */
   queueNote: 'queue-note',
+  /** The small line under the queue's title that says what the x of a row does. Hidden with an empty queue. */
+  queueHint: 'queue-hint',
   /** "Queue 3 of 8", in the panel's head (it stays in sight while the panel scrolls). */
   queueCount: 'queue-count',
   /** The list of queue rows. */

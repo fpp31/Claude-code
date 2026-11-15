@@ -759,6 +759,42 @@ describe('the forecast: buildPlan', () => {
     expect(playUntilBuilt(second, rome.id, 3).completions.map((completion) => completion.after)).toEqual([12, 18, 21]);
   });
 
+  it('a city that cannot grow any more is forecast with the citizens\' first choice, and that is what happens', () => {
+    // Plains by the sea: twelve plains, five coast and one ocean tile around
+    // a city on plains. Seven citizens cannot find more food than they eat,
+    // so they work seven plains tiles (cityEconomy, step 3): 16 production.
+    const start = newGame(
+      [
+        'm m m m m m m',
+        ' m m , , , m m',
+        'm m p p , , m',
+        ' m p p p p ~ m',
+        'm m p p p p m',
+        ' m m p p p m m',
+        'm m m m m m m',
+      ],
+      [[3, 3]],
+    );
+    const founded = act(start, 'p1', { type: 'foundCity', unitId: unitOf(start, 'p1', 'settler').id });
+    const cityId = Object.values(founded.cities)[0].id;
+    const queue: UnitTypeId[] = ['warrior', 'worker', 'scout', 'warrior'];
+    const state = withCity(founded, cityId, { population: 7, foodStored: 4, queue });
+
+    const plan = buildPlan(state, state.cities[cityId]);
+    expect(plan.economy).toEqual(cityEconomy(state, state.cities[cityId]));
+    expect(plan.economy).toMatchObject({ production: 16, foodSurplus: -5 });
+    const forecast = rows(state, cityId);
+    expect(forecast.every(([turns, wait]) => turns !== null && wait === null)).toBe(true);
+    // 16 a turn, as the first choice makes it; with the citizens at sea (6 a turn) the Warrior alone would take three turns.
+    expect(forecast[0][0]).toBe(Math.ceil(UNITS.warrior.cost / 16));
+
+    const played = playUntilBuilt(state, cityId, queue.length);
+    expect(played.completions).toEqual(queue.map((unitType, index) => ({ unitType, after: forecast[index][0] })));
+    // The city is as large as before, and its food store has run empty.
+    expect(played.state.cities[cityId].population).toBe(7);
+    expect(played.state.cities[cityId].foodStored).toBe(0);
+  });
+
   it('a paid-for first entry says 1; the entries behind it follow, at least one turn apart', () => {
     const { state, rome } = romeGame();
     const paid = withCity(state, rome.id, { queue: ['scout', 'warrior', 'scout'], productionStored: UNITS.scout.cost });

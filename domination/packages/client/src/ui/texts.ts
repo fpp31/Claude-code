@@ -85,6 +85,8 @@ export function codeHintText(tooShort: boolean, problem: JoinProblem | null, bro
   switch (problem) {
     case 'noSuchGame':
       return 'There is no game with this code. Check the code or the link with your friend.';
+    case 'gameNotLoaded':
+      return 'This game is on the server but could not be opened. Ask the person who runs the server. When they have put it right, reload this page.';
     case 'gameAlreadyStarted':
       return 'This game has already started, so nobody new can join it. You can start a new game instead.';
     case 'gameFull':
@@ -103,6 +105,25 @@ export function movesText(unit: UnitView): string {
   if (unit.own === null) return '';
   return `Moves ${unit.own.movesLeft}/${UNITS[unit.type].moves}`;
 }
+
+/**
+ * Why no order can be given to a unit right now, for a lasting reason:
+ *   'offline'    -> 'No connection: orders have to wait.'
+ *   'turnEnded'  -> 'You have ended your turn. Cancel that to give orders.'
+ * The unit panel prints it where the greyed buttons are: at the top of the
+ * job block of a unit that has one (ui/panelButtons.ts), in the hint at the
+ * bottom for every other unit (unitHintParts).
+ */
+export function ordersClosedText(closed: OrdersClosed): string {
+  return closed === 'offline' ? 'No connection: orders have to wait.' : 'You have ended your turn. Cancel that to give orders.';
+}
+
+/**
+ * The small print beside "Stop work". It is about the button, not about the
+ * job: "The work done so far is lost." read as news of a loss. The panel
+ * leaves it out while the button cannot be pressed (ui/panelButtons.ts).
+ */
+export const STOP_WARNING = 'Stopping loses the work done so far.';
 
 /**
  * The two sentences of the unit panel's hint, apart: `main` is what can be
@@ -128,8 +149,8 @@ export function unitHintParts(view: PlayerView, unit: UnitView, online: boolean)
   const me = view.players.find((player) => player.id === view.you);
 
   let main = 'Choose a highlighted tile to move there.';
-  if (!online) main = 'No connection: orders have to wait.';
-  else if (me !== undefined && me.endedTurn) main = 'You have ended your turn. Cancel that to give orders.';
+  if (!online) main = ordersClosedText('offline');
+  else if (me !== undefined && me.endedTurn) main = ordersClosedText('turnEnded');
   else if (unit.own.job !== null) main = 'At work here. Stop the work to move this unit.';
   else if (unit.own.movesLeft <= 0) main = 'No moves left this turn.';
 
@@ -254,13 +275,11 @@ export function buildWaitText(wait: BuildWait): string {
  * The current build: "Warrior 6/18 (+3 per turn, 4 turns)", "Warrior 15/18
  * (+3 per turn, 1 turn)"; the turns are left out when the first row has no
  * number ("Settler 30/30 (+2 per turn)"). With an empty queue: "Nothing to
- * build.", or, with production saved, "Nothing to build (7 production saved)."
+ * build." (what is saved and what is lost follows it: productionNoteText).
  */
 export function productionText(own: OwnCityDetail): string {
   const first = own.buildQueue[0];
-  if (first === undefined) {
-    return own.productionStored > 0 ? `Nothing to build (${own.productionStored} production saved).` : 'Nothing to build.';
-  }
+  if (first === undefined) return 'Nothing to build.';
   const name = UNITS[first.item.unitType].name;
   const rate = `${signed(own.productionPerTurn)} per turn`;
   const detail = first.turns === null ? rate : `${rate}, ${countOf(first.turns, 'turn', 'turns')}`;
@@ -269,35 +288,55 @@ export function productionText(own: OwnCityDetail): string {
 
 /**
  * What follows the current build in the same element, or null:
- *   empty queue      -> "This city's production is lost every turn."
+ *   empty queue      -> "This city's production is lost every turn.", or,
+ *                       with production saved, "6 production are saved for
+ *                       the next item; what the city makes meanwhile is
+ *                       lost." ("1 production is saved ..."): the savings
+ *                       stay, and "saved" and "lost" must not read as one
  *   own.held is set  -> "Waiting: the city must grow first", "Waiting: no
  *                       free tile for the unit" (buildWaitText)
  *   otherwise        -> null (also for a first entry that has no number but
  *                       is not paid for yet)
  */
 export function productionNoteText(own: OwnCityDetail): string | null {
-  if (own.buildQueue.length === 0) return "This city's production is lost every turn.";
+  if (own.buildQueue.length === 0) {
+    if (own.productionStored <= 0) return "This city's production is lost every turn.";
+    const saved = `${own.productionStored} production ${own.productionStored === 1 ? 'is' : 'are'} saved`;
+    return `${saved} for the next item; what the city makes meanwhile is lost.`;
+  }
   if (own.held !== null) return `Waiting: ${buildWaitText(own.held)}`;
   return null;
 }
 
 /**
- * The small line of a queue row:
- *   index 0, a number   -> 'now, 4 turns', 'now, 1 turn'
- *   index > 0, a number -> 'in 8 turns'
+ * The small line of a queue row. The number is the turn the item is READY
+ * in, and the line says so: after a bare "now", "in 8 turns" read as the
+ * turn the next item starts.
+ *   index 0, a number   -> 'building now, ready in 4 turns', 'building now, ready in 1 turn'
+ *   index > 0, a number -> 'ready in 8 turns'
  *   no number           -> buildWaitText(entry.wait) (every row, the first included)
  * (A row with neither a number nor a reason, which the server never sends,
- * says what is true of every row: 'now' for the first, 'after the item
- * above' for the others.)
+ * says what is true of every row: 'building now' for the first, 'after the
+ * item above' for the others.)
  */
 export function queueRowText(entry: QueueEntryView, index: number): string {
   if (entry.turns !== null) {
-    const turns = countOf(entry.turns, 'turn', 'turns');
-    return index === 0 ? `now, ${turns}` : `in ${turns}`;
+    const ready = `ready in ${countOf(entry.turns, 'turn', 'turns')}`;
+    return index === 0 ? `building now, ${ready}` : ready;
   }
   if (entry.wait !== null) return buildWaitText(entry.wait);
-  return index === 0 ? 'now' : buildWaitText('earlier');
+  return index === 0 ? 'building now' : buildWaitText('earlier');
 }
+
+/**
+ * The small line under the queue's title, shown while the queue has
+ * entries. The x of a row carries its meaning only as a tooltip, which a
+ * touch screen never shows; and the x of the first row is how a
+ * construction is stopped. It has to be ONE line on the narrowest phone and
+ * in the desktop panel (a test holds it to 60 characters; the end-to-end
+ * test looks at its height on a 360 pixel phone).
+ */
+export const REMOVE_HINT = '× takes an item out. Saved production is kept.';
 
 /** "Queue 3 of 8": the entries in the queue and RULES.maxQueueLength. Shown in the panel's head. */
 export function queueCountText(own: OwnCityDetail): string {
@@ -305,8 +344,10 @@ export function queueCountText(own: OwnCityDetail): string {
 }
 
 /**
- * The line under the queue title, or null: why the queue cannot be changed
- * right now. First that applies:
+ * The line in the city panel's head, or null: why the queue cannot be
+ * changed right now. (In the head, because the head stays in sight while
+ * the panel scrolls: the sentence is on the screen whenever a greyed button
+ * is.) First that applies:
  *   closed === 'offline'    -> 'No connection: the queue cannot be changed right now.'
  *   closed === 'turnEnded'  -> 'You have ended your turn. Cancel that to change the queue.'
  *   an option has addError  -> RULE_ERROR_MESSAGES[addError] ('The build queue is full.')
@@ -328,17 +369,18 @@ export function progressFraction(stored: number, total: number | null): number {
 }
 
 /**
- * The second line of an add button:
- *   '18 production, in 4 turns', '18 production, in 1 turn'
- *   '30 production, in 18 turns, uses 1 population'
- *   '30 production, uses 1 population (the city must grow first)'
+ * The second line of an add button: what the item costs (in production) and
+ * the turn it would be ready in if it were added now.
+ *   'costs 18, ready in 4 turns', 'costs 18, ready in 1 turn'
+ *   'costs 30, ready in 18 turns, uses 1 population'
+ *   'costs 30, uses 1 population (the city must grow first)'
  *                            a wait other than 'earlier': the reason in brackets
- *   '18 production (more than 50 turns)'
- *   '18 production'          wait 'earlier': the rows above already say why
+ *   'costs 18 (more than 50 turns)'
+ *   'costs 18'               wait 'earlier': the rows above already say why
  */
 export function buildOptionText(option: BuildOption): string {
-  const parts = [`${option.cost} production`];
-  if (option.turns !== null) parts.push(`in ${countOf(option.turns, 'turn', 'turns')}`);
+  const parts = [`costs ${option.cost}`];
+  if (option.turns !== null) parts.push(`ready in ${countOf(option.turns, 'turn', 'turns')}`);
   const populationCost = UNITS[option.item.unitType].populationCost;
   if (populationCost > 0) parts.push(`uses ${populationCost} population`);
   const text = parts.join(', ');

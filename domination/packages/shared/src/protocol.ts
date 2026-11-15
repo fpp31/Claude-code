@@ -4,8 +4,9 @@
  * same host and port that serves the web page.
  *
  * Conversation outline
- *  1. The client opens the socket and sends `hello`. The server answers
- *     `welcome` (with the player's secret token) or `error protocolMismatch`.
+ *  1. The client opens the socket and sends `hello` (with the player's
+ *     secret token). The server answers `welcome` (with the token the
+ *     player goes by from now on) or `error protocolMismatch`.
  *  2. The client sends `createGame` or `joinGame`. `joinGame` is also the
  *     RECONNECT message: if the token already owns a seat in that game the
  *     socket is simply attached to it again. A socket is attached to at most
@@ -46,8 +47,18 @@ import type { MapSizeId } from './data/rules';
 import type { GameCode, PlayerId } from './types';
 import type { PlayerView, ViewPatch } from './viewTypes';
 
-/** Bump when a message changes shape. A client with another version is told to reload. */
-export const PROTOCOL_VERSION = 2;
+/**
+ * Bump when a message changes shape, when the server starts to send a code
+ * an older page does not know, and when a number table changes under
+ * running games (the page carries its own copy of data/ and would show and
+ * highlight by the old numbers). A client with another version is told to
+ * reload, which fetches the new build.
+ *
+ * 1: phase 1. 2: round 2 (the build queue, the Worker). 3: the repair after
+ * the review of round 2 (the error code 'gameNotLoaded'; a Mine gives +2
+ * production; `hello` may carry a token the page made itself).
+ */
+export const PROTOCOL_VERSION = 3;
 
 /** URL path of the WebSocket endpoint. */
 export const WS_PATH = '/ws';
@@ -116,7 +127,11 @@ export interface LobbyView {
 export type ClientMessage =
   /**
    * Must be the first message on every connection. `token` is the secret from
-   * localStorage, or null on the very first visit (the server then makes one).
+   * localStorage. On a first visit the page makes one itself (32 lower-case
+   * hex characters from the browser's source of random numbers) and stores
+   * it before it sends this, so that every tab of the browser says hello as
+   * the same player. null where the page could not do that; the server then
+   * makes the token, as it does for anything that has not the form of one.
    */
   | { type: 'hello'; protocol: number; token: string | null }
   /**
@@ -180,6 +195,14 @@ export type ProtocolErrorCode =
   /** A message arrived before `hello`. */
   | 'notReady'
   | 'noSuchGame'
+  /**
+   * The game's save is on the server's disk, but the server could not load
+   * it when it started (a save of another version, a conversion that
+   * failed, a damaged file). Only the person who runs the server can put
+   * that right; the client keeps the game's code, so that the player is
+   * back in the game as soon as they have.
+   */
+  | 'gameNotLoaded'
   /** Taking a seat needs a name (the client shows the name form with the code filled in). */
   | 'nameRequired'
   /** The name is empty after cleaning. */
@@ -207,7 +230,11 @@ export interface ActionRejection {
 }
 
 export type ServerMessage =
-  /** Answer to `hello`. The client keeps `token` (in memory and in localStorage) and sends it in every later `hello`. */
+  /**
+   * Answer to `hello`. `token` is the one the client sent if it had the form
+   * of a token, otherwise a new one. The client keeps it (in memory and in
+   * localStorage) and sends it in every later `hello`.
+   */
   | { type: 'welcome'; protocol: number; token: string }
   /** The whole lobby. Sent on attach and on every change while the game has not started. */
   | { type: 'lobby'; lobby: LobbyView }

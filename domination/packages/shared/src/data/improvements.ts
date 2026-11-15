@@ -9,7 +9,13 @@
  *
  * Whether a citizen works an improved tile is decided by cityEconomy
  * (rules/city.ts), which never lets a city stop growing over one. So these
- * numbers can be tuned freely.
+ * numbers can be tuned, with one limit that a table test holds: a mined hill
+ * must give more food + production than every unimproved tile. Citizens
+ * take the tiles with the highest sum first and a mine gives no food, so at
+ * +1 production (level with open grassland and plains) a mine was the last
+ * tile a city took and stood unused for a whole game. Even at +2 a mine
+ * needs the food of a farm: a city without one cannot spare a citizen for a
+ * tile without food for as long as it can still grow.
  *
  * Never remove or rename an id that saved games may contain without writing
  * a save migration (see data/rules.ts).
@@ -59,7 +65,7 @@ export const IMPROVEMENTS: Record<ImprovementId, ImprovementDef> = {
     name: 'Mine', description: 'A pit in the hills for more production.',
     needs: 'hills',
     terrains: ['grassland', 'plains', 'desert'], features: ['hills'],
-    yields: { food: 0, production: 1 }, turns: 5,
+    yields: { food: 0, production: 2 }, turns: 5,
   },
 };
 

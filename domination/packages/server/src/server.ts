@@ -9,7 +9,7 @@ import { WS_PATH } from '@domination/shared';
 import { WebSocketServer } from 'ws';
 import { MAX_MESSAGE_BYTES } from './config';
 import type { ServerConfig } from './config';
-import { handleConnection } from './connection';
+import { createOtherVersionReport, handleConnection } from './connection';
 import { describeError } from './errors';
 import { createStaticHandler } from './httpStatic';
 import { isInside, realPath } from './paths';
@@ -109,9 +109,10 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
   // 3. The WebSocket, on the same port.
   const webSockets = new WebSocketServer({ server: httpServer, path: WS_PATH, maxPayload: MAX_MESSAGE_BYTES });
+  const reportOtherVersion = createOtherVersionReport(log);
   webSockets.on('connection', (socket) => {
     try {
-      handleConnection(socket, rooms, log, options.maxMessagesPerSecond);
+      handleConnection(socket, rooms, log, options.maxMessagesPerSecond, reportOtherVersion);
     } catch (error) {
       log(`A new connection could not be set up. ${describeError(error)}`);
       socket.terminate();

@@ -245,6 +245,56 @@ describe('the hover timer (input/hoverInfo.ts)', () => {
     expect(shows).toEqual(['400:null', '60800:9']);
   });
 
+  it('after a dismiss, a map that moved by itself has put another tile under the mouse: when the mouse then moves, that tile gets its box', () => {
+    // Escape (or a click) on tile 20, then an arrow key scrolls the map: tile 21 lies under the resting mouse.
+    const { timer, shows, advance, pending } = showing(20);
+    expect(timer.dismiss()).toBe(true);
+    timer.mapMoved(21, false);
+    // While the mouse lies still nothing comes, as after every move of the map by itself.
+    advance(60_000);
+    expect(shows).toEqual(['400:null']);
+    expect(pending()).toBe(0);
+    // The mouse stirs on the tile that is under it now. It is another tile than the one that was dismissed: the
+    // player is asking about it, and the quiet is over. (It used to last until the tile after this one.)
+    timer.pointerOver(21, false);
+    advance(HOVER_INFO_DELAY_MS - 1);
+    expect(shows).toEqual(['400:null']);
+    advance(1);
+    expect(shows).toEqual(['400:null', '60800:21']);
+  });
+
+  it('after a dismiss, a map that moved by itself and left the SAME tile under the mouse changes nothing: quiet until another tile', () => {
+    // A small step of the map (it stepped aside for the card the click opened): the clicked tile is still under the mouse.
+    const same = showing(20);
+    same.timer.dismiss();
+    same.timer.mapMoved(20, false);
+    same.timer.pointerOver(20, false);
+    same.advance(5000);
+    expect(same.shows).toEqual(['400:null']);
+    expect(same.pending()).toBe(0);
+    same.timer.pointerOver(22, false);
+    same.advance(HOVER_INFO_DELAY_MS);
+    expect(same.shows).toEqual(['400:null', '5800:22']);
+
+    // There and back again by keys: the dismissed tile is under the mouse once more, and stays quiet.
+    const back = showing(20);
+    back.timer.dismiss();
+    back.timer.mapMoved(21, false);
+    back.timer.mapMoved(20, false);
+    back.timer.pointerOver(20, false);
+    back.advance(5000);
+    expect(back.shows).toEqual(['400:null']);
+  });
+
+  it('a dismiss with the mouse off the map, then the map moves by itself: the tile the mouse then stirs on gets its box', () => {
+    const { timer, shows, advance } = setup();
+    expect(timer.dismiss()).toBe(false);
+    timer.mapMoved(21, false);
+    timer.pointerOver(21, false);
+    advance(HOVER_INFO_DELAY_MS);
+    expect(shows).toEqual(['400:21']);
+  });
+
   it('a map that moved by itself and then by the pointer follows the pointer\'s rule again', () => {
     const { timer, shows, advance } = showing(7);
     timer.mapMoved(9, false);

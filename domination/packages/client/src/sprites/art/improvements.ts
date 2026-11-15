@@ -63,12 +63,12 @@ function farm(soil: string, edge: string, crop: string): SpriteSource {
  * right). It stands in front of the far mound of the hills, whose green top
  * still shows behind it, and it is the same picture on all three grounds.
  *
- * It keeps to the LEFT of the tile (x 3 to 11): the gold token that marks a
- * worked tile (marker.worked, x 10 to 18, y 11 to 17) must not hide the
- * frame, which is what tells a mined hill from a plain one on exactly the
- * tiles a player checks with the city selected. The frame and the hole are
- * at x 5 to 9; a unit standing on the tile covers the middle and leaves the
- * left of the mouth in view.
+ * It keeps to the LEFT of the tile (x 3 to 11). The frame is what tells a
+ * mined hill from a plain one, and the frame and the hole are at x 5 to 9:
+ * a unit standing on the tile covers the middle and leaves the left of the
+ * mouth in view. (The gold token that marks a worked tile lay in the middle
+ * too when the mine was drawn; it is in the top point of the tile now,
+ * marker.worked, and reaches nothing built on a tile.)
  *
  * Why a rock and not only a frame: a narrow frame at the foot of the round
  * mound (the first drawing) looked like a tree, its opening the trunk and

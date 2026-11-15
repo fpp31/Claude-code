@@ -15,6 +15,7 @@ import {
 import type { GameEvent, ServerMessage } from '@domination/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import { projectRoot } from '../src/config';
+import { PROTOCOL_ERROR_MESSAGES } from '../src/errors';
 import { ROOM_FILE_FORMAT } from '../src/roomFile';
 import { hashToken } from '../src/tokens';
 import { createFakeRules, fakeUnitId } from './fakeRules';
@@ -292,7 +293,8 @@ describe('persistence and restart (WP3)', () => {
     ada.send({ type: 'joinGame', code: good.code, name: null });
     expect((await ada.nextOfType('gameSync')).view.you).toBe('p1');
 
-    // The broken ones are reported, moved aside (never deleted), and not there to join.
+    // The broken ones are reported, moved aside (never deleted), and not there to join:
+    // the one that was a game says "on the server but could not be opened".
     for (const [path, original] of [[doomedPath, cutOff], [rubbishPath, '\u0000\u0001 not json at all']]) {
       expect(existsSync(path)).toBe(false);
       expect(readFileSync(`${path}.corrupt`, 'utf8')).toBe(original);
@@ -301,7 +303,7 @@ describe('persistence and restart (WP3)', () => {
     expect(second.logs.some((line) => line.includes('ZZZZZ.json'))).toBe(true);
     const cleo = await second.connect(doomed.clients[0].token);
     cleo.send({ type: 'joinGame', code: doomed.code, name: null });
-    await cleo.expectError('noSuchGame');
+    await cleo.expectError('gameNotLoaded');
   });
 
   it('a save from another version of the game is left untouched, is not loaded, and keeps its code', async () => {
@@ -319,11 +321,62 @@ describe('persistence and restart (WP3)', () => {
 
     const ada = await second.connect(clients[0].token);
     ada.send({ type: 'joinGame', code, name: null });
-    await ada.expectError('noSuchGame');
+    await ada.expectError('gameNotLoaded');
     // New games are made next to it, never over it.
     for (let i = 0; i < 5; i++) await (await second.connect()).createGame(`Player ${i}`);
     expect(readFileSync(path, 'utf8')).toBe(fromTheFuture);
     expect(readdirSync(join(first.dataDir, 'rooms'))).toHaveLength(6);
+  });
+
+  it('a game that is on disk but was not loaded is answered gameNotLoaded (a code with no file: noSuchGame); nothing is touched, and after the repair its players are back', async () => {
+    const first = await fakeServer();
+    const { code, clients } = await gameWith(first, ['Ada', 'Ben']);
+    const [adaToken, benToken] = clients.map((client) => client.token);
+    await first.close();
+
+    // The save as a newer version of the game would have left it: this version leaves it alone.
+    const path = first.savePath(code);
+    const good = readFileSync(path, 'utf8');
+    const fromTheFuture = good.replace(`"format": ${ROOM_FILE_FORMAT}`, `"format": ${ROOM_FILE_FORMAT + 1}`);
+    expect(fromTheFuture).not.toBe(good);
+    writeFileSync(path, fromTheFuture);
+
+    const second = await fakeServer(first.dataDir);
+    expect(second.logs).toContain('Saved games loaded: 0.');
+
+    // A player of that game who comes back (the page's automatic rejoin carries no name) ...
+    const ada = await second.connect(adaToken);
+    ada.send({ type: 'joinGame', code, name: null });
+    const refusal = await ada.nextOfType('error');
+    expect(refusal.code).toBe('gameNotLoaded');
+    expect(refusal.message).toBe(PROTOCOL_ERROR_MESSAGES.gameNotLoaded);
+    expect(refusal.message).toBe('This game is on the server but could not be opened. Ask the person who runs the server.');
+    // ... and somebody who presses Join with a name are told the same thing; in lower case too.
+    const eve = await second.connect();
+    eve.send({ type: 'joinGame', code: code.toLowerCase(), name: 'Eve' });
+    await eve.expectError('gameNotLoaded');
+    // A code that no file has is still "no such game".
+    const nowhere = code === 'ZZZZZ' ? 'YYYYY' : 'ZZZZZ';
+    ada.send({ type: 'joinGame', code: nowhere, name: null });
+    await ada.expectError('noSuchGame');
+    ada.send({ type: 'joinGame', code: 'not a code', name: null });
+    await ada.expectError('noSuchGame');
+    // Asking changed nothing: the socket is in no game, and the file is as it was.
+    ada.send({ type: 'resync' });
+    await ada.expectError('notInGame');
+    expect(readFileSync(path, 'utf8')).toBe(fromTheFuture);
+    expect(readdirSync(join(first.dataDir, 'rooms'))).toEqual([`${code}.json`]);
+    await second.close();
+
+    // The person who runs the server puts things right and starts it again: both players are back on their seats.
+    writeFileSync(path, good);
+    const third = await fakeServer(first.dataDir);
+    expect(third.logs).toContain('Saved games loaded: 1.');
+    for (const [token, seat] of [[adaToken, 'p1'], [benToken, 'p2']]) {
+      const back = await third.connect(token);
+      back.send({ type: 'joinGame', code, name: null });
+      expect((await back.nextOfType('gameSync')).view.you).toBe(seat);
+    }
   });
 
   it('a loaded game is checked: problems are logged as warnings and the game is loaded anyway', async () => {
@@ -578,6 +631,11 @@ describe('persistence and restart: older saves, queues and jobs (WP3, real rules
     expect(ownUnit(ada.view, 'worker').own?.job).toEqual(halfDone);
     expect(IMPROVEMENTS.farm.turns).toBeGreaterThan(2);
 
+    // Ben, far away, has seen nothing of all this: not the land the farm stands on, not the Worker.
+    expect(ben.view?.tiles[farm]).toBeNull();
+    expect(ben.view?.tiles[site]).toBeNull();
+    expect(ben.view?.units.map((unit) => unit.id)).not.toContain(worker.id);
+
     const viewsBefore = clients.map((client) => client.view);
     const fileBefore = first.saveText(code);
     // It is all in the file: the farm on its tile, the job on its unit, with the turns worked.
@@ -604,6 +662,7 @@ describe('persistence and restart: older saves, queues and jobs (WP3, real rules
     expect(adaBack.view?.tiles[farm]?.improvement).toBe('farm');
     expect(ownUnit(adaBack.view, 'worker').own?.job).toEqual(halfDone);
     expect(benBack.view?.tiles[farm]).toBeNull();
+    expect(benBack.view?.units.map((unit) => unit.id)).not.toContain(worker.id);
 
     // The Worker is still held by its job...
     expect(await adaBack.actRejected(turnOf(adaBack), { type: 'moveUnit', unitId: worker.id, path: [site + 1] })).toBe('unitBusy');

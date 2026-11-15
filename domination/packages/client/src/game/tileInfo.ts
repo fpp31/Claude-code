@@ -107,8 +107,8 @@ export function unitTileText(view: PlayerView, unit: UnitView): string {
 }
 
 /**
- * What an improvement adds, read from the table: "+1 food", "+1 production",
- * "+1 food, +1 production". Used by the tile's improvement line and by the
+ * What an improvement adds, read from the table: "+1 food", "+2 production",
+ * "+1 food, +2 production". Used by the tile's improvement line and by the
  * unit panel's job buttons (ui/texts.ts).
  */
 export function improvementBonusText(improvement: ImprovementId): string {

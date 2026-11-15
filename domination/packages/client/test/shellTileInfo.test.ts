@@ -505,14 +505,14 @@ describe('describeTile: improvements and work', () => {
     ]);
   });
 
-  it('the remembered mine: the "Out of sight" line, then "Mine (+1 production). A pit in the hills for more production." and "Yields 0 food, 3 production"', () => {
+  it('the remembered mine: the "Out of sight" line, then "Mine (+2 production). A pit in the hills for more production." and "Yields 0 food, 4 production"', () => {
     const info = describeTile(sampleView(), SAMPLE.rememberedMineTile);
     expect(info.knowledge).toBe('remembered');
     expect(info.title).toBe('Hills on Desert');
     expect(texts(info)).toEqual([
       'Out of sight: shown as you last saw it. Units are not shown.',
-      'Mine (+1 production). A pit in the hills for more production.',
-      'Yields 0 food, 3 production',
+      'Mine (+2 production). A pit in the hills for more production.',
+      'Yields 0 food, 4 production',
       'Costs 2 moves to enter',
       'Belongs to Ben (Egypt)',
     ]);
@@ -576,9 +576,9 @@ describe('describeTile: improvements and work', () => {
     expect(unitTileText(lost, unitIn(lost, SAMPLE.warriorId))).toBe('Tile: Unexplored.');
   });
 
-  it('improvementBonusText reads the table: "+1 food", "+1 production"', () => {
+  it('improvementBonusText reads the table: "+1 food", "+2 production"', () => {
     expect(improvementBonusText('farm')).toBe('+1 food');
-    expect(improvementBonusText('mine')).toBe('+1 production');
+    expect(improvementBonusText('mine')).toBe('+2 production');
 
     // Tuned numbers show at once: both yields, in the order food, production.
     const mine = IMPROVEMENTS.mine;
@@ -592,7 +592,7 @@ describe('describeTile: improvements and work', () => {
     } finally {
       mine.yields = original;
     }
-    expect(improvementBonusText('mine')).toBe('+1 production');
+    expect(improvementBonusText('mine')).toBe('+2 production');
   });
 
   it('the descriptions the lines quote are one line each and hold no digit', () => {

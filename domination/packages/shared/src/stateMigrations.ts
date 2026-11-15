@@ -58,6 +58,14 @@ function fromLayout1(state: SavedState): SavedState {
  * Every city: `production` (one item or null) becomes `buildQueue` (a list
  * with that one item, or an empty list). The city is rebuilt field by field,
  * so nothing but the known fields of layout 2 is carried over.
+ *
+ * A city with NO field `production` (the line was lost while the save was
+ * edited by hand) is TOLERATED and treated like null: it builds nothing,
+ * keeps what it had stored, and asks for a queue like any idle city. That
+ * is on purpose. Refusing the whole game would lock every player out over
+ * something the next press in the city panel puts right. A `production`
+ * that is there and is no item (a name, a number, a list) is damage and
+ * throws.
  */
 function queueFromProduction(state: SavedState): void {
   const cities = recordOf(state.cities, 'cities');

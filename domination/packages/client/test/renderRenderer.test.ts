@@ -11,6 +11,7 @@ import { createMapRenderer } from '../src/render/renderer';
 import { unitDrawings, workingSignOffset } from '../src/render/scene';
 import { SLIDE_MS } from '../src/render/slide';
 import { LAYER_PADDING } from '../src/render/terrainLayer';
+import { city as cityArt } from '../src/sprites/art/buildings';
 import { PALETTE } from '../src/sprites/palette';
 import { createTextSpriteSheet } from '../src/sprites/spriteSheet';
 import type { Sprite, SpriteSheet } from '../src/sprites/spriteSheet';
@@ -1201,7 +1202,7 @@ describe('createMapRenderer: what it draws', () => {
     expect((canvas.element.getContext('2d') as CanvasRenderingContext2D).imageSmoothingEnabled).toBe(false);
   });
 
-  it('draws the highlights of the overlay on their tiles, under the cities and units', () => {
+  it('draws the highlights of the overlay on their tiles, under the cities and units; the worked-tile marks over the units and under the banners', () => {
     const view = sampleView();
     renderer.setView(view);
     renderer.centerOn(47);
@@ -1231,13 +1232,107 @@ describe('createMapRenderer: what it draws', () => {
     const unitAt = indexOf(sheet.get('unit.warrior', 'rome'));
     const bannerAt = frame.findIndex((call) => call.method === 'drawImage' && call.args.length === 3);
     expect(terrainAt).toBeGreaterThanOrEqual(0);
-    for (const marker of ['reachable', 'pathStep', 'pathEnd', 'worked', 'selection', 'hover'] as const) {
+    for (const marker of ['reachable', 'pathStep', 'pathEnd', 'selection', 'hover'] as const) {
       const at = indexOf(sheet.get(`marker.${marker}`));
       expect(at).toBeGreaterThan(terrainAt);
       expect(at).toBeLessThan(cityAt);
     }
     expect(cityAt).toBeLessThan(unitAt);
     expect(unitAt).toBeLessThan(bannerAt);
+    // The gold tokens of the worked tiles are not under the units any more: a unit on a worked tile hid its token.
+    const workedAt = indexOf(sheet.get('marker.worked'));
+    expect(workedAt).toBeGreaterThan(unitAt);
+    expect(workedAt).toBeLessThan(bannerAt);
+  });
+
+  it('the token of a worked tile is drawn after every unit and every sign, before the banners, in the top point of its tile; a unit on the tile does not hide it', () => {
+    const sample = sampleView();
+    const ROME = 4 * 14 + 3;
+    const FARM = 3 * 14 + 3; // worked, nobody on it
+    const WORKER_TILE = 5 * 14 + 3; // the Worker at work stands here
+    const token = sheet.get('marker.worked');
+    const zoom = 2; // one step out: the whole sample map is on screen
+    // A Warrior walks onto the farm; Rome's queue is empty, so the "builds nothing" sign is drawn too.
+    const view: PlayerView = {
+      ...sample,
+      units: sample.units.map((unit) => (unit.id === 'u1_k7m2qd' ? { ...unit, tile: FARM } : unit)),
+      cities: sample.cities.map((city) => (city.own === null ? city : { ...city, own: { ...city.own, buildQueue: [] } })),
+    };
+    renderer.setView(view);
+    renderer.zoomBy(-1);
+    renderer.setOverlay({ ...EMPTY_OVERLAY, selectedTile: ROME, workedTiles: [FARM, WORKER_TILE] });
+    browser.now += SLIDE_MS + 50; // the Warrior's slide to the farm is over
+    const frame = nextFrame();
+
+    /** The places in the frame of the calls that drew this sprite. */
+    const indexesOf = (sprite: Sprite): number[] =>
+      frame.flatMap((call, index) =>
+        call.method === 'drawImage' && call.args.length === 9 && call.args[1] === sprite.sx && call.args[2] === sprite.sy &&
+        call.args[3] === sprite.width && call.args[4] === sprite.height ? [index] : [],
+      );
+    const tokens = indexesOf(token);
+    expect(tokens.length).toBe(2);
+
+    // The order: every unit, the "at work" sign and the "builds nothing" sign come first; the banners after.
+    const before = [
+      sheet.get('unit.warrior', 'rome'), sheet.get('unit.worker', 'rome', { look: 'spent' }), sheet.get('unit.settler', 'rome'),
+      sheet.get('unit.warrior', 'egypt'), sheet.get('marker.working'), sheet.get('marker.idle'),
+    ];
+    for (const sprite of before) {
+      const drawn = indexesOf(sprite);
+      expect(drawn.length).toBe(1);
+      expect(drawn[0]).toBeLessThan(Math.min(...tokens));
+    }
+    const firstBanner = frame.findIndex((call) => call.method === 'drawImage' && call.args.length === 3);
+    expect(firstBanner).toBeGreaterThan(Math.max(...tokens));
+
+    // The place: the same in every worked tile, whatever stands there. From the top of the tile's box down to
+    // where a unit's head begins, in the middle of the box: the top point of the hexagon.
+    expect([token.offsetX, token.offsetY, token.height]).toEqual([9, 0, 6]);
+    for (const tile of [FARM, WORKER_TILE]) {
+      const box = renderer.tileScreenRect(tile);
+      const place = [box.left - BOX.left + token.offsetX * zoom, box.top - BOX.top + token.offsetY * zoom];
+      const draws = drawsOf(frame, token).filter((draw) => draw[4] === place[0] && draw[5] === place[1]);
+      expect(draws.length, `tile ${tile}`).toBe(1);
+      expect(draws[0].slice(6)).toEqual([token.width * zoom, token.height * zoom]);
+    }
+    // The unit on a worked tile begins below the token's rows but for the dark line around its head.
+    const warrior = sheet.get('unit.warrior', 'rome');
+    const worker = sheet.get('unit.worker', 'rome', { look: 'spent' });
+    for (const unit of [warrior, worker]) expect(unit.offsetY).toBeGreaterThanOrEqual(token.offsetY + token.height - 2);
+  });
+
+  it('a city\'s banner hangs centred over the city with its lower edge on the first coloured row of the flag, at every zoom: flag and hall stay in view', () => {
+    // Decided after the review of round 2: lower, on the roof, the banner would leave the farm, mine or Worker on
+    // the two tiles above the city in view, but it would hide the flag at every zoom. The place stays as it is.
+    const ROME = 4 * 14 + 3;
+    const rows = cityArt.rows ?? [];
+    const flagTop = (cityArt.offsetY ?? 0) + rows.findIndex((row) => /[1-4]/.test(row)); // the first row in the owner's colours
+    const roofTop = (cityArt.offsetY ?? 0) + rows.findIndex((row) => row.includes('1111'));
+    expect([flagTop, roofTop]).toEqual([2, 8]);
+    renderer.setView(sampleView());
+    renderer.zoomBy(-10);
+    const zooms: number[] = [];
+    for (let step = 0; step < 6; step++) {
+      renderer.centerOn(ROME);
+      const frame = nextFrame();
+      const box = renderer.tileScreenRect(ROME);
+      const zoom = (box.right - box.left) / TILE_WIDTH;
+      zooms.push(zoom);
+      const middle = (box.left + box.right) / 2 - BOX.left;
+      const banners = frame
+        .filter((call) => call.method === 'drawImage' && call.args.length === 3)
+        .map((call) => ({ picture: call.args[0] as { width: number; height: number }, x: call.args[1] as number, y: call.args[2] as number }))
+        .filter((banner) => Math.abs(banner.x + banner.picture.width / 2 - middle) <= 1);
+      expect(banners.length, `zoom ${zoom}`).toBe(1);
+      const [banner] = banners;
+      // Its lower edge: where the flag's colour begins. Nothing of the banner lies on the flag's colour or on the hall.
+      expect(banner.y + banner.picture.height, `zoom ${zoom}`).toBe(box.top - BOX.top + flagTop * zoom);
+      // And it is the letters' size that sets its height: 9 font pixels and a frame of one art pixel above and below.
+      expect(banner.picture.height).toBe(9 * Math.max(1, Math.ceil(zoom / 2)) + 2 * zoom);
+      renderer.zoomBy(1);
+    }
+    expect(zooms).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it('draws cities and units in their owner\'s colours; a remembered city fogged; an own unit without moves dimmed', () => {

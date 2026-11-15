@@ -164,8 +164,8 @@ describe('contracts: the city economy', () => {
     // The land is what the drawing says: all five tiles are Rome's.
     for (const tile of [GRASS_A, GRASS_B, COAST, FOREST, HILLS]) expect(state.map.tiles[tile].cityId).toBe(rome.id);
 
-    // First choice: grassland, grassland and the mined hill (3 each in total),
-    // which is 2 + 2 + 2 + 0 = 6 food for 6 eaten: the city would stand still.
+    // First choice: the mined hill (4 in total) and both grassland tiles (3 each),
+    // which is 2 + 0 + 2 + 2 = 6 food for 6 eaten: the city would stand still.
     // So the mine (no food) is given up for the coast (2 food).
     expect(cityEconomy(state, rome)).toEqual({
       worked: [GRASS_A, GRASS_B, COAST],
@@ -181,7 +181,7 @@ describe('contracts: the city economy', () => {
     expect(cityEconomy(withFarm, cityOf(withFarm, 'p1'))).toEqual({
       worked: [GRASS_A, GRASS_B, HILLS],
       food: 7,
-      production: 6,
+      production: 7,
       foodSurplus: 1,
     });
 
@@ -473,7 +473,7 @@ describe('contracts: improvement sites', () => {
     expect(tileYields({ terrain: 'grassland', feature: null, improvement: 'farm' })).toEqual({ food: 3, production: 1 });
     expect(tileYields({ terrain: 'plains', feature: null, improvement: 'farm' })).toEqual({ food: 2, production: 2 });
     expect(tileYields({ terrain: 'desert', feature: null, improvement: 'farm' })).toEqual({ food: 1, production: 1 });
-    expect(tileYields({ terrain: 'plains', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 3 });
+    expect(tileYields({ terrain: 'plains', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 4 });
 
     // Where each improvement fits: a farm on open land, a mine on hills, neither on forest, water or mountains.
     expect(improvementFits('farm', { terrain: 'desert', feature: null })).toBe(true);

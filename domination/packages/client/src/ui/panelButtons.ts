@@ -1,0 +1,184 @@
+/**
+ * What the buttons of the city panel and of the unit panel may do right
+ * now, and the sentence that says why not (round 2, the repair after its
+ * review). Plain functions of the view, tested in plain Node
+ * (test/shellPanelButtons.test.ts): the panels only print what these
+ * answer.
+ *
+ * ONE RULE for every button that gives an order: it is greyed out while the
+ * player cannot give orders for a lasting reason (ordersClosed in
+ * game/selectors.ts: no connection, turn ended), or when its own reason
+ * says so (the view's addError, foundCityError, a job option's error; the
+ * first row cannot go up, the last cannot go down). Never for the blink of
+ * a round trip. And wherever a button is greyed, a sentence that says why
+ * is on the screen with it.
+ */
+
+import { RULE_ERROR_MESSAGES, UNITS } from '@domination/shared';
+import type { ImprovementId, OwnCityDetail, PlayerView, UnitTypeId, UnitView } from '@domination/shared';
+import type { OrdersClosed } from '../game/selectors';
+import {
+  STOP_WARNING,
+  jobButtonText,
+  jobReasonText,
+  jobsReasonText,
+  ordersClosedText,
+  queueNoteText,
+  unitHintParts,
+} from './texts';
+
+// ---------------------------------------------------------------------------
+// City panel
+// ---------------------------------------------------------------------------
+
+/** The three buttons of one queue row: is each greyed out? */
+export interface QueueRowButtons {
+  upDisabled: boolean;
+  downDisabled: boolean;
+  removeDisabled: boolean;
+}
+
+/** One button of the add list. */
+export interface AddButton {
+  unitType: UnitTypeId;
+  disabled: boolean;
+}
+
+/** The buttons of the city panel. */
+export interface CityPanelButtons {
+  /**
+   * Why the queue cannot be changed (queueNoteText), or null: no
+   * connection, turn ended, queue full. The panel prints it in its head.
+   */
+  note: string | null;
+  /**
+   * Does the queue have entries? Its title, the line about the x
+   * (REMOVE_HINT) and "Empty the queue" are shown exactly then.
+   */
+  hasQueue: boolean;
+  /** One per entry of the queue, in its order. */
+  rows: QueueRowButtons[];
+  /** "Empty the queue" (shown while hasQueue). */
+  clearDisabled: boolean;
+  /** The add buttons that are shown: one per option of the view, in its order. */
+  adds: AddButton[];
+}
+
+/**
+ * The city panel's buttons for an own city.
+ *
+ * @param own     what the view says about the city (its queue and its menu)
+ * @param closed  ordersClosed(state): why no order can be given, or null
+ */
+export function cityPanelButtons(own: OwnCityDetail, closed: OrdersClosed | null): CityPanelButtons {
+  const shut = closed !== null;
+  const last = own.buildQueue.length - 1;
+  return {
+    note: queueNoteText(own, closed),
+    hasQueue: own.buildQueue.length > 0,
+    rows: own.buildQueue.map((_entry, index) => ({
+      upDisabled: shut || index === 0,
+      downDisabled: shut || index === last,
+      removeDisabled: shut,
+    })),
+    clearDisabled: shut,
+    adds: own.buildOptions.map((option) => ({ unitType: option.item.unitType, disabled: shut || option.addError !== null })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Unit panel
+// ---------------------------------------------------------------------------
+
+/** One button that starts a job. */
+export interface JobButton {
+  improvement: ImprovementId;
+  /** "Build Farm (4 turns)". */
+  label: string;
+  disabled: boolean;
+  /** Its own reason, printed under it; null when it has none, or when one sentence says it for all (JobBlock.reason). */
+  reason: string | null;
+}
+
+/** The job block of a unit that builds improvements. */
+export interface JobBlock {
+  /**
+   * Why no button of the block can be pressed for now (ordersClosedText),
+   * or null. The first line of the block: in a low window the hint at the
+   * panel's bottom is out of sight while the buttons are in sight.
+   */
+  closed: string | null;
+  /** The ONE sentence when every job is impossible for the same reason (jobsReasonText), or null. */
+  reason: string | null;
+  /** The heading "Work on this tile": over the job buttons, not over a job in progress. */
+  showTitle: boolean;
+  /** The buttons that start a job; none while the unit is at work. */
+  start: JobButton[];
+  /**
+   * "Stop work", for a unit at work; null without a job. `warning` is the
+   * small print beside it (STOP_WARNING), null while the button is greyed:
+   * beside a button that cannot be pressed it would only read as bad news.
+   */
+  stop: { disabled: boolean; warning: string | null } | null;
+}
+
+/** The buttons of the unit panel, and its hint. */
+export interface UnitPanelButtons {
+  /**
+   * "Found City"; null for a unit that cannot found cities (no button).
+   * `reason` is the unit's own reason, printed beside the button
+   * (RULE_ERROR_MESSAGES[foundCityError]), or null.
+   */
+  found: { disabled: boolean; reason: string | null } | null;
+  /** The job block; null for a unit that has neither job options nor a job. */
+  jobs: JobBlock | null;
+  /**
+   * The hint at the panel's bottom (unitHintParts). `main` is '' when the
+   * job block already says why nothing can be ordered: one sentence, once.
+   */
+  hint: { main: string; more: string };
+}
+
+/**
+ * The unit panel's buttons for an own unit; null for anybody else's (the
+ * panel is hidden).
+ *
+ * @param closed  ordersClosed(state): why no order can be given, or null
+ */
+export function unitPanelButtons(view: PlayerView, unit: UnitView, closed: OrdersClosed | null): UnitPanelButtons | null {
+  const own = unit.own;
+  if (own === null || unit.owner !== view.you) return null;
+  const shut = closed !== null;
+
+  const found = UNITS[unit.type].canFoundCity
+    ? { disabled: shut || own.foundCityError !== null, reason: own.foundCityError === null ? null : RULE_ERROR_MESSAGES[own.foundCityError] }
+    : null;
+
+  let jobs: JobBlock | null = null;
+  if (own.job !== null) {
+    jobs = {
+      closed: closed === null ? null : ordersClosedText(closed),
+      reason: null,
+      showTitle: false,
+      start: [],
+      stop: { disabled: shut, warning: shut ? null : STOP_WARNING },
+    };
+  } else if (own.jobOptions.length > 0) {
+    const oneReason = jobsReasonText(own.jobOptions);
+    jobs = {
+      closed: closed === null ? null : ordersClosedText(closed),
+      reason: oneReason,
+      showTitle: true,
+      start: own.jobOptions.map((option) => ({
+        improvement: option.improvement,
+        label: jobButtonText(option),
+        disabled: shut || option.error !== null,
+        reason: oneReason !== null ? null : jobReasonText(option),
+      })),
+      stop: null,
+    };
+  }
+
+  const hint = unitHintParts(view, unit, closed !== 'offline');
+  return { found, jobs, hint: jobs !== null && shut ? { main: '', more: hint.more } : hint };
+}

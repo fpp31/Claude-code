@@ -99,6 +99,16 @@ export class RoomManager {
     return this.rooms.get(code) ?? null;
   }
 
+  /**
+   * True if a save with this (already normalised) code lies on disk although
+   * no room was made of it: the server left it alone or moved it aside when
+   * it started (storage.ts says when). Its players are told so
+   * ('gameNotLoaded') instead of "there is no such game".
+   */
+  isOnDiskOnly(code: GameCode): boolean {
+    return !this.rooms.has(code) && this.deps.storage.has(code);
+  }
+
   /** Forgets a room and deletes its save file (an abandoned lobby; see Room.leave). */
   removeRoom(code: GameCode): void {
     this.rooms.delete(code);

@@ -468,6 +468,43 @@ describe('the art (WP5)', () => {
     }
   });
 
+  it('the worked-tile token lies in the top point of the hexagon, where no improvement, no "at work" sign and no unit but a Scout\'s feather reaches', () => {
+    // The token is drawn AFTER the units (render/frame.ts). In the middle of the tile it lay under whatever stood
+    // there, and the worked tiles are where the Workers stand.
+    const sprite = spriteImage('marker.worked');
+    expect([sprite.offsetX, sprite.offsetY, sprite.image.height]).toEqual([9, 0, 6]);
+    const token = inTileBox(sprite); // with its shadow
+    const painted = token.map((pixel, index) => (pixel === '' ? -1 : index)).filter((index) => index >= 0);
+    // Wholly inside its own tile's hexagon: it can be taken for no other tile's.
+    for (const index of painted) expect(isInsideHex(index % TILE_WIDTH, Math.floor(index / TILE_WIDTH)), `pixel ${index}`).toBe(true);
+    const lastRow = Math.max(...painted.map((index) => Math.floor(index / TILE_WIDTH)));
+    expect(lastRow).toBe(5);
+
+    // Nothing built on a tile reaches it, and the "at work" sign does not either, wherever its unit stands (it is
+    // moved up by one art pixel at most: workingSignOffset in render/scene.ts).
+    for (const terrain of TERRAIN_IDS) {
+      for (const improvement of IMPROVEMENT_IDS) {
+        const built = inTileBox(spriteImage(`improvement.${improvement}`, terrain));
+        expect(painted.filter((index) => built[index] !== ''), `${improvement} on ${terrain}`).toEqual([]);
+      }
+    }
+    expect(spriteImage('marker.working').offsetY - 1).toBeGreaterThan(lastRow);
+
+    // A unit alone on its tile. Where the token lies on a pixel of the unit, both are the dark line (the token ends
+    // on the line around the head), so nothing of the unit is seen to be covered. The Scout is the one exception:
+    // the feather on its cap is the only part of a unit that reaches higher than a head.
+    const covered = (unit: SpriteId): number => {
+      const figure = inTileBox(spriteImage(unit, '', 'rome'));
+      const outline = OUTLINE.join();
+      return painted.filter((index) => figure[index] !== '' && !(figure[index] === outline && (token[index] === outline || token[index] === SHADOW.join()))).length;
+    };
+    expect(covered('unit.warrior')).toBe(0);
+    expect(covered('unit.worker')).toBe(0);
+    expect(covered('unit.settler')).toBe(0);
+    expect(covered('unit.scout')).toBeGreaterThan(0);
+    expect(covered('unit.scout')).toBeLessThanOrEqual(12);
+  });
+
   it('the "at work" sign is 7 x 7 and the "builds nothing" sign 7 x 9; they differ from each other and from the path dot in more than 12 pixels', () => {
     const working = spriteImage('marker.working');
     const idle = spriteImage('marker.idle');

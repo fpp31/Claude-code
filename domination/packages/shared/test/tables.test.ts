@@ -239,13 +239,31 @@ describe('improvements', () => {
     }
   });
 
+  it('a mined hill\'s food + production is higher than that of every unimproved tile', () => {
+    // Citizens take the tiles with the highest food + production first
+    // (cityEconomy, step 1). A mined hill gives no food, so it loses every
+    // tie. With +1 production it stood level with open grassland and plains
+    // and was the LAST tile a capital took: measured on generated maps, no
+    // capital worked its mine within 200 turns.
+    const best = Math.max(...grounds.map((ground) => tileYields(ground).food + tileYields(ground).production));
+    for (const ground of grounds.filter((candidate) => improvementFits('mine', candidate))) {
+      const mined = tileYields({ ...ground, improvement: 'mine' });
+      expect(
+        mined.food + mined.production,
+        `a mine on ${ground.terrain} hills gives ${mined.food} food + ${mined.production} production, and the best unimproved tile gives ${best} in all: ` +
+          'the mine must give MORE, or citizens take every open tile before it and the Worker\'s five turns are wasted. ' +
+          'Do not put the Mine back to +1 production without changing how citizens choose their tiles (rules/city.ts)',
+      ).toBeGreaterThan(best);
+    }
+  });
+
   it('tileYields adds the improvement to what the tile yields; without one, and with null, nothing changes; the result is a copy', () => {
     // Added, where a feature replaces.
     expect(tileYields({ terrain: 'grassland', feature: null, improvement: 'farm' })).toEqual({ food: 3, production: 1 });
     expect(tileYields({ terrain: 'plains', feature: null, improvement: 'farm' })).toEqual({ food: 2, production: 2 });
     expect(tileYields({ terrain: 'desert', feature: null, improvement: 'farm' })).toEqual({ food: 1, production: 1 });
-    expect(tileYields({ terrain: 'grassland', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 3 });
-    expect(tileYields({ terrain: 'desert', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 3 });
+    expect(tileYields({ terrain: 'grassland', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 4 });
+    expect(tileYields({ terrain: 'desert', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 4 });
 
     // In general: the tile's own yields plus the table's, for every improvement on every ground it fits.
     for (const id of IMPROVEMENT_IDS) {

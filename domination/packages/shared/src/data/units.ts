@@ -1,5 +1,6 @@
 /**
- * Unit type table. Phase 1 has four land units and no combat.
+ * Unit type table. Three land units in phase 1, a fourth (the Worker)
+ * since round 2; no combat yet.
  * Phase 2 adds columns (strength, range...) and rows here.
  */
 

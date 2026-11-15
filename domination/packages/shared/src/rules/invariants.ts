@@ -238,9 +238,9 @@ function checkCities(state: GameState, problems: string[]): void {
       problems.push(`City ${key} stands on ${city.tile}, which is not a tile of the map.`);
       continue;
     }
-    const centre = state.map.tiles[city.tile];
-    if (centre.cityId !== key) problems.push(`The tile under city ${key} does not belong to it.`);
-    if (centre.improvement !== null && centre.improvement !== undefined) {
+    const center = state.map.tiles[city.tile];
+    if (center.cityId !== key) problems.push(`The tile under city ${key} does not belong to it.`);
+    if (center.improvement !== null && center.improvement !== undefined) {
       problems.push(`The tile under city ${key} carries an improvement.`);
     }
     for (const unit of Object.values(state.units)) {

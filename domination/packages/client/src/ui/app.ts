@@ -44,6 +44,8 @@ type Shown = ScreenName | 'fatal';
  *       onDisconnect  -> store.set({ busy: false })
  *       onTokenNotSaved -> one error toast: "This browser is not saving
  *                        data. If you close this tab you will lose your seat."
+ *       mayChangeIdentity -> true while neither a lobby nor a game is on
+ *                        screen (see ConnectionHandlers)
  *       onReady       -> if gameCodeFromUrl() is set: send `joinGame` with
  *                        that code and `name: null`, and store.set({ joining:
  *                        code }). This one line is the whole
@@ -78,6 +80,7 @@ export function startApp(root: HTMLElement): Unmount {
       onMessage: (message) => handleServerMessage(store, message, (reply) => connection.send(reply)),
       onDisconnect: () => store.set({ busy: false }),
       onTokenNotSaved: () => showToast(store, TOKEN_NOT_SAVED_MESSAGE, 'error'),
+      mayChangeIdentity: () => store.get().lobby === null && store.get().game === null,
       onReady: () => rejoin(store, connection),
     });
   }

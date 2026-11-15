@@ -15,6 +15,46 @@ import { hashToken, isValidToken, newToken, normalizeGameCode } from './tokens';
 /** WebSocket close code "policy violation": the server ends a connection that does not keep to the rules. */
 const CLOSE_POLICY_VIOLATION = 1008;
 
+/** How many different protocol numbers of other versions get a log line of their own (see createOtherVersionReport). */
+const MAX_OTHER_VERSIONS_REPORTED = 8;
+
+/**
+ * Makes the function that reports a page of another protocol version to the
+ * person who runs the server. ONE per server: it writes one log line the
+ * first time a number is seen and nothing after that, so a tab that keeps
+ * reconnecting cannot fill the log. Somebody who makes numbers up gets
+ * MAX_OTHER_VERSIONS_REPORTED lines and one that says no more will follow.
+ *
+ * Why the line is there: a server that hands out a page of another version
+ * (the code was updated and `npm run build` was forgotten) turns every
+ * player away, and without this line its own output looks like an ordinary
+ * start.
+ */
+export function createOtherVersionReport(log: (line: string) => void): (protocol: number) => void {
+  const seen = new Set<number>();
+  return (protocol) => {
+    if (seen.has(protocol) || seen.size > MAX_OTHER_VERSIONS_REPORTED) return;
+    seen.add(protocol);
+    if (seen.size > MAX_OTHER_VERSIONS_REPORTED) {
+      log('Pages of yet another protocol version connected. Further ones are no longer reported.');
+      return;
+    }
+    const versions = `it speaks protocol ${protocol}, this server protocol ${PROTOCOL_VERSION}`;
+    if (protocol < PROTOCOL_VERSION) {
+      log(
+        `A page of an older version connected (${versions}) and was told to reload. If players still see ` +
+          '"not the same version" after reloading, the page this server hands out was not built again: ' +
+          'stop the server, run "npm run build" and restart it.',
+      );
+    } else {
+      log(
+        `A page of a newer version connected (${versions}) and was told to reload. The page was built from ` +
+          'newer code than this server is running: restart the server (and run "npm run build" first if the code changed since).',
+      );
+    }
+  };
+}
+
 /**
  * Takes over a freshly opened socket. Everything a socket can do goes
  * through here. It makes one ClientLink for the socket (room.ts) whose
@@ -27,9 +67,12 @@ const CLOSE_POLICY_VIOLATION = 1008;
  *  - More than MAX_MESSAGES_PER_SECOND messages in a second -> the extra
  *    ones are dropped with `error rateLimited`.
  *  - `hello` must come first; anything else before it -> `error notReady`.
- *    A wrong `protocol` -> `error protocolMismatch`, then close (1008). Otherwise
+ *    A wrong `protocol` -> `error protocolMismatch`, then close (1008), and
+ *    one line in the log the first time that number is seen. Otherwise
  *    remember the token (make a new one with newToken if the client sent
- *    null or something that is not a valid token) and answer `welcome`.
+ *    null or something that is not a valid token; a token of the right
+ *    form is taken as it is, whether the server ever saw it or not: pages
+ *    make their own on a first visit, see tokens.ts) and answer `welcome`.
  *    The token is kept only in memory, as its hash; never log it.
  *    A second `hello` on the same socket -> `error badMessage`.
  *  - `ping` -> `pong`.
@@ -39,7 +82,9 @@ const CLOSE_POLICY_VIOLATION = 1008;
  *    in the meantime (the seat was given up from another tab), and then
  *    answers 'notInGame'.
  *  - `joinGame`: normalise the code (normalizeGameCode); unknown code ->
- *    `error noSuchGame`. Then call room.join FIRST and look at the outcome:
+ *    `error noSuchGame`, or `error gameNotLoaded` if a save with that code
+ *    lies on disk and was not loaded at start-up (RoomManager.isOnDiskOnly).
+ *    Then call room.join FIRST and look at the outcome:
  *      * failed -> send the `error`; the socket stays attached to whatever
  *        room it was in before, untouched;
  *      * succeeded and it is a different room than before -> only now
@@ -74,12 +119,16 @@ const CLOSE_POLICY_VIOLATION = 1008;
  *
  * @param maxMessagesPerSecond  the rate limit; MAX_MESSAGES_PER_SECOND unless
  *                              a test says otherwise (ServerOptions.maxMessagesPerSecond)
+ * @param reportOtherVersion    told the protocol number of every `hello`
+ *                              that is turned away (createOtherVersionReport,
+ *                              one per server); without one nothing is reported
  */
 export function handleConnection(
   socket: WebSocket,
   rooms: RoomManager,
   log: (line: string) => void,
   maxMessagesPerSecond: number = MAX_MESSAGES_PER_SECOND,
+  reportOtherVersion: (protocol: number) => void = () => {},
 ): void {
   /** SHA-256 of this socket's token; null until `hello` has been answered. The token itself is not kept. */
   let tokenHash: string | null = null;
@@ -201,9 +250,10 @@ export function handleConnection(
     if (protocol !== PROTOCOL_VERSION) {
       link.send(errorMessage('protocolMismatch'));
       closeSocket('protocol mismatch');
+      reportOtherVersion(protocol);
       return;
     }
-    // Anything that is not a token of ours (null on a first visit) gets a fresh one.
+    // A token of the right form is taken as it is. Anything else (null from a page that could not make one) gets a fresh one.
     const accepted = isValidToken(token) ? token : newToken();
     tokenHash = hashToken(accepted);
     link.send({ type: 'welcome', protocol: PROTOCOL_VERSION, token: accepted });
@@ -232,7 +282,10 @@ export function handleConnection(
         const code = normalizeGameCode(message.code);
         const target = code === null ? null : rooms.findRoom(code);
         if (target === null) {
-          link.send(errorMessage('noSuchGame'));
+          // A save that is on disk but was not loaded is not "no such game":
+          // the player's page keeps the code and waits for the repair.
+          const onDisk = code !== null && rooms.isOnDiskOnly(code);
+          link.send(errorMessage(onDisk ? 'gameNotLoaded' : 'noSuchGame'));
           return;
         }
         // Join FIRST. If it fails, the socket stays in the room it was in, untouched.

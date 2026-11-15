@@ -38,7 +38,8 @@ const CREATE_GUARD_MS = 4000;
  *    they type a name (or keep the remembered one) and press Join. Opening a
  *    link never takes a seat by itself.
  *  - If the server says the game cannot be joined at all (state.joinProblem:
- *    it does not exist, it has already started, it is full), the screen does
+ *    it does not exist, it could not be loaded, it has already started, it
+ *    is full), the screen does
  *    NOT say "you are invited": the reason stays under the code field until
  *    the code is edited, and "Create private game" becomes the gold button.
  *  - If the link the page was opened through names something that cannot

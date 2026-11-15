@@ -87,7 +87,7 @@ interface WorkTile {
 /** The part of a city's economy that does not depend on how many citizens it has. */
 interface CityLand {
   /** What the centre gives (cityCenterYields). */
-  centre: Yields;
+  center: Yields;
   /**
    * Every other tile of the city a citizen could work, best first:
    * (1) food + production, higher first; (2) food, higher first; (3) lower
@@ -109,22 +109,22 @@ function cityLand(state: GameState, city: City): CityLand {
     if (a.yields.food !== b.yields.food) return b.yields.food - a.yields.food;
     return a.tile - b.tile;
   });
-  return { centre: cityCenterYields(tiles[city.tile]), candidates };
+  return { center: cityCenterYields(tiles[city.tile]), candidates };
 }
 
 /** What `population` citizens make of this land. Arithmetic only: no look at the state. */
 function economyOnLand(land: CityLand, population: number): CityEconomy {
   // 1. One tile per citizen, best first; citizens left over when the tiles run out work nothing.
   const count = Math.max(0, Math.min(population, land.candidates.length));
-  const chosen = land.candidates.slice(0, count);
-  const spare = land.candidates.slice(count);
+  const firstChoice = land.candidates.slice(0, count);
+  const eaten = RULES.foodPerCitizen * population;
 
   // 2. A city that could grow must grow: while it would not, a citizen
   //    moves from the tile with the least food to the spare tile with the
   //    most. Every swap raises the food, so this ends.
-  const eaten = RULES.foodPerCitizen * population;
-  let food = land.centre.food;
-  for (const worked of chosen) food += worked.yields.food;
+  const chosen = [...firstChoice];
+  const spare = land.candidates.slice(count);
+  let food = foodOn(land, chosen);
   while (food - eaten < RULES.minFoodSurplus) {
     const out = leastFood(chosen);
     const into = mostFood(spare);
@@ -135,10 +135,27 @@ function economyOnLand(land: CityLand, population: number): CityEconomy {
     spare[into] = given;
   }
 
-  let production = land.centre.production;
-  for (const worked of chosen) production += worked.yields.production;
+  // 3. The swaps have ended with the most food this many citizens can find.
+  //    If the city still cannot grow, they bought nothing: the first choice stands.
+  const surplus = food - eaten;
+  const cannotGrow = surplus < RULES.minFoodSurplus && surplus <= 0;
+  return economyOf(land, cannotGrow ? firstChoice : chosen, eaten);
+}
+
+/** The food of the centre and of these worked tiles together. */
+function foodOn(land: CityLand, worked: readonly WorkTile[]): number {
+  let food = land.center.food;
+  for (const tile of worked) food += tile.yields.food;
+  return food;
+}
+
+/** Adds up what the centre and these worked tiles give a city whose citizens eat `eaten`. */
+function economyOf(land: CityLand, worked: readonly WorkTile[], eaten: number): CityEconomy {
+  const food = foodOn(land, worked);
+  let production = land.center.production;
+  for (const tile of worked) production += tile.yields.production;
   return {
-    worked: chosen.map((worked) => worked.tile).sort((a, b) => a - b),
+    worked: worked.map((tile) => tile.tile).sort((a, b) => a - b),
     food,
     production,
     foodSurplus: food - eaten,
@@ -210,9 +227,19 @@ function mostFood(tiles: readonly WorkTile[]): number {
  *    tile index), provided the newcomer has strictly more food. This stops
  *    when the surplus is reached or no such swap is left. So a city never
  *    stands still over a mine, a hill or plains while it owns food that
- *    nobody works. (Without it a mined hill, 0 food and 3 production, would
- *    be taken before coast, forest and bare hills, and could stop a city
- *    growing for good.)
+ *    nobody works. (Without it a mined hill, 0 food and 4 production, would
+ *    be taken before every unimproved tile, and could stop a city growing
+ *    for good.)
+ *  - 3. When no swap is left and the city still cannot grow (the surplus is
+ *    below RULES.minFoodSurplus and not above 0), no placement of its
+ *    citizens lets it grow: the swaps of step 2 would give production away
+ *    for food that changes nothing. The citizens then keep the choice of
+ *    step 1. Every city comes to this point when it has outgrown the food of
+ *    its land. Its food store then runs empty if the first choice eats more
+ *    than it makes, and stays empty; that costs nothing today, because a
+ *    shortage never removes a citizen (runCityTurn). LOOK AT THIS RULE AGAIN
+ *    on the day a hungry city can lose citizens: from then on the first
+ *    choice would starve a city that the swaps could have kept fed.
  *  - food/production = centre + sum of tileYields of the worked tiles.
  *
  * It reads `city.id`, `city.tile` and `city.population` and nothing else of
