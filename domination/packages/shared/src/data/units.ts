@@ -16,11 +16,19 @@ export interface UnitDef {
    * One short line for players: what the unit is for. Shown in the unit
    * panel, in the city's list of things to build and in the tile information
    * about another player's unit. Plain words; no digits (the numbers are in
-   * the other columns and would go stale here); at most 42 characters, so
-   * that it is ONE line under an add button of the city panel, also where
-   * the browser shows a scroll bar (a table test holds the length, the
-   * end-to-end test looks at the lines; in a wider font the line takes a
-   * second one and is never cut); ending with a full stop.
+   * the other columns and would go stale here); ending with a full stop; at
+   * most 42 characters.
+   *
+   * The 42 are the limit a table test holds, and a rule of thumb:
+   * characters are not pixels. Under an add button of the city panel a
+   * description has 258 pixels where the browser shows a scroll bar.
+   * Today's four take 162 to 241 of them and stand on ONE line each, the
+   * longest with 16 pixels to spare. A sentence of 42 characters with wider
+   * letters can need more than the 258 (273 were measured for one), and so
+   * can any sentence in a wider font than the one this was measured with.
+   * Such a line wraps onto a second one, which the page allows; it is never
+   * cut. The end-to-end test looks at these lines themselves (step 33), so
+   * a new description that takes two lines there is reported.
    */
   description: string;
   unitClass: UnitClass;

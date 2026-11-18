@@ -124,10 +124,18 @@
  * turn after it; a second press on an x 0.65 s after the first removes
  * nothing more).
  *
- * Steps 19, 26 and 28c and the card look of steps 22 and 24 depend on the
- * map the fixed seed gives, and steps 21, 21a, 21b, 21c, 28, 28a, 28b and
- * 28c on a browser that can pretend to have a touch screen; each fails with
- * a sentence that says what to change.
+ * The last small repair added one look and one habit. The look is at the
+ * end of step 31: the Worker, free again, walks out of Ada's land; after
+ * End Turn its job block has ONE sentence, the one about the ended turn,
+ * and on a phone held on its side and on a small phone held upright that
+ * sentence and both greyed job buttons are in view. The habit: wherever
+ * the window gets another size, the script waits until the layout has come
+ * to rest (resizeTo) before it measures or presses anything.
+ *
+ * Steps 19, 26 and 28c, the card look of steps 22 and 24 and the last look
+ * of step 31 depend on the map the fixed seed gives, and steps 21, 21a,
+ * 21b, 21c, 28, 28a, 28b, 28c and 31 on a browser that can pretend to have
+ * a touch screen; each fails with a sentence that says what to change.
  *
  * Playwright is NOT a dependency of this project and `npm install` does not
  * fetch it. It is loaded from a global install; the default path below only
@@ -952,6 +960,80 @@ async function settled(page: any): Promise<void> {
   );
 }
 
+/**
+ * Gives the window another size and waits until the layout has come to
+ * rest. A page takes a new size in over its next frames: the top bar tells
+ * the stylesheet how tall it is now, the map steps aside for a marked tile,
+ * and a city panel that has just taken an add looks once more, a frame
+ * later, that its add list is where it was. On a busy computer those frames
+ * come late, and a place that was measured before them is a place the thing
+ * has left by the time it is pressed. (Step 21a once failed that way:
+ * "Empty the queue" was no longer at the point that had just been
+ * measured.) So the moment is not trusted. The page itself looks at every
+ * frame, and the wait is over when the window has the new size and, three
+ * frames after the change at the earliest, everything looked at lies where
+ * it lay the frame before: the map's canvas, the place of the map's first
+ * tile on the screen (so a map that is still stepping aside counts as
+ * moving), and the button that is pressed next, if the caller names one.
+ *
+ * Fails with a sentence of its own when the layout has not come to rest
+ * after the longest time a wait may take.
+ *
+ * @param page     a page that shows the game screen
+ * @param watched  the test id of the button that is pressed or looked at
+ *                 next, when it is one (it must be on the page; it may be
+ *                 scrolled away)
+ */
+async function resizeTo(page: any, size: { width: number; height: number }, watched: string | null = null): Promise<void> {
+  await page.setViewportSize(size);
+  if (watched !== null) await boxOf(page, byTestId(watched)); // fails with its own sentence if the page has no such button
+  const stillMoving: string | null = await page.evaluate(
+    ([width, height, button, canvas, limit]: [number, number, string | null, string, number]) =>
+      new Promise<string | null>((done) => {
+        const started = window.performance.now();
+        const seen = { frames: 0, last: '' };
+        // (Kept in a list, not under a name: the tool that runs this script wraps a named function in a call the page does not know.)
+        const look: (() => void)[] = [];
+        look.push(() => {
+          seen.frames += 1;
+          const places: number[] = [window.innerWidth, window.innerHeight];
+          for (const selector of [canvas, button]) {
+            const box = selector === null ? null : (document.querySelector(selector)?.getBoundingClientRect() ?? null);
+            if (box !== null) places.push(box.left, box.top, box.right, box.bottom);
+          }
+          if (window.__domination?.view() != null) {
+            const first = window.__domination.tileToScreen(0);
+            places.push(first.x, first.y);
+          }
+          const now = places.map((place) => Math.round(place * 100) / 100).join(' ');
+          const sized = window.innerWidth === width && window.innerHeight === height;
+          if (sized && seen.frames >= 3 && now === seen.last) {
+            done(null);
+            return;
+          }
+          if (window.performance.now() - started > limit) {
+            done(
+              `after ${seen.frames} frames the window is ${window.innerWidth} x ${window.innerHeight}, and what was looked at ` +
+                `(the window's width and height; left, top, right and bottom of the map${button === null ? '' : ' and of the button'}; x and y of the map's first tile) ` +
+                `was [${seen.last}] a frame ago and is [${now}]`,
+            );
+            return;
+          }
+          seen.last = now;
+          window.requestAnimationFrame(look[0]);
+        });
+        window.requestAnimationFrame(look[0]);
+      }),
+    [size.width, size.height, watched === null ? null : byTestId(watched), byTestId(TEST_IDS.gameCanvas), WAIT_MS],
+  );
+  if (stillMoving !== null) {
+    throw new Error(
+      `Waited ${WAIT_MS / 1000} s for the layout to come to rest after the window became ${size.width} x ${size.height}` +
+        `${watched === null ? '' : ` (looking at "${watched}" and the map)`}, but ${stillMoving}.`,
+    );
+  }
+}
+
 /** Scrolls the map so the tile is in the middle of the map, then taps it with a finger. */
 async function fingerTile(page: any, tile: TileIndex): Promise<void> {
   await settled(page);
@@ -1711,7 +1793,7 @@ async function checkTheScreenHoldsTogether(setup: TestSetup, crashes: string[], 
   await cleo.context().close();
 
   step('10. In a low window (a phone held sideways) the city panel stays on the screen, below the top bar');
-  await ada.setViewportSize({ width: 844, height: 390 });
+  await resizeTo(ada, { width: 844, height: 390 }); // the click below is aimed at a tile: not before the map has come to rest
   await ada.keyboard.press('Escape');
   await tapTile(ada, city.tile);
   await waitForText(ada, TEST_IDS.cityName, city.name);
@@ -1752,7 +1834,7 @@ async function checkTheScreenHoldsTogether(setup: TestSetup, crashes: string[], 
   await waitForQueue(ada, city.id, ['warrior', 'scout']);
 
   await ada.keyboard.press('Escape');
-  await ada.setViewportSize(LAPTOP);
+  await resizeTo(ada, LAPTOP);
 
   step('11. Two players with the longest names allowed, in a narrow window: the top bar stays a bar');
   const narrow = { width: 760, height: 600 };
@@ -2135,8 +2217,7 @@ async function checkTheMapExplainsItself(setup: TestSetup, crashes: string[], ad
 
   // The low window. The card opens bottom left, so the tile is brought
   // there first: the map then has to step out from under the card.
-  await ada.setViewportSize(LOW_WINDOW);
-  await settled(ada); // the page takes a new window size in with its next frames; nobody clicks sooner
+  await resizeTo(ada, LOW_WINDOW); // the page takes a new window size in with its next frames; nobody clicks sooner
   const under = await bringTileNear(ada, spot, PANEL_CORNER);
   check(
     isNear(under, PANEL_CORNER),
@@ -2153,7 +2234,7 @@ async function checkTheMapExplainsItself(setup: TestSetup, crashes: string[], ad
   check(await comesOutFromUnder(ada, spot, byTestId(TEST_IDS.tileCard)), 'within a second the map has stepped aside, and the tile is no longer under its card');
   const steppedAsideAt = Date.now();
   await ada.keyboard.press('Escape');
-  await ada.setViewportSize(LAPTOP);
+  await resizeTo(ada, LAPTOP); // step 19 begins with a click on a tile
 
   step('19. A tile Ada has seen and left says so');
   await waitUntilSince(ada, steppedAsideAt, MAP_MOVE_PAUSE_MS); // the map has just stepped aside: a tap on it gives no order yet
@@ -2275,7 +2356,7 @@ async function checkTheMapExplainsItself(setup: TestSetup, crashes: string[], ad
   check(isInside(await boxOf(eve, byTestId(TEST_IDS.queueCount)), evePanel), 'the queue count stays in sight while the panel is scrolled down');
 
   // The phone is turned on its side: the panels float bottom left again.
-  await eve.setViewportSize(LOW_WINDOW);
+  await resizeTo(eve, LOW_WINDOW);
   await eve.tap(`${byTestId(TEST_IDS.cityPanel)} .panel-close`);
   const turned = await viewOf(eve);
   const empty = neighbors(eveCity.tile, turned).find((tile) => !turned.units.some((unit) => unit.tile === tile));
@@ -2522,8 +2603,7 @@ async function checkAWorkerImprovesTheLand(setup: TestSetup, crashes: string[], 
     lowScrolledBy === 0 && jobButtonsInSight.every((inSight) => inSight) && (await isInSight(phone, TEST_IDS.unitJobsClosed)),
     `with a phone on its side, after End Turn: every greyed job button and the sentence that says why are in view without scrolling the panel (in view: ${IMPROVEMENT_IDS.map((improvement, index) => `${improvement} ${jobButtonsInSight[index]}`).join(', ')}; scrolled by ${lowScrolledBy})`,
   );
-  await phone.setViewportSize(PHONE);
-  await settled(phone);
+  await resizeTo(phone, PHONE);
   await waitUntilSince(ada, endedAt, END_TURN_PAUSE_MS);
   await ada.click(byTestId(TEST_IDS.endTurnButton));
   await waitForAttribute(ada, TEST_IDS.endTurnButton, 'data-ended', 'false');
@@ -2546,8 +2626,7 @@ async function checkAWorkerImprovesTheLand(setup: TestSetup, crashes: string[], 
 
   step('29. In a low window "Stop work" is in view, and the Worker is not under its own panel');
   await ada.keyboard.press('Escape');
-  await ada.setViewportSize(LOW_WINDOW);
-  await settled(ada); // as in step 18
+  await resizeTo(ada, LOW_WINDOW); // as in step 18
   const under = await bringTileNear(ada, site, PANEL_CORNER);
   check(
     isNear(under, PANEL_CORNER),
@@ -2569,7 +2648,7 @@ async function checkAWorkerImprovesTheLand(setup: TestSetup, crashes: string[], 
   check(holds(lowPanel, under), `the panel opened on top of the Worker (if not, the next check checks nothing: move the corner; the Worker was at ${at(under)})`);
   check(await comesOutFromUnder(ada, site, byTestId(TEST_IDS.unitPanel)), 'within a second the map has stepped aside, and the Worker is no longer under its own panel');
   await ada.keyboard.press('Escape');
-  await ada.setViewportSize(LAPTOP);
+  await resizeTo(ada, LAPTOP);
 
   step('30. Ben learns nothing');
   const benView = await viewOf(ben);
@@ -2636,6 +2715,123 @@ async function checkAWorkerImprovesTheLand(setup: TestSetup, crashes: string[], 
   const benTile = (await viewOf(ben)).tiles[site];
   check(benTile === null || benTile.improvement === null, 'Ben\'s view of the tile shows nothing built on it');
   check(await onlyTurnNews(ben), `Ben was shown nothing about it (on his screen: ${(await toastTexts(ben)).join(' | ')})`);
+  await checkTheWorkerOutsideTheLand(setup, crashes, ada, worker.id);
+}
+
+/**
+ * A look at the end of step 31 that belongs with the one in step 28: the
+ * Worker WITHOUT a job, OUTSIDE the player's land, after End Turn. (It is
+ * made here because the Worker is free to walk only now that its work is
+ * finished.) Outside the land every job is impossible for one reason, and
+ * the sentence that says so used to stand over the buttons together with
+ * the one about the ended turn: on a phone held on its side and on a small
+ * phone held upright the second job button then ended 12 pixels under the
+ * panel's edge. While no order can be given the job block has ONE sentence
+ * (unitPanelButtons in packages/client/src/ui/panelButtons.ts).
+ *
+ * @param ada   Ada's laptop page, just loaded again: her turn is not ended; the Worker has no job and can still walk
+ */
+async function checkTheWorkerOutsideTheLand(setup: TestSetup, crashes: string[], ada: any, workerId: UnitId): Promise<void> {
+  const loadedAt = Date.now(); // End Turn takes no press for 0.6 s after a page's first view
+  await ada.keyboard.press('Escape');
+  const land = await viewOf(ada);
+  await tapTileUntil(ada, unitOf(land, workerId).tile, TEST_IDS.unitName, UNITS.worker.name);
+  const outside = (await reachableOf(ada, workerId)).find((tile) => {
+    const ground = land.tiles[tile];
+    return ground !== null && ground.owner !== land.you && !holdsOwnThing(land, tile);
+  });
+  if (outside === undefined) {
+    throw new Error(
+      'Check failed: a tile outside Ada\'s land, with nothing of hers on it, is within one turn\'s walk of the Worker ' +
+        '(if not, the look at the Worker outside her land checks nothing: pick another seed, or let the Worker walk for a turn first)',
+    );
+  }
+  await ada.waitForTimeout(MAP_MOVE_PAUSE_MS); // the map may have stepped aside for the Worker's panel: a tap on it gives no order yet
+  await tapTile(ada, outside);
+  await waitForView(ada, 'the Worker to walk out of Ada\'s land', (now) => unitOf(now, workerId).tile === outside);
+
+  // Orders are open: ONE sentence over the buttons says why neither can be pressed here.
+  const open = await unitPanelPrintsItsButtons(ada, workerId, 'the Worker outside Ada\'s land');
+  check(
+    open.jobs !== null &&
+      open.jobs.closed === null &&
+      open.jobs.reason === RULE_ERROR_MESSAGES.notYourLand &&
+      open.jobs.start.length === IMPROVEMENT_IDS.length &&
+      open.jobs.start.every((button) => button.disabled && button.reason === null),
+    `outside Ada's land every job button is greyed out, and one sentence over them says why (it says "${open.jobs?.reason}"; if not, the look after End Turn checks nothing)`,
+  );
+
+  // Orders are closed: the sentence about the ended turn takes that one's place.
+  await waitUntilSince(ada, loadedAt, END_TURN_PAUSE_MS);
+  await ada.click(byTestId(TEST_IDS.endTurnButton));
+  await waitForAttribute(ada, TEST_IDS.endTurnButton, 'data-ended', 'true');
+  const endedAt = Date.now();
+  const ended = await unitPanelPrintsItsButtons(ada, workerId, 'the Worker outside Ada\'s land, after End Turn');
+  check(
+    ended.jobs !== null &&
+      ended.jobs.closed === ordersClosedText('turnEnded') &&
+      ended.jobs.reason === null &&
+      ended.jobs.start.length === IMPROVEMENT_IDS.length &&
+      ended.jobs.start.every((button) => button.disabled && button.reason === null),
+    `after End Turn the job block of the Worker outside Ada's land has ONE sentence, the one about the ended turn (it says "${ended.jobs?.closed}" and "${ended.jobs?.reason}")`,
+  );
+
+  // The same moment on Ada's phone: held on its side, and a small phone held upright.
+  const phone = await openSecondDevice(setup.browser, 'Ada\'s phone', crashes, ada, LOW_WINDOW, true);
+  check(
+    await phone.evaluate(() => window.matchMedia('(pointer: coarse)').matches),
+    'the page takes the second browser for one with a touch screen (if not, this checks nothing: start it with a touch screen another way)',
+  );
+  const lines = [TEST_IDS.unitJobsClosed, ...IMPROVEMENT_IDS.map((improvement) => TEST_IDS.jobStart + improvement)];
+  const reasons = [TEST_IDS.unitJobsReason, ...IMPROVEMENT_IDS.map((improvement) => TEST_IDS.jobReason + improvement)];
+  for (const [size, where] of [[LOW_WINDOW, 'with a phone on its side'], [SMALL_PHONE, 'on a small phone held upright']] as const) {
+    if (size !== LOW_WINDOW) {
+      await phone.tap(`${byTestId(TEST_IDS.unitPanel)} .panel-close`);
+      await resizeTo(phone, size);
+    }
+    await fingerTileUntil(phone, outside, TEST_IDS.unitName, UNITS.worker.name);
+    await settled(phone);
+    // One look by the page itself: the part of the panel that shows (below its head, above its lower edge), and where each line lies.
+    const shown: { scrolledBy: number; from: number; to: number; places: { id: string; there: boolean; top: number; bottom: number }[] } = await phone.evaluate(
+      ([panelId, ids]: [string, string[]]) => {
+        const panel = document.querySelector(`[data-testid="${panelId}"]`);
+        const places: { id: string; there: boolean; top: number; bottom: number }[] = [];
+        for (const id of ids) {
+          const element = panel.querySelector(`[data-testid="${id}"]`);
+          const there = element !== null && element.getClientRects().length > 0;
+          const box = there ? element.getBoundingClientRect() : { top: 0, bottom: 0 };
+          places.push({ id, there, top: box.top, bottom: box.bottom });
+        }
+        return { scrolledBy: panel.scrollTop, from: panel.querySelector('.panel-head').getBoundingClientRect().bottom, to: panel.getBoundingClientRect().bottom, places };
+      },
+      [TEST_IDS.unitPanel, [...lines, ...reasons]],
+    );
+    const placeOf = (id: string): { there: boolean; top: number; bottom: number } => shown.places.find((place) => place.id === id) ?? { there: false, top: 0, bottom: 0 };
+    const measured = lines.map((id) => `"${id}" ${placeOf(id).there ? `${Math.round(placeOf(id).top)} to ${Math.round(placeOf(id).bottom)}` : 'not on the screen'}`).join(', ');
+    const inTheOpen: boolean[] = [];
+    for (const id of lines) inTheOpen.push(placeOf(id).there && placeOf(id).top >= shown.from - 0.5 && placeOf(id).bottom <= shown.to + 0.5 && (await isInSight(phone, id)));
+    check(
+      shown.scrolledBy === 0 && inTheOpen.every((open) => open),
+      `${where}, after End Turn, the Worker outside Ada's land: the sentence that says why and every greyed job button lie inside the part of the panel that shows, without scrolling ` +
+        `(that part reaches from ${Math.round(shown.from)} to ${Math.round(shown.to)}; ${measured}; scrolled by ${shown.scrolledBy})`,
+    );
+    check(
+      (await textOf(phone, TEST_IDS.unitJobsClosed)) === ordersClosedText('turnEnded') && reasons.every((id) => !placeOf(id).there),
+      `${where}: that sentence is the only one of the job block: nothing is printed about what the tile allows while no job can be ordered ` +
+        `(on the screen: ${reasons.filter((id) => placeOf(id).there).map((id) => `"${id}"`).join(', ')})`,
+    );
+  }
+  await phone.context().close();
+
+  // Orders are open again: the sentence about the land is back.
+  await waitUntilSince(ada, endedAt, END_TURN_PAUSE_MS);
+  await ada.click(byTestId(TEST_IDS.endTurnButton));
+  await waitForAttribute(ada, TEST_IDS.endTurnButton, 'data-ended', 'false');
+  const again = await unitPanelPrintsItsButtons(ada, workerId, 'the Worker outside Ada\'s land, with the turn taken back');
+  check(
+    again.jobs?.closed === null && again.jobs.reason === RULE_ERROR_MESSAGES.notYourLand,
+    `with the turn taken back, the sentence about Ada's land stands over the job buttons again (it says "${again.jobs?.reason}")`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2707,6 +2903,8 @@ async function turningThePhoneKeepsTheCityOnTheMap(eve: any, city: CityView): Pr
     `with the phone on its side the selected city stands at x ${Math.round(onItsSide.x)}, beyond where the upright screen ends (if not, turning the phone moves nothing and this look checks nothing)`,
   );
 
+  // (Not resizeTo: how the map comes back after the change of size is what
+  // this look is about, and nothing is pressed at a measured place after it.)
   await eve.setViewportSize(PHONE);
   // The map steps aside a frame or two after the window has changed its size.
   let cameBack = true;
@@ -2816,8 +3014,7 @@ async function checkAFullQueueSaysSo(eve: any, city: CityView): Promise<void> {
   check(await isInSight(eve, TEST_IDS.queueNote), `${where}: while a greyed add button is in view, the sentence that says why is in view`);
 
   // The narrowest phone: the line about the x is one line, and nothing is cut.
-  await eve.setViewportSize(SMALL_PHONE);
-  await settled(eve);
+  await resizeTo(eve, SMALL_PHONE);
   const small = await eve.evaluate(
     ([panelSelector, hintSelector]: string[]) => {
       const panel = document.querySelector(panelSelector);
@@ -2839,7 +3036,7 @@ async function checkAFullQueueSaysSo(eve: any, city: CityView): Promise<void> {
     `on a phone 360 pixels wide that line is one line (it is ${small.hintHeight} pixels tall; a line is ${small.lineHeight})`,
   );
   check(small.cut.length === 0, `on a phone 360 pixels wide no line of the city panel is cut or sticks out of it (cut: ${small.cut.join(', ')})`);
-  await eve.setViewportSize(PHONE);
+  await resizeTo(eve, PHONE);
 }
 
 /**
@@ -2903,14 +3100,12 @@ async function checkThePanelsWhileTheTurnIsEnded(ada: any, phone: any, city: Cit
     );
   }
   // The phone on its side: the panel is low there, and the hint at its bottom, where the sentence used to be, is out of sight.
-  await phone.setViewportSize(LOW_WINDOW);
-  await settled(phone);
+  await resizeTo(phone, LOW_WINDOW, TEST_IDS.jobStop);
   check(
     (await isInSight(phone, TEST_IDS.jobStop)) && (await isInSight(phone, TEST_IDS.unitJobsClosed)),
     'with the phone on its side: while the greyed "Stop work" is in view, the sentence that says why is in view',
   );
-  await phone.setViewportSize(PHONE);
-  await settled(phone);
+  await resizeTo(phone, PHONE);
 
   // The city, on the phone.
   await phone.tap(`${byTestId(TEST_IDS.unitPanel)} .panel-close`);
@@ -3366,12 +3561,17 @@ async function checkAPhoneTakesEveryTap(eve: any, city: CityView, warriorId: Uni
   await eve.tap(`${byTestId(TEST_IDS.cityPanel)} .panel-close`);
   await twoTapsOnAnAddButton(eve, city, lastOfTheList, 'at 390 x 844');
 
-  // The same on a small phone.
-  await eve.setViewportSize(SMALL_PHONE);
+  // The same on a small phone. The first press after each change of size is
+  // aimed at a button's measured place: not before that button has come to
+  // rest. (After an add the city panel looks once more, a frame later, that
+  // its add list is where it was. On a busy computer that frame came after
+  // the window had its new size: the panel scrolled, and "Empty the queue"
+  // was 114 pixels from the point that had just been measured.)
+  await resizeTo(eve, SMALL_PHONE, TEST_IDS.queueClear);
   await emptyTheQueue(eve, city.id, true);
   await eve.tap(`${byTestId(TEST_IDS.cityPanel)} .panel-close`);
   await twoTapsOnAnAddButton(eve, city, 'scout', 'at 360 x 640');
-  await eve.setViewportSize(PHONE);
+  await resizeTo(eve, PHONE, TEST_IDS.buildOption + 'worker');
 
   // The arrows: the queue is Scout, Scout; a Worker joins and is brought to the top.
   await pressAt(eve, await pointOf(eve, TEST_IDS.buildOption + 'worker'), true);
@@ -3419,10 +3619,9 @@ const TABLET = { width: 768, height: 1024 };
  */
 async function checkASlowFingerTakesNeighbours(eve: any, city: CityView): Promise<void> {
   step('21c. On a tablet, two taps on one x 1.8 s apart take two neighbours, and a tap on an add button after that adds that very item');
-  await eve.setViewportSize(TABLET);
-  await settled(eve);
   const full = queueOf(await viewOf(eve), city.id);
   check(full.length === 8, `the queue is full for this step (it has ${full.length} entries)`);
+  await resizeTo(eve, TABLET, TEST_IDS.queueRemove + 7); // the first press below is aimed at the x of the last row
   // Eight rows are more than the panel shows without scrolling. The last
   // three are taken out, bottom-up, and a tap on the panel's head (a press
   // outside the rows) lets the rows settle.
@@ -3468,8 +3667,7 @@ async function checkASlowFingerTakesNeighbours(eve: any, city: CityView): Promis
   await settled(eve);
   check(!(await eve.isVisible(gap)), 'a tap outside the rows lets them settle: the kept room is gone');
 
-  await eve.setViewportSize(PHONE);
-  await settled(eve);
+  await resizeTo(eve, PHONE);
 }
 
 /**
@@ -3517,8 +3715,7 @@ async function checkEveryPressCounts(setup: TestSetup, crashes: string[], ada: a
 
   step('33. After a removal the entry that followed comes under the pointer: three presses on one spot take three neighbours, in a laptop window and in a large one');
   for (const size of [LAPTOP, LARGE_WINDOW]) {
-    await ada.setViewportSize(size);
-    await settled(ada);
+    await resizeTo(ada, size);
     const five: UnitTypeId[] = ['warrior', 'worker', 'scout', 'settler', 'warrior'];
     const held = queueOf(await viewOf(ada), city.id);
     check(isDeepStrictEqual(held, five.slice(0, held.length)), `the queue is the beginning of [${five.join(', ')}] (it is [${held.join(', ')}])`);
@@ -3530,8 +3727,7 @@ async function checkEveryPressCounts(setup: TestSetup, crashes: string[], ada: a
     await ada.mouse.move(size.width / 2, 200);
     await ada.waitForTimeout(GUARD_PAUSE_MS); // the add buttons keep quiet for 0.6 s after a removal
   }
-  await ada.setViewportSize(LAPTOP);
-  await settled(ada);
+  await resizeTo(ada, LAPTOP);
 
   step('34. With the keyboard: Enter twice on the x of the last row removes one entry, and does not end the turn; nor do three Enters on the x of the only row');
   await ada.focus(byTestId(TEST_IDS.queueRemove + 1));

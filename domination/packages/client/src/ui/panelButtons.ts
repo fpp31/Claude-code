@@ -96,7 +96,11 @@ export interface JobButton {
   /** "Build Farm (4 turns)". */
   label: string;
   disabled: boolean;
-  /** Its own reason, printed under it; null when it has none, or when one sentence says it for all (JobBlock.reason). */
+  /**
+   * Its own reason, printed under it; null when it has none, when one
+   * sentence says it for all (JobBlock.reason), and while orders are closed
+   * (JobBlock.closed is then the only sentence of the block).
+   */
   reason: string | null;
 }
 
@@ -105,10 +109,17 @@ export interface JobBlock {
   /**
    * Why no button of the block can be pressed for now (ordersClosedText),
    * or null. The first line of the block: in a low window the hint at the
-   * panel's bottom is out of sight while the buttons are in sight.
+   * panel's bottom is out of sight while the buttons are in sight. While it
+   * is there it is the ONLY sentence of the block: `reason` and every
+   * button's own reason are null until orders are open again. They say what
+   * the tile allows, which changes nothing while no job can be ordered, and
+   * with them the last job button did not fit into a phone's panel.
    */
   closed: string | null;
-  /** The ONE sentence when every job is impossible for the same reason (jobsReasonText), or null. */
+  /**
+   * The ONE sentence when every job is impossible for the same reason
+   * (jobsReasonText), or null; null also while orders are closed.
+   */
   reason: string | null;
   /** The heading "Work on this tile": over the job buttons, not over a job in progress. */
   showTitle: boolean;
@@ -164,7 +175,11 @@ export function unitPanelButtons(view: PlayerView, unit: UnitView, closed: Order
       stop: { disabled: shut, warning: shut ? null : STOP_WARNING },
     };
   } else if (own.jobOptions.length > 0) {
-    const oneReason = jobsReasonText(own.jobOptions);
+    // While orders are closed the block says only that: the lines about
+    // what the tile allows wait until a job can be ordered again. With them
+    // two or three sentences stood over and between the grey buttons, and
+    // on a phone the last button lay under the panel's edge.
+    const oneReason = shut ? null : jobsReasonText(own.jobOptions);
     jobs = {
       closed: closed === null ? null : ordersClosedText(closed),
       reason: oneReason,
@@ -173,7 +188,7 @@ export function unitPanelButtons(view: PlayerView, unit: UnitView, closed: Order
         improvement: option.improvement,
         label: jobButtonText(option),
         disabled: shut || option.error !== null,
-        reason: oneReason !== null ? null : jobReasonText(option),
+        reason: shut || oneReason !== null ? null : jobReasonText(option),
       })),
       stop: null,
     };

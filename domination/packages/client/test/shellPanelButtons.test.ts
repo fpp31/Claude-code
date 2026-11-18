@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { IMPROVEMENT_IDS, RULES, RULE_ERROR_MESSAGES, UNIT_TYPE_IDS } from '@domination/shared';
-import type { BuildOption, OwnCityDetail, PlayerView, QueueEntryView, UnitTypeId } from '@domination/shared';
+import type { BuildOption, OwnCityDetail, PlayerView, QueueEntryView, RuleErrorCode, UnitTypeId } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import type { OrdersClosed } from '../src/game/selectors';
 import { cityPanelButtons, unitPanelButtons } from '../src/ui/panelButtons';
+import type { JobBlock } from '../src/ui/panelButtons';
 import { REMOVE_HINT, STOP_WARNING, ordersClosedText } from '../src/ui/texts';
 import { SAMPLE, ownOf, romeOf, unitIn } from './shellKit';
 
@@ -191,8 +192,8 @@ describe('the unit panel: what is greyed out and why (unitPanelButtons)', () => 
       const buttons = unitPanelButtons(view, unitIn(view, SAMPLE.workerId), closed);
       expect(buttons?.jobs?.closed, closed).toBe(ordersClosedText(closed));
       expect(buttons?.jobs?.start.map((job) => job.disabled), closed).toEqual([true, true]);
-      // What the tile allows is still said: a player plans the next turn while waiting.
-      expect(buttons?.jobs?.start.map((job) => job.reason), closed).toEqual([null, 'A Mine needs hills.']);
+      // What the tile allows is not said meanwhile: the block has ONE sentence while orders are closed (the tests further down).
+      expect(buttons?.jobs?.start.map((job) => job.reason), closed).toEqual([null, null]);
       expect(buttons?.hint.main, closed).toBe('');
     }
     expect(ordersClosedText('turnEnded')).toBe('You have ended your turn. Cancel that to give orders.');
@@ -210,10 +211,11 @@ describe('the unit panel: what is greyed out and why (unitPanelButtons)', () => 
     expect(jobs?.reason).toBe(RULE_ERROR_MESSAGES.cityOnTile);
     expect(jobs?.start.map((job) => [job.disabled, job.reason])).toEqual([[true, null], [true, null]]);
 
-    // Closed orders are one more sentence, above that one.
+    // Closed orders take that sentence's place: one sentence over the buttons, never two.
     const ended = unitPanelButtons(view, worker, 'turnEnded')?.jobs;
     expect(ended?.closed).toBe('You have ended your turn. Cancel that to give orders.');
-    expect(ended?.reason).toBe(RULE_ERROR_MESSAGES.cityOnTile);
+    expect(ended?.reason).toBeNull();
+    expect(ended?.start.map((job) => [job.disabled, job.reason])).toEqual([[true, null], [true, null]]);
   });
 
   it('a Worker at work: no job buttons and no title; "Stop work" can be pressed, with the warning beside it', () => {
@@ -233,6 +235,81 @@ describe('the unit panel: what is greyed out and why (unitPanelButtons)', () => 
       expect(buttons?.jobs?.start, closed).toEqual([]);
       expect(buttons?.hint.main, closed).toBe('');
     }
+  });
+
+  describe('while orders are closed the job block says ONLY that: the lines that say why a job cannot be built here wait until orders are open again', () => {
+    const WHY_CLOSED = { offline: 'No connection: orders have to wait.', turnEnded: 'You have ended your turn. Cancel that to give orders.' };
+
+    /** The job block of the sample Worker without a job, each of its two jobs with the error given (null: the tile allows it). */
+    function jobBlock(farm: RuleErrorCode | null, mine: RuleErrorCode | null, closed: OrdersClosed | null): JobBlock | null {
+      const view = viewWith((changed) => {
+        const own = ownOf(changed, SAMPLE.workerId);
+        own.job = null;
+        own.jobOptions = [
+          { improvement: 'farm', turns: 4, error: farm },
+          { improvement: 'mine', turns: 5, error: mine },
+        ];
+        changed.players[0].endedTurn = closed === 'turnEnded';
+      });
+      return unitPanelButtons(view, unitIn(view, SAMPLE.workerId), closed)?.jobs ?? null;
+    }
+
+    /** The lines of a job block that are sentences, top to bottom as the panel prints them (the labels of the buttons are not among them). */
+    function sentences(block: JobBlock | null): string[] {
+      if (block === null) return [];
+      return [block.closed, block.reason, ...block.start.map((job) => job.reason)].filter((line): line is string => line !== null);
+    }
+
+    it('closed, on own land where both jobs fit: the one sentence, and two greyed buttons', () => {
+      for (const closed of CLOSED) {
+        const block = jobBlock(null, null, closed);
+        expect(sentences(block), closed).toEqual([WHY_CLOSED[closed]]);
+        expect(block?.start.map((job) => [job.improvement, job.disabled]), closed).toEqual([['farm', true], ['mine', true]]);
+        expect(block?.showTitle, closed).toBe(true);
+      }
+    });
+
+    it('closed, outside own land: the sentence over the buttons ("That can only be built on your own land.") is NOT printed as a second one', () => {
+      // Two sentences over the buttons pushed the Mine button under the panel's edge on a phone.
+      expect(sentences(jobBlock('notYourLand', 'notYourLand', null))).toEqual(['That can only be built on your own land.']);
+      for (const closed of CLOSED) {
+        const block = jobBlock('notYourLand', 'notYourLand', closed);
+        expect(sentences(block), closed).toEqual([WHY_CLOSED[closed]]);
+        expect(block?.reason, closed).toBeNull();
+        expect(block?.start.map((job) => [job.improvement, job.disabled, job.reason]), closed).toEqual([['farm', true, null], ['mine', true, null]]);
+      }
+    });
+
+    it('closed, with one job impossible: no line under that button either', () => {
+      expect(sentences(jobBlock(null, 'badImprovementTile', null))).toEqual(['A Mine needs hills.']);
+      expect(sentences(jobBlock('alreadyImproved', null, null))).toEqual(['This tile already has a Farm.']);
+      for (const closed of CLOSED) {
+        expect(sentences(jobBlock(null, 'badImprovementTile', closed)), closed).toEqual([WHY_CLOSED[closed]]);
+        expect(sentences(jobBlock('alreadyImproved', null, closed)), closed).toEqual([WHY_CLOSED[closed]]);
+        // Two different reasons, one under each button: both wait.
+        expect(sentences(jobBlock('alreadyImproved', 'badImprovementTile', closed)), closed).toEqual([WHY_CLOSED[closed]]);
+      }
+    });
+
+    it('open again: the reasons are back exactly as before, and the sentence about closed orders is gone', () => {
+      const cases: [RuleErrorCode | null, RuleErrorCode | null][] = [
+        [null, null],
+        ['notYourLand', 'notYourLand'],
+        [null, 'badImprovementTile'],
+        ['alreadyImproved', 'badImprovementTile'],
+      ];
+      for (const [farm, mine] of cases) {
+        const before = jobBlock(farm, mine, null);
+        const ended = jobBlock(farm, mine, 'turnEnded');
+        const again = jobBlock(farm, mine, null);
+        expect(again).toEqual(before);
+        expect(again?.closed).toBeNull();
+        // Closing the orders changed the sentences and the greying, nothing else: the same buttons with the same words.
+        expect(ended?.start.map((job) => [job.improvement, job.label])).toEqual(before?.start.map((job) => [job.improvement, job.label]));
+      }
+      expect(jobBlock('notYourLand', 'notYourLand', null)?.reason).toBe(RULE_ERROR_MESSAGES.notYourLand);
+      expect(jobBlock(null, 'badImprovementTile', null)?.start.map((job) => [job.disabled, job.reason])).toEqual([[false, null], [true, 'A Mine needs hills.']]);
+    });
   });
 
   it('the second sentence of the hint (how to select what else stands on the tile) stays, whatever is greyed', () => {

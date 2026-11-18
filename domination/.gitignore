@@ -10,9 +10,10 @@ dist/
 /data-dev/
 /data-dev-*/
 # Copies of saved games: README.md, "Updating the game", tells whoever runs
-# the server to make them (data-before-update, data-of-the-new-version,
-# data-of-the-old-version). Every folder here whose name starts with "data-"
-# holds saved games and stays out of git.
+# the server to make them (data-before-update, data-of-the-new-version, and
+# one per older version that was tried, such as data-of-6bc093c). Every
+# folder here whose name starts with "data-" holds saved games and stays
+# out of git.
 /data-*/
 
 # Test and tooling leftovers

@@ -47,7 +47,10 @@ interface JobRow {
  *    improvement (`job-start-<id>`: "Build Farm (4 turns)" and what it
  *    adds) with the reason under a button that is greyed out
  *    (`job-reason-<id>`), or ONE sentence over the buttons when all of
- *    them are impossible for the same reason (unitJobsReason).
+ *    them are impossible for the same reason (unitJobsReason). While the
+ *    first line says that no order can be given, these reasons are left
+ *    out: one sentence over two grey buttons, which is what fits into a
+ *    phone's panel without scrolling.
  *    Click: controller.startJob(id). With a job it holds the progress
  *    ("Building a Farm: 3 turns left", unitJob), a bar, and "Stop work"
  *    (jobStop) with, while it can be pressed, the warning "Stopping loses

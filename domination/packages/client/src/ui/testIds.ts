@@ -60,11 +60,11 @@ export const TEST_IDS = {
   unitJobs: 'unit-jobs',
   /** One per improvement: `job-start-<improvementId>`, a button whose text begins "Build Farm (4 turns)". Disabled when the job cannot be started here. */
   jobStart: 'job-start-',
-  /** The one sentence for the whole block when every job is impossible for the same reason. Hidden otherwise. */
+  /** The one sentence for the whole block when every job is impossible for the same reason. Hidden otherwise, and while unitJobsClosed is shown. */
   unitJobsReason: 'unit-jobs-reason',
-  /** One per improvement: `job-reason-<improvementId>`: why its button is disabled. Hidden when it is not, and when unitJobsReason says it for all. */
+  /** One per improvement: `job-reason-<improvementId>`: why its button is disabled. Hidden when it is not, when unitJobsReason says it for all, and while unitJobsClosed is shown. */
   jobReason: 'job-reason-',
-  /** The first line of the job block while no order can be given (no connection, turn ended): why its buttons are greyed out. Hidden otherwise. */
+  /** The first line of the job block while no order can be given (no connection, turn ended): why its buttons are greyed out, and then the block's only sentence. Hidden otherwise. */
   unitJobsClosed: 'unit-jobs-closed',
   /** "Building a Farm: 3 turns left". Hidden while the unit has no job. */
   unitJob: 'unit-job',

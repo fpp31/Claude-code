@@ -165,7 +165,7 @@ describe('units', () => {
 function expectOneLineDescription(description: string, what: string): void {
   expect(
     description.length,
-    `${what}: at most 42 characters, so that it is one line under an add button of the city panel, also beside a scroll bar`,
+    `${what}: at most 42 characters (a rule of thumb for one line under an add button of the city panel, also beside a scroll bar; the end-to-end test looks at the lines themselves)`,
   ).toBeLessThanOrEqual(42);
   expect(description.length, what).toBeGreaterThan(10);
   expect(description, `${what}: one line`).not.toMatch(/[\n\r]/);

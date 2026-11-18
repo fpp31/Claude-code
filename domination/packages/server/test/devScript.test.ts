@@ -78,7 +78,8 @@ describe('folders of saved games and version control (.gitignore)', () => {
     const readme = readFileSync(join(projectRoot(), 'README.md'), 'utf8');
     const named = [...new Set(readme.match(/\bdata-[a-z0-9]+(?:-[a-z0-9]+)*/g) ?? [])];
     // What the README names today. A name it gains later is checked as well (the loop below reads the README).
-    for (const folder of ['data-dev', 'data-dev-2', 'data-before-update', 'data-of-the-new-version', 'data-of-the-old-version']) {
+    // (The copies of older versions carry the version's short name; these two are the README's examples.)
+    for (const folder of ['data-dev', 'data-dev-2', 'data-before-update', 'data-of-the-new-version', 'data-of-6bc093c', 'data-of-ee70e85']) {
       expect(named, 'README.md no longer names this folder: correct this list').toContain(folder);
     }
     const patterns = await rootFolderPatterns();

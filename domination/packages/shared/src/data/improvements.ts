@@ -36,8 +36,12 @@ export interface ImprovementDef {
   /**
    * One short line for players: what it is. Shown in the tile information,
    * after the name and what it adds ("Farm (+1 food). Fields that give the
-   * tile more food."). Plain words, no digits, at most 42 characters (the
-   * limit of a unit's description, data/units.ts), ending with a full stop.
+   * tile more food."). Plain words, no digits, ending with a full stop, at
+   * most 42 characters. That is the limit of a unit's description
+   * (data/units.ts), which a table test holds for both; it is a rule of
+   * thumb for a short sentence, not a width in pixels. Where this one is
+   * printed, lines wrap anyway, and the end-to-end test looks at the
+   * units' lines only.
    */
   description: string;
   /**
