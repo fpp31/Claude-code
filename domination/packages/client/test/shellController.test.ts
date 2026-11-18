@@ -2,9 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { RULES, cloneJson } from '@domination/shared';
 import type { BuildItem, PlayerView, ReachStep, TileIndex } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
-import { END_TURN_GUARD_MS, JOB_GUARD_MS, SELECTION_GUARD_MS, createController } from '../src/game/controller';
+import { END_TURN_GUARD_MS, JOB_GUARD_MS, MAP_MOVE_GUARD_MS, SELECTION_GUARD_MS, createController } from '../src/game/controller';
 import type { Controller } from '../src/game/controller';
 import type { ReachFunction } from '../src/game/selectors';
+import { handleServerMessage } from '../src/state/serverMessages';
 import type { AppState, Store } from '../src/state/store';
 import { SAMPLE, cityIn, fakeConnection, ownOf, romeOf, sentActions, setView, storeInGame, unitIn, viewOf } from './shellKit';
 import type { FakeConnection } from './shellKit';
@@ -922,6 +923,71 @@ describe('controller (WP4)', () => {
     expect(sentActions(connection)[2]).toEqual({ type: 'endTurn' });
   });
 
+  // ---- The map moved by itself ----
+
+  it('the map-move guard: for 500 ms after the map moved by itself, a tap on a tile the selected unit could be sent to gives no order and does nothing at all; after that it is an order', () => {
+    const { store, controller, connection, wait } = setup();
+    controller.onTileTap(SAMPLE.warriorTile); // the first tap of a double tap selects the Warrior...
+    controller.mapMovedByItself(); // ...the map steps aside for it (it stood at the edge)...
+    wait(130);
+    const before = store.get();
+    controller.onTileTap(SAMPLE.warriorTile + 1); // ...and the second tap lands on the tile beside it
+    expect(connection.sent).toEqual([]);
+    expect(store.get()).toBe(before); // not an order, and nothing else either: the Warrior stays selected, no card opens
+
+    wait(MAP_MOVE_GUARD_MS - 131);
+    controller.onTileTap(SAMPLE.warriorTile + 1);
+    expect(connection.sent).toEqual([]);
+
+    // A press after that works.
+    wait(1);
+    controller.onTileTap(SAMPLE.warriorTile + 1);
+    expect(sentActions(connection)).toEqual([{ type: 'moveUnit', unitId: SAMPLE.warriorId, path: [SAMPLE.warriorTile + 1] }]);
+    expect(MAP_MOVE_GUARD_MS).toBe(500);
+  });
+
+  it('the map-move guard holds back orders to units only: a tap that selects or opens a tile card counts at once, and so do the keys and End Turn', () => {
+    const { store, controller, connection, wait } = setup({ selection: SELECT_WARRIOR });
+    controller.mapMovedByItself();
+    wait(100);
+    // A tile the Warrior cannot be sent to (the stub reaches only the two tiles east of it): the card opens, as always.
+    controller.onTileTap(SAMPLE.emptyTile);
+    expect(store.get().inspectedTile).toBe(SAMPLE.emptyTile);
+    // Selecting works.
+    controller.onTileTap(SAMPLE.settlerTile);
+    expect(store.get().selection).toEqual({ kind: 'unit', unitId: SAMPLE.settlerId });
+    // The F key and End Turn are no taps on the map.
+    controller.foundCity('key');
+    expect(sentActions(connection)).toEqual([{ type: 'foundCity', unitId: SAMPLE.settlerId }]);
+    store.set({ busy: false });
+    controller.toggleEndTurn();
+    expect(sentActions(connection)).toHaveLength(2);
+  });
+
+  it('the map-move guard is started only by the map moving by itself: selecting, a new view and a hover start nothing', () => {
+    const { store, controller, connection, wait } = setup();
+    controller.onTileTap(SAMPLE.warriorTile);
+    setView(store, (view) => {
+      view.players[1].endedTurn = true;
+    });
+    controller.onTileHover(SAMPLE.warriorTile + 1);
+    wait(100);
+    controller.onTileTap(SAMPLE.warriorTile + 1);
+    expect(sentActions(connection)).toEqual([{ type: 'moveUnit', unitId: SAMPLE.warriorId, path: [SAMPLE.warriorTile + 1] }]);
+
+    // Each move starts the time again.
+    store.set({ busy: false });
+    controller.mapMovedByItself();
+    wait(400);
+    controller.mapMovedByItself();
+    wait(400);
+    controller.onTileTap(SAMPLE.warriorTile + 2);
+    expect(sentActions(connection)).toHaveLength(1);
+    wait(100);
+    controller.onTileTap(SAMPLE.warriorTile + 2);
+    expect(sentActions(connection)).toHaveLength(2);
+  });
+
   // ---- Adds wait for the answer that is on its way ----
 
   /** Plays the server accepting the newest setBuildQueue: the view shows the list that was sent, then the acknowledgement. */
@@ -1096,22 +1162,204 @@ describe('controller (WP4)', () => {
     expect(sentActions(connection)).toHaveLength(1);
   });
 
-  it('End Turn cannot overtake adds that wait: pressed meanwhile it is ignored, and the adds are sent the moment the answer comes', () => {
-    const { store, controller, connection, wait } = setup({ selection: SELECT_ROME });
+  /** The kinds of the actions that went out, oldest first. */
+  function sentKinds(connection: FakeConnection): string[] {
+    return sentActions(connection).map((action) => (action as { type: string }).type);
+  }
+
+  /** Plays the server refusing the action that is on its way, through the page's own handling of that message. */
+  function serverRefuses(store: Store): void {
+    handleServerMessage(store, { type: 'actionRejected', requestId: 1, error: { code: 'staleTurn', message: 'The server said no.' } }, () => {});
+  }
+
+  it('End Turn waits and cannot overtake adds that wait: pressed during an add\'s round trip it ends the turn after the add, and after every add that waited', () => {
+    const { store, controller, connection } = setup({ selection: SELECT_ROME });
     controller.addToQueue(SETTLER);
     controller.addToQueue(WORKER);
-    controller.toggleEndTurn(); // the first add is on its way
-    expect(sentActions(connection)).toHaveLength(1);
+    controller.toggleEndTurn(); // the first add is on its way: the press is kept, nothing goes out
+    expect(sentKinds(connection)).toEqual(['setBuildQueue']);
     serverTakesQueue(store, connection);
-    // In the very moment the answer is taken in, the kept add has gone out: no gap in which End Turn could slip in.
+    // In the very moment the answer is taken in, the kept add has gone out, and End Turn waits behind it.
     expect(store.get().busy).toBe(true);
-    controller.toggleEndTurn();
-    expect(sentActions(connection).map((action) => (action as { type: string }).type)).toEqual(['setBuildQueue', 'setBuildQueue']);
-    serverTakesQueue(store, connection);
-    wait(10);
-    controller.toggleEndTurn();
-    expect(sentActions(connection).map((action) => (action as { type: string }).type)).toEqual(['setBuildQueue', 'setBuildQueue', 'endTurn']);
+    expect(sentKinds(connection)).toEqual(['setBuildQueue', 'setBuildQueue']);
     expect(sentQueues(connection)[1]).toEqual(['warrior', 'scout', 'settler', 'worker']);
+    serverTakesQueue(store, connection);
+    // Every answer is in: now the turn is ended, by the one press made at the start.
+    expect(sentKinds(connection)).toEqual(['setBuildQueue', 'setBuildQueue', 'endTurn']);
+    expect(store.get().busy).toBe(true);
+    // Nothing is left over: when the turn has ended and the guard is over, a press takes it back as always.
+    serverSetsEnded(store, true);
+    expect(sentKinds(connection)).toHaveLength(3);
+  });
+
+  it('End Turn waits behind any action whose answer is on its way (a move, a job, one add), and "tap to cancel" waits the same way', () => {
+    const move = setup({ selection: SELECT_WARRIOR });
+    move.controller.onTileTap(SAMPLE.warriorTile + 1);
+    move.controller.toggleEndTurn();
+    expect(sentKinds(move.connection)).toEqual(['moveUnit']);
+    // The view with the unit moved comes first and changes nothing yet; the acknowledgement lets End Turn go.
+    setView(move.store, (view) => {
+      unitIn(view, SAMPLE.warriorId).tile = SAMPLE.warriorTile + 1;
+    });
+    expect(sentKinds(move.connection)).toEqual(['moveUnit']);
+    move.store.set({ busy: false });
+    expect(sentKinds(move.connection)).toEqual(['moveUnit', 'endTurn']);
+    expect(move.connection.sent.map((message) => (message.type === 'action' ? message.requestId : null))).toEqual([1, 2]);
+
+    const add = setup({ selection: SELECT_ROME });
+    add.controller.addToQueue(SETTLER);
+    add.controller.toggleEndTurn();
+    serverTakesQueue(add.store, add.connection);
+    expect(sentKinds(add.connection)).toEqual(['setBuildQueue', 'endTurn']);
+
+    // The player had ended the turn; an order from the F key is on its way (the server will refuse or take it), and "tap to cancel" is pressed.
+    const cancel = setup({ selection: { kind: 'unit', unitId: SAMPLE.settlerId } }, viewWith((view) => {
+      view.players[0].endedTurn = true;
+    }));
+    cancel.controller.foundCity('key');
+    cancel.controller.toggleEndTurn();
+    expect(sentKinds(cancel.connection)).toEqual(['foundCity']);
+    cancel.store.set({ busy: false });
+    expect(sentKinds(cancel.connection)).toEqual(['foundCity', 'cancelEndTurn']);
+  });
+
+  it('End Turn waits: after a refusal it does not end the turn, whatever was refused', () => {
+    // The add itself is refused.
+    const refused = setup({ selection: SELECT_ROME });
+    refused.controller.addToQueue(SETTLER);
+    refused.controller.toggleEndTurn();
+    serverRefuses(refused.store);
+    expect(refused.store.get().busy).toBe(false);
+    expect(sentKinds(refused.connection)).toEqual(['setBuildQueue']);
+    // The press is gone for good: a later answer of something else does not bring it back.
+    refused.controller.addToQueue(SCOUT);
+    serverTakesQueue(refused.store, refused.connection);
+    expect(sentKinds(refused.connection)).toEqual(['setBuildQueue', 'setBuildQueue']);
+
+    // The first add is taken, the add that waited behind it is refused: End Turn, last in line, is dropped.
+    const later = setup({ selection: SELECT_ROME });
+    later.controller.addToQueue(SETTLER);
+    later.controller.addToQueue(WORKER);
+    later.controller.toggleEndTurn();
+    serverTakesQueue(later.store, later.connection);
+    expect(sentKinds(later.connection)).toEqual(['setBuildQueue', 'setBuildQueue']);
+    serverRefuses(later.store);
+    expect(sentKinds(later.connection)).toEqual(['setBuildQueue', 'setBuildQueue']);
+    expect(later.store.get().busy).toBe(false);
+
+    // A move that is refused.
+    const move = setup({ selection: SELECT_WARRIOR });
+    move.controller.onTileTap(SAMPLE.warriorTile + 1);
+    move.controller.toggleEndTurn();
+    serverRefuses(move.store);
+    expect(sentKinds(move.connection)).toEqual(['moveUnit']);
+
+    // A plain error instead of an answer (the action never reached the game).
+    const error = setup({ selection: SELECT_WARRIOR });
+    error.controller.onTileTap(SAMPLE.warriorTile + 1);
+    error.controller.toggleEndTurn();
+    handleServerMessage(error.store, { type: 'error', code: 'rateLimited', message: 'Slow down.' }, () => {});
+    expect(error.store.get().busy).toBe(false);
+    expect(sentKinds(error.connection)).toEqual(['moveUnit']);
+  });
+
+  it('End Turn waits: a second press while one waits takes it back, so two presses leave the turn open; a third waits again', () => {
+    const { store, controller, connection, wait } = setup({ selection: SELECT_ROME });
+    controller.addToQueue(SETTLER);
+    controller.toggleEndTurn();
+    wait(150);
+    controller.toggleEndTurn(); // the second click of a double-click, or a change of mind
+    serverTakesQueue(store, connection);
+    expect(sentKinds(connection)).toEqual(['setBuildQueue']);
+    expect(store.get().busy).toBe(false);
+
+    controller.addToQueue(SCOUT);
+    controller.toggleEndTurn();
+    controller.toggleEndTurn();
+    controller.toggleEndTurn();
+    serverTakesQueue(store, connection);
+    expect(sentKinds(connection)).toEqual(['setBuildQueue', 'setBuildQueue', 'endTurn']);
+  });
+
+  it('End Turn waits: a lost connection drops it', () => {
+    const { store, controller, connection } = setup({ selection: SELECT_ROME });
+    controller.addToQueue(SETTLER);
+    controller.toggleEndTurn();
+    // What the app does when the socket drops (ui/app.ts): the answer will never come, then the status changes.
+    connection.accepts = false;
+    store.set({ busy: false });
+    store.set({ connection: 'reconnecting' });
+    expect(sentKinds(connection)).toEqual(['setBuildQueue']);
+    // Back, with a full view: nothing is ended behind the player's back.
+    connection.accepts = true;
+    store.set({ connection: 'online', busy: false });
+    expect(sentKinds(connection)).toEqual(['setBuildQueue']);
+
+    // The same when the status changes first.
+    const other = setup({ selection: SELECT_WARRIOR });
+    other.controller.onTileTap(SAMPLE.warriorTile + 1);
+    other.controller.toggleEndTurn();
+    other.store.set({ connection: 'reconnecting' });
+    other.store.set({ connection: 'online', busy: false });
+    expect(sentKinds(other.connection)).toEqual(['moveUnit']);
+  });
+
+  it('End Turn waits: it is dropped with the adds that waited in front of it (the selection moved away), and when the button has changed its meaning meanwhile', () => {
+    // Two adds and End Turn; then the player closes the panel: the add that waited is dropped, and the turn must not end without it.
+    const closed = setup({ selection: SELECT_ROME });
+    closed.controller.addToQueue(SETTLER);
+    closed.controller.addToQueue(WORKER);
+    closed.controller.toggleEndTurn();
+    closed.controller.deselect();
+    serverTakesQueue(closed.store, closed.connection);
+    expect(sentKinds(closed.connection)).toEqual(['setBuildQueue']);
+
+    // With no add waiting, End Turn is not about the selection: closing the panel leaves it waiting.
+    const kept = setup({ selection: SELECT_ROME });
+    kept.controller.addToQueue(SETTLER);
+    kept.controller.toggleEndTurn();
+    kept.controller.deselect();
+    serverTakesQueue(kept.store, kept.connection);
+    expect(sentKinds(kept.connection)).toEqual(['setBuildQueue', 'endTurn']);
+
+    // Another tab of the same player ended the turn while the press waited: the button means "cancel" now, the press meant "end".
+    const ended = setup({ selection: SELECT_WARRIOR });
+    ended.controller.onTileTap(SAMPLE.warriorTile + 1);
+    ended.controller.toggleEndTurn();
+    setView(ended.store, (view) => {
+      view.players[0].endedTurn = true;
+    });
+    ended.store.set({ busy: false });
+    expect(sentKinds(ended.connection)).toEqual(['moveUnit']);
+
+    // The turn went on meanwhile.
+    const next = setup({ selection: SELECT_WARRIOR });
+    next.controller.onTileTap(SAMPLE.warriorTile + 1);
+    next.controller.toggleEndTurn();
+    serverStartsNextTurn(next.store);
+    expect(sentKinds(next.connection)).toEqual(['moveUnit']);
+  });
+
+  it('End Turn waits only for OTHER actions: the second click of a double-click, while the first click\'s own endTurn is on its way, is still ignored', () => {
+    const { store, controller, connection, wait } = setup();
+    controller.toggleEndTurn();
+    wait(100);
+    controller.toggleEndTurn(); // the answer to the first is on its way
+    expect(sentKinds(connection)).toEqual(['endTurn']);
+    serverSetsEnded(store, true);
+    // Nothing waited: the turn stays ended, also when the guard is over.
+    wait(END_TURN_GUARD_MS);
+    store.set({ hoverTile: 3 });
+    expect(sentKinds(connection)).toEqual(['endTurn']);
+
+    // And the last player to end: the next turn is not ended by the second click.
+    const last = setup();
+    last.controller.toggleEndTurn();
+    last.controller.toggleEndTurn();
+    serverStartsNextTurn(last.store);
+    last.wait(END_TURN_GUARD_MS);
+    last.store.set({ hoverTile: 3 });
+    expect(sentKinds(last.connection)).toEqual(['endTurn']);
   });
 
   it('toggleEndTurn sends endTurn, or cancelEndTurn when the player has already ended the turn', () => {

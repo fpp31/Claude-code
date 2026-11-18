@@ -43,6 +43,12 @@ export const JOB_GUARD_MS = 600;
  */
 export const SELECTION_GUARD_MS = 500;
 
+/**
+ * For this long after the map moved by itself, a tap on the map gives no
+ * order to a unit (see Controller.mapMovedByItself).
+ */
+export const MAP_MOVE_GUARD_MS = 500;
+
 export interface Controller {
   /**
    * A tap or click on a map tile.
@@ -55,6 +61,9 @@ export interface Controller {
    *       - an action is in flight (state.busy): do NOTHING. The unit
    *         stays selected and rules 2 and 3 are skipped, so an impatient
    *         second tap never throws the selection away;
+   *       - the map moved by itself less than MAP_MOVE_GUARD_MS ago (see
+   *         mapMovedByItself): do NOTHING, as while busy. The tap was
+   *         aimed at the map as it lay before the move;
    *       - otherwise: send `moveUnit` with pathTo(reach, tile); the unit
    *         stays selected and rules 2 and 3 are skipped.
    *     (A unit at work has no reachable tiles, so rule 1 never applies to it.)
@@ -70,6 +79,24 @@ export interface Controller {
    * Rules 2 and 3 never send anything to the server.
    */
   onTileTap(tile: TileIndex): void;
+
+  /**
+   * The game screen says that the map has just moved BY ITSELF: it stepped
+   * aside for a panel after a selection, because a panel grew, or because
+   * the window changed its size (ui/gameScreen.ts).
+   *
+   * MAP-MOVE GUARD. When the map moves, another tile lies under the finger.
+   * The second tap of a double tap on a unit near the edge of the map
+   * landed on the tile beside it, and with the unit just selected that was
+   * an order to walk there. So for MAP_MOVE_GUARD_MS after such a move, a
+   * tap on a tile the selected unit could be sent to gives no order: it
+   * does nothing at all (onTileTap, rule 1). Only orders are held back. A
+   * tap that selects, or opens a tile card, changes nothing in the game
+   * and counts at once, as do the buttons and the keys; and a move of the
+   * map the player made (a drag, the wheel, the keys, "Show me") starts
+   * nothing.
+   */
+  mapMovedByItself(): void;
 
   /** The mouse moved over a tile (null: it left the map). Updates hoverTile if it changed. */
   onTileHover(tile: TileIndex | null): void;
@@ -135,9 +162,10 @@ export interface Controller {
    * is lost and when the turn is ended. The limit of the queue counts what
    * is on its way and what waits. A press on a ROW button during that time
    * is ignored as before: the rows on the screen are one answer behind, so
-   * it would hit another entry than the one it was aimed at. End Turn is
-   * ignored during that time too (`busy`), and what waits is sent in the
-   * very moment the answer is taken in, so End Turn can never overtake it.
+   * it would hit another entry than the one it was aimed at. End Turn
+   * pressed during that time waits as well (see toggleEndTurn), and what
+   * waits here is sent in the very moment the answer is taken in, so End
+   * Turn can never overtake it.
    *
    * Each returns true if a message went out (addToQueue also when it kept
    * the item to send it after the answer), false if not: the city panel's
@@ -179,6 +207,28 @@ export interface Controller {
    * `endedTurn` or `view.turn` changes it notes the time; a call within
    * END_TURN_GUARD_MS of that moment does nothing. (`busy` alone is not
    * enough: it only covers the round trip.)
+   *
+   * END TURN WAITS. The button is not grey for the blink of a round trip,
+   * and on a slow link that blink is long enough to press it in: a press
+   * that was simply dropped looked as if the game had not heard. So ONE
+   * press made while the answer to another action is on its way is kept,
+   * and sent when the answers are in: after the adds that wait (see
+   * addToQueue) and their answers. The kept press is dropped
+   *  - when an answer that came meanwhile was a refusal (`refusals` in the
+   *    store went up): the turn must not end on top of an order that did
+   *    not happen;
+   *  - when the adds that waited in front of it are dropped (the player
+   *    turned to another city, or closed the panel): the press was made
+   *    after them, and would end the turn without them. With no add
+   *    waiting, the selection does not matter to End Turn;
+   *  - when the button has changed its meaning meanwhile (the turn is
+   *    another one, or the player's `endedTurn` flipped in another tab);
+   *  - when the connection is lost, or the game is gone.
+   * A second press while one waits takes the waiting one back: a
+   * double-click in that blink leaves the turn open, and so does a change
+   * of mind. A press made while the answer to End Turn or Cancel ITSELF is
+   * on its way is ignored as before: that is the second click of a
+   * double-click on the button.
    */
   toggleEndTurn(): void;
 
@@ -210,7 +260,7 @@ export interface Controller {
 export interface ControllerOptions {
   /** How to find the tiles a unit can reach. Default: reachableFor (game/selectors.ts). */
   reach?: ReachFunction;
-  /** The clock for the End Turn guard, the job guard and the selection guard, in milliseconds. Default: Date.now. */
+  /** The clock for the End Turn guard, the job guard, the selection guard and the map-move guard, in milliseconds. Default: Date.now. */
   now?: () => number;
 }
 
@@ -218,9 +268,10 @@ export interface ControllerOptions {
  * Every action is sent as `{ type: 'action', requestId, turn: view.turn,
  * action }` with a fresh increasing requestId. Nothing is sent while `busy`
  * is set or while the connection is not 'online': the request is dropped
- * with no queueing (the player simply taps again). The one exception: a
+ * with no queueing (the player simply taps again). Two exceptions: a
  * press on an add button of the build queue waits for the answer to an
- * edit of the same queue (see Controller.addToQueue).
+ * edit of the same queue (see Controller.addToQueue), and one press on End
+ * Turn waits until the answers are in (see Controller.toggleEndTurn).
  *
  * `busy` is set ONLY if connection.send returned true, and stays set until
  * the answer arrives (see serverMessages.ts). If send returned false (the
@@ -254,6 +305,10 @@ export function createController(store: Store, connection: Connection, options: 
   let watchedSelection = selectionKey(store.get().selection);
   let selectionChangedAt = Number.NEGATIVE_INFINITY;
 
+  // ---- The map-move guard ---------------------------------------------------
+  // When the game screen last said that the map moved by itself (see mapMovedByItself).
+  let mapMovedAt = Number.NEGATIVE_INFINITY;
+
   /** Has the panel of the selected thing only just opened? Its order buttons do nothing then. */
   function panelJustOpened(): boolean {
     return now() - selectionChangedAt < SELECTION_GUARD_MS;
@@ -266,16 +321,25 @@ export function createController(store: Store, connection: Connection, options: 
   let sentQueue: { cityId: CityId; queue: BuildItem[] } | null = null;
   let waitingAdds: BuildItem[] = [];
 
+  // ---- An End Turn that waits ------------------------------------------------
+  // The kind of the action whose answer is on its way (null: none), and the
+  // one press on End Turn made since: what the button meant at that moment,
+  // and how many refusals the store had counted (see toggleEndTurn).
+  let inFlight: Action['type'] | null = null;
+  let waitingEndTurn: { ended: boolean; turn: number; refusals: number } | null = null;
+
   /**
    * Looks after the adds that wait, at every change of the store: drops
    * them when they can no longer be meant, and sends them when the answer
-   * they waited for has come.
+   * they waited for has come. An End Turn that waits behind adds that are
+   * dropped is dropped with them.
    */
   function watchWaitingAdds(state: AppState): void {
     if (sentQueue === null) return;
     const city = selectedCity(state);
     if (state.connection !== 'online' || city === null || city.id !== sentQueue.cityId) {
       // No connection, or the player has turned to something else.
+      if (waitingAdds.length > 0) waitingEndTurn = null;
       sentQueue = null;
       waitingAdds = [];
       return;
@@ -285,13 +349,38 @@ export function createController(store: Store, connection: Connection, options: 
     const adds = waitingAdds;
     sentQueue = null;
     waitingAdds = [];
-    if (adds.length === 0 || city.own === null || ordersClosed(state) !== null) return;
+    if (adds.length === 0) return;
     // Accepted means: the view shows the list that was sent (the view comes
     // before the acknowledgement). Anything else is a refusal, or a world
     // that changed in a way nobody here foresaw: what waited is dropped.
-    if (!sameItems(city.own.buildQueue.map((entry) => entry.item), sent.queue)) return;
+    const accepted = city.own !== null && ordersClosed(state) === null && sameItems(city.own.buildQueue.map((entry) => entry.item), sent.queue);
     const queue = [...sent.queue, ...adds];
-    if (sendAction({ type: 'setBuildQueue', cityId: sent.cityId, queue })) sentQueue = { cityId: sent.cityId, queue };
+    if (accepted && sendAction({ type: 'setBuildQueue', cityId: sent.cityId, queue })) sentQueue = { cityId: sent.cityId, queue };
+    else waitingEndTurn = null;
+  }
+
+  /**
+   * Looks after the End Turn that waits, at every change of the store and
+   * after the adds: drops it when it can no longer be meant, and sends it
+   * when every answer is in (see toggleEndTurn).
+   */
+  function watchWaitingEndTurn(): void {
+    if (waitingEndTurn === null) return;
+    const state = store.get(); // read afresh: the adds that waited may have gone out just now
+    const facts = endTurnFacts(state);
+    const stillMeant =
+      state.connection === 'online' &&
+      state.refusals === waitingEndTurn.refusals &&
+      facts.ended === waitingEndTurn.ended &&
+      facts.turn === waitingEndTurn.turn;
+    if (!stillMeant) {
+      waitingEndTurn = null;
+      return;
+    }
+    if (state.busy) return; // an answer is still on its way
+    const kept = waitingEndTurn;
+    waitingEndTurn = null;
+    sendAction({ type: kept.ended ? 'cancelEndTurn' : 'endTurn' });
   }
 
   const stopWatching = store.subscribe((state) => {
@@ -307,7 +396,9 @@ export function createController(store: Store, connection: Connection, options: 
     if (selection !== null && selection !== watchedSelection) selectionChangedAt = now();
     watchedSelection = selection;
 
+    if (!state.busy) inFlight = null;
     watchWaitingAdds(state);
+    watchWaitingEndTurn();
   });
 
   /**
@@ -320,6 +411,7 @@ export function createController(store: Store, connection: Connection, options: 
     const sent = connection.send({ type: 'action', requestId: nextRequestId, turn: state.game.view.turn, action });
     if (!sent) return false;
     nextRequestId += 1;
+    inFlight = action.type;
     store.set({ busy: true });
     return true;
   }
@@ -394,6 +486,7 @@ export function createController(store: Store, connection: Connection, options: 
         const reachMap = reach(view, unit);
         if (reachMap.has(tile)) {
           if (state.busy) return; // the answer to the last order is on its way
+          if (now() - mapMovedAt < MAP_MOVE_GUARD_MS) return; // the map has just moved under the finger
           const path = pathTo(reachMap, tile);
           if (path !== null) sendAction({ type: 'moveUnit', unitId: unit.id, path });
           return;
@@ -404,6 +497,10 @@ export function createController(store: Store, connection: Connection, options: 
       const things = ownThingsAt(view, tile);
       if (things.length === 0) inspect(tile);
       else selectAfterCurrent(things);
+    },
+
+    mapMovedByItself() {
+      mapMovedAt = now();
     },
 
     onTileHover(tile) {
@@ -472,7 +569,15 @@ export function createController(store: Store, connection: Connection, options: 
       const state = store.get();
       if (state.game === null) return;
       if (now() - meaningChangedAt < END_TURN_GUARD_MS) return;
-      sendAction({ type: myPlayer(state.game.view).endedTurn ? 'cancelEndTurn' : 'endTurn' });
+      const ended = myPlayer(state.game.view).endedTurn;
+      if (state.busy && state.connection === 'online' && inFlight !== null) {
+        // An answer is on its way. A second press takes the press that waits back.
+        if (waitingEndTurn !== null) waitingEndTurn = null;
+        // Behind End Turn or Cancel itself nothing waits: that is the second click of a double-click.
+        else if (inFlight !== 'endTurn' && inFlight !== 'cancelEndTurn') waitingEndTurn = { ended, turn: state.game.view.turn, refusals: state.refusals };
+        return;
+      }
+      sendAction({ type: ended ? 'cancelEndTurn' : 'endTurn' });
     },
 
     deselect() {

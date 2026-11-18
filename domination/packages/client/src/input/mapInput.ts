@@ -19,7 +19,8 @@ import type { MapRenderer, ScreenPoint } from '../render/api';
 import { createPointerTracker, createWheelStepper } from './gestures';
 import type { PointerKind, PointerSample } from './gestures';
 import { createHoverInfoTimer } from './hoverInfo';
-import { focusKind, keyCommand, panDirectionOfKey } from './keys';
+import { onFocusFellBack } from '../ui/dom';
+import { createEndTurnKeyGuard, focusKind, keyCommand, panDirectionOfKey } from './keys';
 import type { PanDirection } from './keys';
 
 /** How fast the arrow keys scroll the map, in CSS pixels per second. */
@@ -85,7 +86,10 @@ const LONGEST_FRAME_SECONDS = 0.05;
  *  - Arrow keys and W A S D: pan while held (about 600 CSS px per second,
  *    driven by requestAnimationFrame only while a key is down).
  *  - + and - (also = and _): zoomBy(+1 / -1).
- *  - Enter: controller.toggleEndTurn().
+ *  - Enter: controller.toggleEndTurn(). Not for 0.6 s after a key pressed a
+ *    button, nor after the control that had the focus went away or was
+ *    greyed out (ui/dom.ts reports that): the Enter was meant for the
+ *    button (createEndTurnKeyGuard in keys.ts).
  *  - Escape: closes the hover box if one is showing, otherwise
  *    controller.deselect().
  *  - F: controller.foundCity('key') (a key is not held back by the selection guard).
@@ -238,8 +242,13 @@ export function attachMapInput(canvas: HTMLCanvasElement, renderer: MapRenderer,
     panFrame = requestAnimationFrame(panStep);
   }
 
+  /** Keeps Enter from ending the turn right after it pressed a button, or after the focus fell back to the page. */
+  const endTurnKey = createEndTurnKeyGuard();
+  const stopFocusWatch = onFocusFellBack(() => endTurnKey.focusFellBack());
+
   function onKeyDown(event: KeyboardEvent): void {
     const focus = focusKind(event.target instanceof Element ? event.target : null);
+    if (focus === 'button' && !event.repeat && (event.key === 'Enter' || event.key === ' ')) endTurnKey.keyPressedButton();
 
     // A held Enter would otherwise press a focused button again and again
     // (End Turn, Cancel, End Turn...): let only the first press through.
@@ -269,7 +278,7 @@ export function attachMapInput(canvas: HTMLCanvasElement, renderer: MapRenderer,
         renderer.zoomBy(command.steps);
         break;
       case 'endTurn':
-        controller.toggleEndTurn();
+        if (endTurnKey.allows()) controller.toggleEndTurn();
         break;
       case 'deselect':
         // Escape closes the hover box if one is showing, and only that.
@@ -322,6 +331,7 @@ export function attachMapInput(canvas: HTMLCanvasElement, renderer: MapRenderer,
     window.removeEventListener('keyup', onKeyUp);
     window.removeEventListener('blur', onWindowBlur);
     stopCameraWatch();
+    stopFocusWatch();
     hoverInfo.destroy();
     heldPanKeys.clear();
     if (panFrame !== null) cancelAnimationFrame(panFrame);

@@ -25,7 +25,8 @@
   --paper-dim: #b8b4cc;     /* secondary text */
   --accent: #f8c020;        /* buttons that matter (End Turn, Start), things that need attention */
   --good: #a8e038;          /* food, "connected", "online" */
-  --danger: #e85048;        /* "not connected", errors */
+  --danger: #e85048;        /* errors, "no connection": as a ground or an edge, never as the colour of small words */
+  --danger-words: #ff948c;  /* the same red made light enough to read as small words on a panel ("not connected" in the lobby) */
   /* A dark veil over a civilization's colour where it is dimmed: a taken civilization, a player who is not connected. */
   --veil: rgb(24 24 40 / 0.6);
 
@@ -485,8 +486,9 @@ select.field:disabled {
   white-space: nowrap;
 }
 
+/* 5.2 to 1 on a taken seat's row; the red of --danger is 3 to 1 there. */
 .seat-status.absent {
-  color: var(--danger);
+  color: var(--danger-words);
 }
 
 .civ-grid {
@@ -611,7 +613,8 @@ select.field:disabled {
  * below) catch them. The box around "Show me" and End Turn is as wide as
  * End Turn and see-through as well; its two buttons catch what is theirs.
  * (The whole box used to: a strip of the map beside "Show me", two thirds
- * of the box's width, took no tap and no hover.)
+ * of the box's width, took no tap and no hover.) The ten pixels between the
+ * two buttons are not see-through: see .end-turn-gap.
  */
 .hud-bottom {
   position: absolute;
@@ -651,7 +654,8 @@ select.field:disabled {
 
 .panel,
 .zoom-buttons,
-.end-turn > .button {
+.end-turn > .button,
+.end-turn-gap {
   pointer-events: auto;
 }
 
@@ -1242,9 +1246,27 @@ select.field:disabled {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 10px;
   width: 300px; /* wide enough for "Waiting for others - tap to cancel" on one line */
   max-width: 100%;
+}
+
+/*
+ * The ten pixels between "Show me" and End Turn are an element of their own
+ * (ui/endTurnButton.ts) that takes a press and does nothing with it. While
+ * that strip was see-through, a finger that came down on it, a few pixels
+ * above End Turn, was handed to the nearest button by the browser, and the
+ * turn was ended. The strip is as wide as End Turn and exactly as tall as
+ * the gap: the map beside "Show me" takes taps as before. Without "Show me"
+ * it lies in the gap between the zoom buttons and End Turn.
+ */
+.show-next {
+  margin-bottom: 10px;
+}
+
+.end-turn-gap {
+  align-self: stretch;
+  height: 10px;
+  margin-top: -10px;
 }
 
 .end-turn-button {
@@ -1531,6 +1553,25 @@ select.field:disabled {
   .unit-jobs .build-title {
     display: none;
   }
+
+  /*
+   * And both job buttons stay in view after End Turn, when the sentence
+   * that says why they are grey takes two lines above them: the buttons
+   * and the line above the block stand closer together. (The second
+   * button used to be cut by ten pixels at the panel's edge.)
+   */
+  .unit-panel .panel-stat {
+    margin-top: 4px;
+  }
+
+  .job-row {
+    margin-top: 3px;
+  }
+
+  .job-button {
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1594,6 +1635,12 @@ select.field:disabled {
   .show-next {
     grid-area: show;
     justify-self: start;
+    margin-bottom: 0;
+  }
+
+  /* No strip between the two buttons here: they stand side by side, on the deck's own ground. */
+  .end-turn-gap {
+    display: none;
   }
 
   .end-turn-button {
@@ -1623,5 +1670,23 @@ select.field:disabled {
     width: 100%;
     max-height: 44vh;
     box-shadow: inset 0 0 0 2px #4a4a74;
+  }
+
+  /*
+   * A Worker's two job buttons stay in view on a small phone (360 x 640)
+   * after End Turn too, when the sentence that says why they are grey takes
+   * two lines above them: the job block stands a little closer together.
+   */
+  .unit-jobs .build-title {
+    margin: 8px 0 4px;
+  }
+
+  .job-row {
+    margin-top: 3px;
+  }
+
+  .job-button {
+    padding-top: 4px;
+    padding-bottom: 4px;
   }
 }

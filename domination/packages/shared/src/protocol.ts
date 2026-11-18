@@ -55,10 +55,12 @@ import type { PlayerView, ViewPatch } from './viewTypes';
  * reload, which fetches the new build.
  *
  * 1: phase 1. 2: round 2 (the build queue, the Worker). 3: the repair after
- * the review of round 2 (the error code 'gameNotLoaded'; a Mine gives +2
- * production; `hello` may carry a token the page made itself).
+ * the review of round 2 (the error code 'gameNotLoaded'; a Mine gave +2
+ * production; `hello` may carry a token the page made itself). 4: the second
+ * repair after that review (a Mine gives +3 production: a number table
+ * changed again, and version 3 had already been handed out).
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** URL path of the WebSocket endpoint. */
 export const WS_PATH = '/ws';

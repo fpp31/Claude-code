@@ -68,7 +68,9 @@ import { mountUnitPanel } from './unitPanel';
  * before; a tile the player has scrolled away is never pulled back.
  * What "in the open" is and how far the map moves is the arithmetic of
  * ui/mapReveal.ts (rectangles in, a pan out; tested in plain Node). This
- * file measures the rectangles, decides WHEN to step aside, and pans.
+ * file measures the rectangles, decides WHEN to step aside, and pans. It
+ * tells the controller every time it has moved the map, because the tile
+ * under the finger is another one then (Controller.mapMovedByItself).
  *
  * ORDER AS BUILT: steps 3 and 5 (controller, panels) are carried out before
  * step 2 (renderer). The top bar and, on a narrow screen, the bottom panels
@@ -251,6 +253,8 @@ export function mountGameScreen(parent: HTMLElement, store: Store, connection: C
     if (sideways !== 0) renderer.panBy(sideways, 0);
     const upOrDown = upOrDownStep(renderer.tileToScreen(tile), surroundings());
     if (upOrDown !== 0) renderer.panBy(0, upOrDown);
+    // Another tile lies under the finger now: a tap in the next half second gives no order (the controller's map-move guard).
+    if (sideways !== 0 || upOrDown !== 0) controller.mapMovedByItself();
   }
 
   // A panel that opens, closes or grows changes the size of a corner, and

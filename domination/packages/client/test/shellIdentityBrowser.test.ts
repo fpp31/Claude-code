@@ -691,6 +691,152 @@ describe('a first visit in several tabs: one browser is one player (WP4)', () =>
 });
 
 /**
+ * The same nets with the APP's own answers (ui/app.ts, appConnectionHandlers)
+ * instead of a pretend handler: the app's store, the real handling of
+ * server messages, the real connection, the pretend browser. This is the
+ * wiring a first-visit tab in a game depends on.
+ */
+describe('the app itself decides when a first-visit tab may still become another player (WP4)', () => {
+  const CODE = 'K7QXM';
+  const OTHERS = 'd'.repeat(32);
+
+  /** The app of one tab: its store, and its connection with the app's own handlers on pretend sockets. */
+  async function appOf(browser: FakeBrowser) {
+    // Loaded after browserAt, so that all of them use the pretend browser's copy of identity.ts.
+    const { createConnection } = await import('../src/net/connection');
+    const { appConnectionHandlers } = await import('../src/ui/app');
+    const { createStore, currentScreen, initialState } = await import('../src/state/store');
+    const store: Store = createStore(initialState('Ada', browser.identity.gameCodeFromUrl()));
+    const sockets: PretendSocket[] = [];
+    let tokenStored: () => void = () => {};
+    const connection = createConnection(
+      appConnectionHandlers(store, () => connection),
+      {
+        url: 'ws://game.test/ws',
+        openSocket(_url, events: SocketEvents) {
+          const socket: PretendSocket = {
+            sent: [],
+            closedByPage: false,
+            serverSends: (message) => events.frame(JSON.stringify(message)),
+            drop: () => events.closed(),
+          };
+          sockets.push(socket);
+          queueMicrotask(() => events.opened());
+          return {
+            send: (text) => void socket.sent.push(JSON.parse(text) as ClientMessage),
+            close() {
+              socket.closedByPage = true;
+            },
+          };
+        },
+        now: () => 0,
+        setTimer: () => 0,
+        clearTimer() {},
+        random: () => 0,
+        onWake: () => () => {},
+        onTokenStored(listener) {
+          tokenStored = listener;
+          return () => {
+            tokenStored = () => {};
+          };
+        },
+      },
+    );
+    openConnections.push(connection);
+    await settled();
+    return {
+      store,
+      sockets,
+      screen: () => currentScreen(store.get()),
+      /** The server's answer to the page's first hello: the token the page proposed. */
+      welcome(): string {
+        const hello = sockets[0].sent[0];
+        if (hello === undefined || hello.type !== 'hello' || hello.token === null) throw new Error('the page proposed no token');
+        sockets[0].serverSends({ type: 'welcome', protocol: 3, token: hello.token });
+        return hello.token;
+      },
+      /** Another tab of the browser stores a token, and the browser tells this tab. */
+      async anotherTabStores(token: string): Promise<void> {
+        browser.local.items.set(browser.identity.STORAGE_KEYS.token, token);
+        tokenStored();
+        await settled();
+      },
+    };
+  }
+
+  const lobby: ServerMessage = { type: 'lobby', lobby: sampleLobby() };
+  const game: ServerMessage = { type: 'gameSync', code: CODE, seq: 1, view: sampleView(), connected: ['p1'], events: [] };
+  const notLoaded: ServerMessage = { type: 'error', code: 'gameNotLoaded', message: 'the server text' };
+
+  it('in a lobby, in a game, and on the first screen with "could not be opened", the tab keeps its identity when another tab stores a token', async () => {
+    const cases: { name: string; messages: ServerMessage[]; screen: string }[] = [
+      { name: 'a lobby', messages: [lobby], screen: 'lobby' },
+      { name: 'a game', messages: [game], screen: 'game' },
+      { name: 'a game that could not be opened after a restart', messages: [game, notLoaded], screen: 'home' },
+      { name: 'a lobby that could not be opened after a restart', messages: [lobby, notLoaded], screen: 'home' },
+    ];
+    for (const { name, messages, screen } of cases) {
+      const browser = await browserAt(`http://game.test/?g=${CODE}`);
+      const tab = await appOf(browser);
+      const own = tab.welcome();
+      for (const message of messages) tab.sockets[0].serverSends(message);
+      expect(tab.screen(), name).toBe(screen);
+
+      await tab.anotherTabStores(OTHERS);
+
+      // No second socket, no second hello: the tab is who it was.
+      expect(tab.sockets, name).toHaveLength(1);
+      expect(tab.sockets[0].closedByPage, name).toBe(false);
+      expect(browser.identity.loadToken(), name).toBe(own);
+    }
+  });
+
+  it('a tab that holds no seat takes the stored token over: on the first screen, and on an invite link that asks for a name or leads nowhere', async () => {
+    const cases: { name: string; address: string; messages: ServerMessage[] }[] = [
+      { name: 'the first screen', address: 'http://game.test/', messages: [] },
+      { name: 'an invite link, asked for a name', address: `http://game.test/?g=${CODE}`, messages: [{ type: 'error', code: 'nameRequired', message: 'the server text' }] },
+      { name: 'an invite link to a game that has started', address: `http://game.test/?g=${CODE}`, messages: [{ type: 'error', code: 'gameAlreadyStarted', message: 'the server text' }] },
+    ];
+    for (const { name, address, messages } of cases) {
+      const browser = await browserAt(address);
+      const tab = await appOf(browser);
+      tab.welcome();
+      for (const message of messages) tab.sockets[0].serverSends(message);
+      expect(tab.screen(), name).toBe('home');
+
+      await tab.anotherTabStores(OTHERS);
+
+      expect(tab.sockets, name).toHaveLength(2);
+      expect(tab.sockets[0].closedByPage, name).toBe(true);
+      expect(tab.sockets[1].sent[0], name).toEqual({ type: 'hello', protocol: expect.any(Number), token: OTHERS });
+      expect(browser.identity.loadToken(), name).toBe(OTHERS);
+    }
+  });
+
+  it('the tab that waited on "could not be opened" is back on its seat after the repair: its next hello carries its own token, and it asks for its game', async () => {
+    const browser = await browserAt(`http://game.test/?g=${CODE}`);
+    const tab = await appOf(browser);
+    const own = tab.welcome();
+    tab.sockets[0].serverSends(game);
+    tab.sockets[0].serverSends(notLoaded);
+    await tab.anotherTabStores(OTHERS);
+    expect(tab.store.get().joinProblem).toBe('gameNotLoaded');
+
+    // What it says on that socket from now on is said as itself; the page's own rejoin went out after the welcome.
+    expect(tab.sockets[0].sent).toEqual([
+      { type: 'hello', protocol: expect.any(Number), token: own },
+      { type: 'joinGame', code: CODE, name: null },
+    ]);
+    // The game is there again: the tab is in it, and may still not change who it is.
+    tab.sockets[0].serverSends(game);
+    expect(tab.screen()).toBe('game');
+    await tab.anotherTabStores('e'.repeat(32));
+    expect(tab.sockets).toHaveLength(1);
+    expect(browser.identity.loadToken()).toBe(own);
+  });
+});
+
+/**
  * What server messages do to the address bar and to the remembered last
  * game. (What they do to the store is tested in shellMessages.test.ts, in
  * plain Node, where these two do not exist.)

@@ -16,8 +16,11 @@ export interface UnitDef {
    * One short line for players: what the unit is for. Shown in the unit
    * panel, in the city's list of things to build and in the tile information
    * about another player's unit. Plain words; no digits (the numbers are in
-   * the other columns and would go stale here); at most 45 characters, so
-   * that it is ONE line in a panel; ending with a full stop.
+   * the other columns and would go stale here); at most 42 characters, so
+   * that it is ONE line under an add button of the city panel, also where
+   * the browser shows a scroll bar (a table test holds the length, the
+   * end-to-end test looks at the lines; in a wider font the line takes a
+   * second one and is never cut); ending with a full stop.
    */
   description: string;
   unitClass: UnitClass;
@@ -43,7 +46,7 @@ export const UNIT_TYPE_IDS: readonly UnitTypeId[] = ['warrior', 'scout', 'settle
 
 export const UNITS: Record<UnitTypeId, UnitDef> = {
   warrior: {
-    name: 'Warrior', description: 'A foot soldier who guards and blocks the way.',
+    name: 'Warrior', description: 'A soldier who guards and blocks the way.',
     unitClass: 'military', moves: 2, sight: 2, cost: 18, populationCost: 0, canFoundCity: false, canImprove: false,
   },
   scout: {

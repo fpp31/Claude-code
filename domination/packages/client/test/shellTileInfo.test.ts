@@ -371,10 +371,10 @@ describe('describeTile: cities and units', () => {
     ]);
   });
 
-  it('a foreign unit: type, owner and the type\'s description ("Warrior of Ben (Egypt). A foot soldier who guards and blocks the way."); the line contains no digit; a foreign Worker reads the same whatever it is doing', () => {
+  it('a foreign unit: type, owner and the type\'s description ("Warrior of Ben (Egypt). A soldier who guards and blocks the way."); the line contains no digit; a foreign Worker reads the same whatever it is doing', () => {
     const view = sampleView();
     expect(describeTile(view, SAMPLE.foreignWarriorTile).lines).toEqual([
-      { kind: 'unit', text: 'Warrior of Ben (Egypt). A foot soldier who guards and blocks the way.', civ: 'egypt' },
+      { kind: 'unit', text: 'Warrior of Ben (Egypt). A soldier who guards and blocks the way.', civ: 'egypt' },
       { kind: 'yields', text: 'Yields 2 food, 1 production', civ: null },
       { kind: 'movement', text: 'Blocked: another player\'s unit or city is here', civ: null },
       { kind: 'owner', text: 'Belongs to nobody', civ: null },
@@ -405,7 +405,7 @@ describe('describeTile: cities and units', () => {
       seenTile(view, SAMPLE.thebesTile).owner = 'p9';
     });
     expect(lineOf(describeTile(stranger, SAMPLE.foreignWarriorTile), 'unit')).toEqual({
-      kind: 'unit', text: 'Warrior of another player. A foot soldier who guards and blocks the way.', civ: null,
+      kind: 'unit', text: 'Warrior of another player. A soldier who guards and blocks the way.', civ: null,
     });
     const thebes = describeTile(stranger, SAMPLE.thebesTile);
     expect(lineOf(thebes, 'city')).toEqual({ kind: 'city', text: 'Thebes, population 1: a city of another player', civ: null });
@@ -428,7 +428,7 @@ describe('describeTile: cities and units', () => {
       changed.players[1].name = '<b>Ben</b>';
     });
     expect(lineOf(describeTile(view, SAMPLE.foreignWarriorTile), 'unit').text).toBe(
-      'Warrior of <b>Ben</b> (Egypt). A foot soldier who guards and blocks the way.',
+      'Warrior of <b>Ben</b> (Egypt). A soldier who guards and blocks the way.',
     );
     expect(lineOf(describeTile(view, SAMPLE.thebesTile), 'city').text).toBe('Thebes, population 1: a city of <b>Ben</b> (Egypt)');
     expect(lineOf(describeTile(view, TILES.foreignLand), 'owner').text).toBe('Belongs to <b>Ben</b> (Egypt)');
@@ -505,14 +505,14 @@ describe('describeTile: improvements and work', () => {
     ]);
   });
 
-  it('the remembered mine: the "Out of sight" line, then "Mine (+2 production). A pit in the hills for more production." and "Yields 0 food, 4 production"', () => {
+  it('the remembered mine: the "Out of sight" line, then "Mine (+3 production). A pit in the hills for more production." and "Yields 0 food, 5 production"', () => {
     const info = describeTile(sampleView(), SAMPLE.rememberedMineTile);
     expect(info.knowledge).toBe('remembered');
     expect(info.title).toBe('Hills on Desert');
     expect(texts(info)).toEqual([
       'Out of sight: shown as you last saw it. Units are not shown.',
-      'Mine (+2 production). A pit in the hills for more production.',
-      'Yields 0 food, 4 production',
+      'Mine (+3 production). A pit in the hills for more production.',
+      'Yields 0 food, 5 production',
       'Costs 2 moves to enter',
       'Belongs to Ben (Egypt)',
     ]);
@@ -576,9 +576,9 @@ describe('describeTile: improvements and work', () => {
     expect(unitTileText(lost, unitIn(lost, SAMPLE.warriorId))).toBe('Tile: Unexplored.');
   });
 
-  it('improvementBonusText reads the table: "+1 food", "+2 production"', () => {
+  it('improvementBonusText reads the table: "+1 food", "+3 production"', () => {
     expect(improvementBonusText('farm')).toBe('+1 food');
-    expect(improvementBonusText('mine')).toBe('+2 production');
+    expect(improvementBonusText('mine')).toBe('+3 production');
 
     // Tuned numbers show at once: both yields, in the order food, production.
     const mine = IMPROVEMENTS.mine;
@@ -592,7 +592,7 @@ describe('describeTile: improvements and work', () => {
     } finally {
       mine.yields = original;
     }
-    expect(improvementBonusText('mine')).toBe('+2 production');
+    expect(improvementBonusText('mine')).toBe('+3 production');
   });
 
   it('the descriptions the lines quote are one line each and hold no digit', () => {

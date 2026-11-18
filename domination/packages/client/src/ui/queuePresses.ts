@@ -15,7 +15,8 @@
  * For this long after a press of a queue ROW button (up, down, remove) went
  * out, a press on the SAME button of the SAME row place is ignored (the
  * keyed guard of ui/pressGuard.ts). A double-click then removes one entry,
- * not two, and an arrow does not undo itself. A press on another row's
+ * not two, and an arrow does not undo itself. The time starts again when
+ * the change shows on the screen (createChangeWatch). A press on another row's
  * button, or on another button of the same row, counts at once. The same
  * time is the quiet time of the add buttons after a removal, and the time
  * "Empty the queue" takes a second press for the end of a double-click.
@@ -26,11 +27,13 @@ export const QUEUE_ROW_GUARD_MS = 600;
 export const CLEAR_ASKS_FOR_MS = 4000;
 
 /**
- * How long the rows of the queue keep their place after a removal when no
- * mouse rests on them (a finger, the keyboard): until nothing has been
- * pressed in the panel for this long.
+ * The longest the rows of the queue keep their place after a removal when
+ * no mouse rests on them (a finger, the keyboard): this long after the last
+ * press. Before that they are let go by a press outside the rows (see
+ * createRowHold). It was 1.5 s, which a thoughtful finger on a tablet
+ * outlasts between two taps on one x; the rows above then slid under it.
  */
-export const ROW_HOLD_MS = 1500;
+export const ROW_HOLD_MS = 8000;
 
 // ---------------------------------------------------------------------------
 // "Empty the queue" asks once
@@ -142,8 +145,13 @@ export function createQuietTime(quietMs: number, now: () => number = Date.now): 
  *  - a MOUSE rests on the queue after its click: for as long as it stays
  *    there. Time alone never lets go, because letting go moves the rows
  *    under a pointer that may be about to click again;
- *  - a finger or the keyboard has no "leave": until nothing has been
- *    pressed in the panel for ROW_HOLD_MS.
+ *  - a finger or the keyboard has no "leave": until a press lands OUTSIDE
+ *    the rows, and then only when that press has been handled, so that
+ *    nothing moves between its down and its up; or until ROW_HOLD_MS have
+ *    passed since the last press. Taps on the rows keep the hold, however
+ *    far apart they are.
+ * The panel also lets go at once when it shows another city or is hidden
+ * (release).
  */
 export interface RowHold {
   /**
@@ -152,8 +160,21 @@ export interface RowHold {
    * @param byMouse  the press came from a mouse, which now rests on the queue
    */
   begin(byMouse: boolean): void;
-  /** Something in the panel was pressed. While held, the time starts again, and `byMouse` says who holds from now on. */
-  pressed(byMouse: boolean): void;
+  /**
+   * Something was pressed (a pointer went down, or Enter or Space on a
+   * button). While held, the time starts again, and `byMouse` says who
+   * holds from now on.
+   *
+   * @param inRows  the press landed on the rows of the queue. One that did
+   *                not ends the hold when it has been handled (pressHandled)
+   */
+  pressed(byMouse: boolean, inRows: boolean): void;
+  /**
+   * The press reported last has been handled: its click has run. Lets go
+   * if that press landed outside the rows. (A press that never gets this
+   * far, because the browser took it for scrolling, lets nothing go.)
+   */
+  pressHandled(): void;
   /** The mouse has moved to a place outside the queue. Lets go if a mouse was holding. */
   mouseLeft(): void;
   /** Is the panel still held? */
@@ -173,6 +194,8 @@ export function createRowHold(now: () => number = Date.now): RowHold {
   let held = false;
   let mouseRests = false;
   let lastPressAt = 0;
+  /** The press reported last landed outside the rows: the hold ends when it has been handled. */
+  let leaving = false;
 
   function holds(): boolean {
     if (held && !mouseRests && now() - lastPressAt >= ROW_HOLD_MS) held = false;
@@ -184,11 +207,17 @@ export function createRowHold(now: () => number = Date.now): RowHold {
       held = true;
       mouseRests = byMouse;
       lastPressAt = now();
+      leaving = false;
     },
-    pressed(byMouse) {
+    pressed(byMouse, inRows) {
       if (!holds()) return;
       mouseRests = byMouse;
       lastPressAt = now();
+      leaving = !inRows;
+    },
+    pressHandled() {
+      if (leaving) held = false;
+      leaving = false;
     },
     mouseLeft() {
       if (mouseRests) held = false;
@@ -200,6 +229,50 @@ export function createRowHold(now: () => number = Date.now): RowHold {
     },
     release() {
       held = false;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Has the change a press asked for shown on the screen?
+// ---------------------------------------------------------------------------
+
+/**
+ * Nothing on the page changes at a press: the queue changes when the
+ * server's view comes back. This object tells the city panel the moment a
+ * press on a row button has SHOWN, so that the row guard's time can start
+ * again there (KeyedPressGuard.changeShown in ui/pressGuard.ts). A queue is
+ * named by a string (the city and its entries), as for createAskOnce.
+ */
+export interface ChangeWatch {
+  /** A press that changes the queue has gone out. `queue`: the queue as it was on the screen then. */
+  sent(queue: string): void;
+  /**
+   * The panel prints `queue`. True exactly once: the first time the queue
+   * is no longer the one the press was made on. When every answer is in
+   * (`busy` false) and the queue is still the same, the press was refused
+   * or changed nothing, and is forgotten: a later change is not its change.
+   */
+  shown(queue: string, busy: boolean): boolean;
+  /** Forgets the press: the panel shows another city, or is hidden. */
+  forget(): void;
+}
+
+export function createChangeWatch(): ChangeWatch {
+  /** The queue the last press was made on; null: no press is waiting to show. */
+  let pressedOn: string | null = null;
+  return {
+    sent(queue) {
+      pressedOn = queue;
+    },
+    shown(queue, busy) {
+      if (pressedOn === null) return false;
+      const changed = queue !== pressedOn;
+      if (changed || !busy) pressedOn = null;
+      return changed;
+    },
+    forget() {
+      pressedOn = null;
     },
   };
 }

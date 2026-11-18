@@ -61,7 +61,9 @@ const REJOIN_REFUSALS: readonly string[] = ['noSuchGame', 'gameNotLoaded', 'name
  *                  the new view.
  *  presence        game.connected = message.connected.
  *  actionOk        busy = false.
- *  actionRejected  busy = false; error toast with error.message.
+ *  actionRejected  busy = false; refusals + 1 (an End Turn that waited
+ *                  for this answer is dropped, see Controller.toggleEndTurn);
+ *                  error toast with error.message.
  *  left            lobby = null, game = null, the map's four = null,
  *                  joining = null, joinProblem = null, busy = false;
  *                  remove ?g= from the address bar. If a lobby was on
@@ -72,8 +74,8 @@ const REJOIN_REFUSALS: readonly string[] = ['noSuchGame', 'gameNotLoaded', 'name
  *                  nothing; the page asks to be let back in (`joinGame`,
  *                  name null) and says why in a toast. See "left during a
  *                  game" below.
- *  error           busy = false, joining = null; error toast with the
- *                  message, except:
+ *  error           busy = false, refusals + 1, joining = null; error
+ *                  toast with the message, except:
  *                  'protocolMismatch': reloadPageOnce(); if it returns false
  *                  (already reloaded once) set fatalMessage instead;
  *                  'noSuchGame' also clears ?g= so the home screen shows,
@@ -207,7 +209,7 @@ export function handleServerMessage(store: Store, message: ServerMessage, send: 
     }
 
     case 'actionRejected': {
-      store.set({ busy: false, toasts: toastsWith(store, [{ text: message.error.message, kind: 'error' }]) });
+      store.set({ busy: false, refusals: state.refusals + 1, toasts: toastsWith(store, [{ text: message.error.message, kind: 'error' }]) });
       return;
     }
 
@@ -244,7 +246,13 @@ export function handleServerMessage(store: Store, message: ServerMessage, send: 
       let toasts = state.toasts;
       if (message.code !== 'nameRequired') toasts = toastsWith(store, [{ text: message.message, kind: 'error' }]);
       else if (lostCode !== null) toasts = toastsWith(store, [{ text: NO_LONGER_IN_GAME_MESSAGE, kind: 'error' }]);
-      const changes: Partial<AppState> = { busy: false, joining: null, joinProblem: joinProblemAfter(state.joinProblem, message.code), toasts };
+      const changes: Partial<AppState> = {
+        busy: false,
+        refusals: state.refusals + 1,
+        joining: null,
+        joinProblem: joinProblemAfter(state.joinProblem, message.code),
+        toasts,
+      };
       if (lostCode !== null) Object.assign(changes, { lobby: null, game: null, ...NOTHING_ON_THE_MAP });
       store.set(changes);
       // The address is cleared AFTER the store change, on purpose. If that
@@ -328,6 +336,11 @@ interface NewsLine {
  * rule of toastsWith, that a sentence already on screen is replaced, is
  * about OTHER messages: a refusal repeated, the same news a turn later.
  *
+ * News of its turn. Every line carries the turn of the view it came with
+ * (Toast.turn), and toastsWith takes the news of earlier turns away when a
+ * later turn's arrives: a turn's news is on screen with that turn's own
+ * line only.
+ *
  * Folded when it is too much. The list holds MAX_TOASTS lines and a turn's
  * news comes cities first, in founding order; cutting the oldest used to
  * cut the capital's. When one message brings more lines than the list
@@ -335,7 +348,8 @@ interface NewsLine {
  * something ("... has nothing left to build."), which is the first place
  * that tells the player about an idle city; then the other lines in the
  * message's order, as many as still fit beside one last line that stands
- * for everything left out (foldedNewsText).
+ * for everything left out and says how many things that were
+ * (foldedNewsText).
  */
 function eventToasts(events: GameEvent[], view: PlayerView): NewToast[] {
   const lines: NewsLine[] = [];
@@ -358,10 +372,12 @@ function eventToasts(events: GameEvent[], view: PlayerView): NewToast[] {
     });
   }
 
+  // Every line is news of the turn the view is in now (see Toast.turn).
+  const turn = view.turn;
   const toast = (line: NewsLine): NewToast => {
     const event = line.event;
     const text = line.count > 1 && event.type === 'improvementBuilt' ? improvementsFinishedText(line.count, event.improvement, event.cityName) : line.text;
-    return line.slot === undefined ? { text, kind: 'info' } : { text, kind: 'info', slot: line.slot };
+    return line.slot === undefined ? { text, kind: 'info', turn } : { text, kind: 'info', slot: line.slot, turn };
   };
   if (lines.length <= MAX_TOASTS) return lines.map(toast);
 
@@ -371,9 +387,11 @@ function eventToasts(events: GameEvent[], view: PlayerView): NewToast[] {
   const room = Math.max(0, MAX_TOASTS - last.length - 1);
   const kept = new Set([...others.filter((line) => line.asks), ...others.filter((line) => !line.asks)].slice(0, room));
   const folded = others.filter((line) => !kept.has(line));
+  // The last line counts what happened, not the lines: "3 Farms were finished near Rome." stands for three things.
+  const happened = (some: NewsLine[]): number => some.reduce((sum, line) => sum + line.count, 0);
   return [
     ...others.filter((line) => kept.has(line)).map(toast),
-    { text: foldedNewsText(folded.length, folded.filter((line) => line.asks).length), kind: 'info' },
+    { text: foldedNewsText(happened(folded), happened(folded.filter((line) => line.asks))), kind: 'info', turn },
     ...last.map(toast),
   ];
 }
@@ -392,15 +410,16 @@ export function improvementsFinishedText(count: number, improvement: Improvement
 }
 
 /**
- * The last line of a turn's news that did not fit into the list: "And 3
- * more pieces of news." `count` is the number of lines it stands for (2 or
- * more), `asking` how many of them said that a city has nothing left to
+ * The last line of a turn's news that did not fit into the list: "And 4
+ * more pieces of news." `count` is the number of things that happened and
+ * are not on screen (three farms that would have been one line count as
+ * three), `asking` how many of them said that a city has nothing left to
  * build. Those are folded only when more cities ran empty in one turn than
  * the list has room for, and then the line says so: the End Turn hint and
  * the gold sign on the map name the cities.
  */
 export function foldedNewsText(count: number, asking: number): string {
-  const more = `And ${count} more pieces of news`;
+  const more = `And ${count} more ${count === 1 ? 'piece' : 'pieces'} of news`;
   if (asking === 0) return `${more}.`;
   return `${more}: ${asking} more ${asking === 1 ? 'city has' : 'cities have'} nothing left to build.`;
 }

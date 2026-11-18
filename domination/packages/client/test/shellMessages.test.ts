@@ -188,6 +188,26 @@ describe('handleServerMessage (WP4)', () => {
     expect(store.get().toasts.map((toast) => [toast.kind, toast.text])).toEqual([['error', message]]);
   });
 
+  it('every "no" of the server is counted (refusals): an actionRejected and a plain error, never an actionOk or a new view', () => {
+    const store = storeInGame({ busy: true });
+    expect(store.get().refusals).toBe(0);
+    deliver(store, { type: 'actionOk', requestId: 1 });
+    deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 8 }, events: [{ type: 'turnStarted', turn: 8 }] });
+    deliver(store, { type: 'presence', connected: [SAMPLE.me] });
+    expect(store.get().refusals).toBe(0);
+
+    deliver(store, { type: 'actionRejected', requestId: 2, error: { code: 'blocked', message: RULE_ERROR_MESSAGES.blocked } });
+    expect(store.get().refusals).toBe(1);
+    deliver(store, { type: 'error', code: 'serverError', message: SERVER_ERROR_MESSAGE });
+    expect(store.get().refusals).toBe(2);
+    // Also one that shows no message of its own.
+    deliver(store, { type: 'error', code: 'rateLimited', message: 'Slow down.' });
+    expect(store.get().refusals).toBe(3);
+    // A full view after a reconnect does not set the count back: a press that waited across it must still see the difference.
+    deliver(store, gameSync(20));
+    expect(store.get().refusals).toBe(3);
+  });
+
   it('error clears busy and joining and adds a toast; nameRequired adds no toast', () => {
     const store = storeInGame({ busy: true, joining: SAMPLE.code });
     deliver(store, { type: 'error', code: 'serverError', message: SERVER_ERROR_MESSAGE });
@@ -551,28 +571,91 @@ describe('handleServerMessage (WP4)', () => {
     ]);
   });
 
-  it('"Turn N has begun." never piles up: the newest takes the place of the one before, other news stays', () => {
+  it('"Turn N has begun." never piles up: the newest takes the place of the one before, and the news that came with an earlier turn goes with it', () => {
     const store = storeInGame();
     const grew: GameEvent = { type: 'cityGrew', playerId: 'p1', cityId: SAMPLE.romeId, name: 'Rome', population: 3 };
     deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 8 }, events: [grew, { type: 'turnStarted', turn: 8 }] });
+    const firstId = store.get().toasts[0].id;
     deliver(store, { type: 'gameUpdate', seq: 7, patch: { turn: 9 }, events: [{ type: 'turnStarted', turn: 9 }] });
-    expect(store.get().toasts.map((toast) => toast.text)).toEqual(['Rome grew to 3.', 'Turn 9 has begun.']);
+    // Rome grew when turn 8 began. Under "Turn 9 has begun." it would read as news of turn 9.
+    expect(store.get().toasts.map((toast) => toast.text)).toEqual(['Turn 9 has begun.']);
 
     // The same through a full view (after a reconnect, or with patches switched off).
     const view = sampleView();
     view.turn = 10;
     deliver(store, gameSync(20, { view, events: [{ type: 'turnStarted', turn: 10 }] }));
     const toasts = store.get().toasts;
-    expect(toasts.map((toast) => toast.text)).toEqual(['Rome grew to 3.', 'Turn 10 has begun.']);
+    expect(toasts.map((toast) => toast.text)).toEqual(['Turn 10 has begun.']);
     // It is a new toast each time (its four seconds start again), in the slot the turn news shares.
-    expect(toasts[1].id).toBeGreaterThan(toasts[0].id + 2);
-    expect(toasts.map((toast) => toast.slot)).toEqual([undefined, TURN_TOAST_SLOT]);
+    expect(toasts[0].id).toBeGreaterThan(firstId + 2);
+    expect(toasts.map((toast) => toast.slot)).toEqual([TURN_TOAST_SLOT]);
 
     // Ten turns in a row, as in a game played alone with Enter held down: still one.
     for (let turn = 11; turn <= 20; turn++) {
       deliver(store, { type: 'gameUpdate', seq: 10 + turn, patch: { turn }, events: [{ type: 'turnStarted', turn }] });
     }
     expect(store.get().toasts.filter((toast) => toast.text.includes('has begun')).map((toast) => toast.text)).toEqual(['Turn 20 has begun.']);
+  });
+
+  describe('news of an earlier turn goes when the news of a new turn arrives', () => {
+    const farm = (tile: number): GameEvent => ({ type: 'improvementBuilt', playerId: 'p1', unitId: SAMPLE.workerId, improvement: 'farm', tile, cityName: 'Rome' });
+    const texts = (store: Store): string[] => store.get().toasts.map((toast) => toast.text);
+
+    it('a farm finished at turn 11, then turn 12 begins within the four seconds: only turn 12\'s lines are shown', () => {
+      const store = storeInGame();
+      deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 11 }, events: [farm(10), { type: 'turnStarted', turn: 11 }] });
+      expect(texts(store)).toEqual(['Your Worker finished a Farm near Rome.', 'Turn 11 has begun.']);
+
+      // Nothing was finished in turn 11 (no toast has timed out yet: nothing in this test lets time pass).
+      deliver(store, { type: 'gameUpdate', seq: 7, patch: { turn: 12 }, events: [{ type: 'turnStarted', turn: 12 }] });
+      expect(texts(store)).toEqual(['Turn 12 has begun.']);
+
+      // A turn with news of its own shows that news, and none of the turn before.
+      const grew: GameEvent = { type: 'cityGrew', playerId: 'p1', cityId: SAMPLE.romeId, name: 'Rome', population: 4 };
+      deliver(store, { type: 'gameUpdate', seq: 8, patch: { turn: 13 }, events: [grew, { type: 'turnStarted', turn: 13 }] });
+      expect(texts(store)).toEqual(['Rome grew to 4.', 'Turn 13 has begun.']);
+    });
+
+    it('a message that answers a press of the player is not touched: a refusal stays, and so does every message that is not news of the game', () => {
+      const store = storeInGame();
+      deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 11 }, events: [farm(10), { type: 'turnStarted', turn: 11 }] });
+      deliver(store, { type: 'actionRejected', requestId: 1, error: { code: 'staleTurn', message: RULE_ERROR_MESSAGES.staleTurn } });
+      showToast(store, 'a message of the page itself', 'info');
+
+      deliver(store, { type: 'gameUpdate', seq: 7, patch: { turn: 12 }, events: [{ type: 'turnStarted', turn: 12 }] });
+
+      expect(store.get().toasts.map((toast) => [toast.kind, toast.text])).toEqual([
+        ['error', RULE_ERROR_MESSAGES.staleTurn],
+        ['info', 'a message of the page itself'],
+        ['info', 'Turn 12 has begun.'],
+      ]);
+    });
+
+    it('news of the SAME turn stays: what the player\'s own orders bring during a turn is added to that turn\'s lines, and goes when the next turn begins', () => {
+      const store = storeInGame();
+      deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 11 }, events: [farm(10), { type: 'turnStarted', turn: 11 }] });
+      const founded: GameEvent = { type: 'cityFounded', playerId: 'p1', cityId: 'c1_new', name: 'Ostia', tile: 5 };
+      deliver(store, { type: 'gameUpdate', seq: 7, patch: {}, events: [founded] });
+      expect(texts(store)).toEqual(['Your Worker finished a Farm near Rome.', 'Turn 11 has begun.', 'You founded Ostia.']);
+
+      deliver(store, { type: 'gameUpdate', seq: 8, patch: { turn: 12 }, events: [farm(11), { type: 'turnStarted', turn: 12 }] });
+      expect(texts(store)).toEqual(['Your Worker finished a Farm near Rome.', 'Turn 12 has begun.']);
+      // The farm's line is the new turn's (a new toast), not the old one left standing.
+      expect(store.get().toasts.every((toast) => toast.turn === 12)).toBe(true);
+    });
+
+    it('toastsWith: a toast of a turn takes the place of every toast of an earlier turn, and of no other', () => {
+      const store = createStore(initialState(''));
+      store.set({ toasts: toastsWith(store, [{ text: 'news of 3', kind: 'info', turn: 3 }, { text: 'plain', kind: 'info' }, { text: 'news of 4', kind: 'info', turn: 4 }]) });
+      expect(texts(store)).toEqual(['plain', 'news of 4']);
+      store.set({ toasts: toastsWith(store, [{ text: 'more of 4', kind: 'info', turn: 4 }]) });
+      expect(texts(store)).toEqual(['plain', 'news of 4', 'more of 4']);
+      // News that arrives late for an older turn (it cannot, but the rule must not eat newer lines for it) removes nothing.
+      store.set({ toasts: toastsWith(store, [{ text: 'late of 2', kind: 'info', turn: 2 }]) });
+      expect(texts(store)).toEqual(['plain', 'news of 4', 'more of 4', 'late of 2']);
+      store.set({ toasts: toastsWith(store, [{ text: 'news of 5', kind: 'info', turn: 5 }]) });
+      expect(texts(store)).toEqual(['plain', 'news of 5']);
+    });
   });
 
   describe('the news of one message: counted, and folded when it is more than the list holds', () => {
@@ -643,7 +726,8 @@ describe('handleServerMessage (WP4)', () => {
         'Rome grew to 4.',
         'Scout completed in Rome. Rome has nothing left to build.',
         'Worker completed in Ostia.',
-        'And 2 more pieces of news.',
+        // Two lines were left out, and they stand for FOUR things that happened: three farms and a mine.
+        'And 4 more pieces of news.',
         'Turn 31 has begun.',
       ]);
       // One line fewer and nothing is folded: the count is on screen.
@@ -688,6 +772,23 @@ describe('handleServerMessage (WP4)', () => {
       ]);
       expect(foldedNewsText(4, 0)).toBe('And 4 more pieces of news.');
       expect(foldedNewsText(2, 1)).toBe('And 2 more pieces of news: 1 more city has nothing left to build.');
+    });
+
+    it('the last line counts what happened, not the lines left out: farms that were counted into one line count each; one thing is "1 more piece of news"', () => {
+      // Seven lines for a list of five; the three left out are five farms near Pisa (one line), a mine and a city that grew.
+      const events: GameEvent[] = [
+        grew('Rome', 2),
+        grew('Ostia', 2),
+        grew('Capua', 2),
+        ...[10, 11, 12, 13, 14].map((tile) => built('farm', 'Pisa', tile)),
+        built('mine', 'Pisa', 15),
+        grew('Ravenna', 2),
+        { type: 'turnStarted', turn: 31 },
+      ];
+      expect(newsOf(events)).toEqual(['Rome grew to 2.', 'Ostia grew to 2.', 'Capua grew to 2.', 'And 7 more pieces of news.', 'Turn 31 has begun.']);
+      // The words for one thing (no message of today's rules folds a single line, but the sentence must be right if one does).
+      expect(foldedNewsText(1, 0)).toBe('And 1 more piece of news.');
+      expect(foldedNewsText(1, 1)).toBe('And 1 more piece of news: 1 more city has nothing left to build.');
     });
 
     it('news that was on screen before makes room, oldest first; the new message is folded by its own size only', () => {

@@ -18,6 +18,7 @@ import {
   CLEAR_ASKS_FOR_MS,
   QUEUE_ROW_GUARD_MS,
   createAskOnce,
+  createChangeWatch,
   createQuietTime,
   createRowHold,
   placeCorrection,
@@ -112,17 +113,25 @@ interface ScreenBox {
  *    have come up under the finger that selected the city.
  *  - Row buttons: a press is ignored only within QUEUE_ROW_GUARD_MS of a
  *    press on the SAME button of the SAME row place (a double-click: the
- *    entry that slid under the pointer is safe). A press on another row's
- *    button counts at once, so "up on row 6, row 5, row 4" carries one
- *    entry to the top at any pace.
+ *    entry that slid under the pointer is safe). That time starts again
+ *    when the change shows on the screen (createChangeWatch): on a slow
+ *    link the next entry is under the pointer only then. A press on
+ *    another row's button counts at once, so "up on row 6, row 5, row 4"
+ *    carries one entry to the top at any pace.
+ *    While an answer is on its way a row press is ignored (the rows on the
+ *    screen are one answer behind), so an entry cannot be walked up faster
+ *    than the link answers.
  *  - AFTER A REMOVAL THE ROWS ABOVE STAY WHERE THEY ARE, so that the entry
  *    that followed comes under the pointer, as in any list. The panel is
  *    fixed at its bottom edge and would shrink at its top (or, scrolled to
  *    its end, slide its content down). It keeps its height instead, with a
  *    spacer where the removed row was, and lets go when the mouse has left
- *    the queue, or, for a finger and the keyboard, when nothing has been
- *    pressed in the panel for ROW_HOLD_MS (createRowHold). A removal that
- *    empties the queue holds nothing: no row is left that could slide.
+ *    the queue, or, for a finger and the keyboard, when a press has landed
+ *    outside the rows and has been handled (so that nothing moves between
+ *    its down and its up), and at the latest ROW_HOLD_MS after the last
+ *    press (createRowHold). Taps on one x two seconds apart therefore take
+ *    neighbours, as quick ones do. A removal that empties the queue holds
+ *    nothing: no row is left that could slide.
  *  - After a removal (one entry, or "Empty the queue") the add buttons and
  *    "Empty the queue" ignore presses for the same 0.6 s: in a panel that
  *    is scrolled, one of them has moved to where the pressed button was.
@@ -196,6 +205,14 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
   const queueList = h('div', { className: 'queue-list', testId: TEST_IDS.cityQueue });
   const queueRows: QueueRow[] = [];
   const rowGuard = createKeyedPressGuard(QUEUE_ROW_GUARD_MS);
+  /** Tells when the change a press on a row button asked for has shown: the row guard's time starts again then. */
+  const rowPressWatch = createChangeWatch();
+
+  /** Notes a press on a row button that went out, and hands `sent` on. */
+  function rowPressWentOut(sent: boolean): boolean {
+    if (sent) rowPressWatch.sent(queueKey(store.get()));
+    return sent;
+  }
 
   // ---- After a removal ----
   /** The add buttons and "Empty the queue" keep quiet while this runs (see "A SECOND PRESS ON THE SAME SPOT"). */
@@ -221,13 +238,13 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
       className: 'button queue-button queue-up',
       testId: TEST_IDS.queueUp + index,
       attributes: { 'aria-label': 'Move up', title: 'Move up' },
-      onClick: () => rowGuard.press(`up:${index}`, () => controller.moveInQueue(index, -1)),
+      onClick: () => rowGuard.press(`up:${index}`, () => rowPressWentOut(controller.moveInQueue(index, -1))),
     });
     const down = h('button', {
       className: 'button queue-button queue-down',
       testId: TEST_IDS.queueDown + index,
       attributes: { 'aria-label': 'Move down', title: 'Move down' },
-      onClick: () => rowGuard.press(`down:${index}`, () => controller.moveInQueue(index, 1)),
+      onClick: () => rowGuard.press(`down:${index}`, () => rowPressWentOut(controller.moveInQueue(index, 1))),
     });
     // Removing the first row stops what the city is building; say that it costs nothing.
     const removeWords = index === 0 ? 'Stop building this (what the city has saved is kept)' : 'Remove from the queue';
@@ -236,7 +253,7 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
       text: '×', // the multiplication sign, like the close button
       testId: TEST_IDS.queueRemove + index,
       attributes: { 'aria-label': removeWords, title: removeWords },
-      onClick: () => rowGuard.press(`remove:${index}`, () => removalWentOut(controller.removeFromQueue(index))),
+      onClick: () => rowGuard.press(`remove:${index}`, () => rowPressWentOut(removalWentOut(controller.removeFromQueue(index)))),
     });
     const row = h(
       'div',
@@ -372,9 +389,15 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
   const rowHold = createRowHold();
   /** How tall the spacer is, in CSS pixels. */
   let spacerHeight = 0;
-  /** Where the queue was on the screen when the hold began: a mouse that moves out of this box has left the queue. */
+  /**
+   * Where the queue was on the screen when the hold began: a mouse that
+   * moves out of this box has left the queue, and a finger that goes down
+   * outside it has pressed outside the rows.
+   */
   let holdArea: ScreenBox | null = null;
   let holdTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The press that is going on while the rows are held went down inside this panel: it is handled when its click has run. */
+  let pressInPanel = false;
 
   function setSpacer(height: number): void {
     spacerHeight = height;
@@ -391,7 +414,7 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
       if (wait !== null) holdTimer = setTimeout(letGoWhenOver, wait);
       return;
     }
-    if (holdArea !== null) document.removeEventListener('pointermove', onPointerMoveWhileHeld);
+    if (holdArea !== null) stopWatchingThePage();
     holdArea = null;
     if (lookAgain !== null && lookAgain.part === 'rows') lookAgain = null; // nothing is held in place any more
     if (spacerHeight === 0) return;
@@ -403,25 +426,79 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
     if (addListWas !== null) putBack('addList', addListWas);
   }
 
-  /** Only listening while the panel is held: has the mouse left the queue? */
+  /** Is this point of the screen inside the box the queue had when the hold began? */
+  function inHoldArea(x: number, y: number): boolean {
+    return holdArea !== null && x >= holdArea.left && x <= holdArea.right && y >= holdArea.top && y <= holdArea.bottom;
+  }
+
+  // The five listeners below are on the whole page, and only while the rows
+  // are held (startWatchingThePage, stopWatchingThePage): the hold ends by
+  // what happens outside the rows.
+
+  /** Has the mouse left the queue? */
   function onPointerMoveWhileHeld(event: PointerEvent): void {
-    if (event.pointerType !== 'mouse' || holdArea === null) return;
-    const inside =
-      event.clientX >= holdArea.left && event.clientX <= holdArea.right && event.clientY >= holdArea.top && event.clientY <= holdArea.bottom;
-    if (inside) return;
+    if (event.pointerType !== 'mouse' || holdArea === null || inHoldArea(event.clientX, event.clientY)) return;
     rowHold.mouseLeft();
     letGoWhenOver();
   }
 
-  /** A press anywhere in the panel: who pressed, and, while the panel is held, the hold's time starts again. */
-  function onPress(byMouse: boolean): void {
-    lastPressByMouse = byMouse;
-    rowHold.pressed(byMouse);
-    if (holdArea !== null) letGoWhenOver();
+  /** A pointer went down somewhere on the page: on the rows, or outside them? The hold's time starts again. */
+  function onPointerDownWhileHeld(event: PointerEvent): void {
+    rowHold.pressed(event.pointerType === 'mouse', inHoldArea(event.clientX, event.clientY));
+    pressInPanel = event.target instanceof Node && panel.contains(event.target);
+    letGoWhenOver();
   }
-  panel.addEventListener('pointerdown', (event) => onPress(event.pointerType === 'mouse'), true);
+
+  /** Enter or Space on a button is a press too: on a button of the rows, or of something else? */
+  function onKeyDownWhileHeld(event: KeyboardEvent): void {
+    if ((event.key !== 'Enter' && event.key !== ' ') || !(event.target instanceof HTMLButtonElement)) return;
+    rowHold.pressed(false, queueList.contains(event.target));
+    pressInPanel = true; // a key's press is handled when its click has run, wherever the button stands
+    letGoWhenOver();
+  }
+
+  /**
+   * A click has run through the page: the press that made it is handled.
+   * (This listener is on the document, so every button's own handler has
+   * run before it.) Only now may the rows move.
+   */
+  function onClickWhileHeld(): void {
+    rowHold.pressHandled();
+    letGoWhenOver();
+  }
+
+  /**
+   * A pointer is up. A press that went down outside this panel is handled
+   * by now: the map takes its taps at this very event, and gets no click
+   * from a finger. A press inside the panel waits for its click, so that no
+   * button of the panel moves between a finger's down and its click.
+   */
+  function onPointerUpWhileHeld(): void {
+    if (!pressInPanel) onClickWhileHeld();
+  }
+
+  function startWatchingThePage(): void {
+    document.addEventListener('pointermove', onPointerMoveWhileHeld);
+    document.addEventListener('pointerdown', onPointerDownWhileHeld, true);
+    document.addEventListener('keydown', onKeyDownWhileHeld, true);
+    document.addEventListener('click', onClickWhileHeld);
+    document.addEventListener('pointerup', onPointerUpWhileHeld);
+  }
+
+  function stopWatchingThePage(): void {
+    document.removeEventListener('pointermove', onPointerMoveWhileHeld);
+    document.removeEventListener('pointerdown', onPointerDownWhileHeld, true);
+    document.removeEventListener('keydown', onKeyDownWhileHeld, true);
+    document.removeEventListener('click', onClickWhileHeld);
+    document.removeEventListener('pointerup', onPointerUpWhileHeld);
+  }
+
+  // Who pressed last in this panel: a mouse, which then rests on the queue, or a finger or the keyboard?
+  panel.addEventListener('pointerdown', (event) => {
+    lastPressByMouse = event.pointerType === 'mouse';
+  }, true);
   panel.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' || event.key === ' ') onPress(false);
+    if (event.key === 'Enter' || event.key === ' ') lastPressByMouse = false;
   }, true);
 
   // ---- Keeping a part of the panel in its place on the screen ----
@@ -465,6 +542,7 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
   function forgetSubject(): void {
     sentAdd = null;
     sentRemoval = null;
+    rowPressWatch.forget();
     stopAskingToClear();
     stopAddedNote();
     rowHold.release();
@@ -526,6 +604,8 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
       queueList.append(made.row);
     }
     const last = length - 1;
+    // The change a press on a row button asked for shows now: that button's guard time starts again (see "Row buttons").
+    if (rowPressWatch.shown(queueKey(state), state.busy)) rowGuard.changeShown();
     // The keyboard focus is on a button of a row that is about to go (see "KEYBOARD").
     const focused = document.activeElement;
     const focusGoes = queueRows.some((parts, index) => index > last && !parts.row.hidden && parts.row.contains(focused));
@@ -610,7 +690,7 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
       } else {
         if (!rowHold.holds()) {
           holdArea = { left: before.rows.left, top: before.rows.top, right: before.rows.right, bottom: before.rows.bottom };
-          document.addEventListener('pointermove', onPointerMoveWhileHeld);
+          startWatchingThePage();
         }
         rowHold.begin(lastPressByMouse);
         letGoWhenOver(); // (starts the timer of a hold by time)

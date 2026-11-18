@@ -4,6 +4,7 @@ import {
   QUEUE_ROW_GUARD_MS,
   ROW_HOLD_MS,
   createAskOnce,
+  createChangeWatch,
   createQuietTime,
   createRowHold,
   placeCorrection,
@@ -142,7 +143,8 @@ describe('the rows keep their place after a removal (createRowHold)', () => {
     const hold = createRowHold(now);
     expect(hold.holds()).toBe(false);
     expect(hold.checkIn()).toBeNull();
-    hold.pressed(false); // a press without a removal starts nothing
+    hold.pressed(false, true); // a press without a removal starts nothing
+    hold.pressHandled();
     hold.mouseLeft();
     expect(hold.holds()).toBe(false);
 
@@ -152,27 +154,80 @@ describe('the rows keep their place after a removal (createRowHold)', () => {
     expect(hold.holds()).toBe(false);
   });
 
-  it('a finger: held until nothing was pressed in the panel for 1.5 s', () => {
+  it('a finger: taps on the rows keep the hold, however far apart; it is not let go by time between taps of a thoughtful finger', () => {
     const { clock, now } = clockAt();
     const hold = createRowHold(now);
-    expect(ROW_HOLD_MS).toBe(1500);
+    hold.begin(false);
+    // Taps on one x, 1.8 s and 2.5 s apart (1.5 s used to be the limit): each removal shows and begins again.
+    for (const gap of [1800, 2500, 1800, 5000]) {
+      clock.now += gap;
+      expect(hold.holds(), `${gap} ms after the last tap`).toBe(true);
+      hold.pressed(false, true);
+      hold.pressHandled(); // a press on the rows that has been handled lets nothing go
+      expect(hold.holds()).toBe(true);
+      hold.begin(false);
+    }
+  });
+
+  it('a finger: a press that lands outside the rows lets go, but only when that press has been handled', () => {
+    const { clock, now } = clockAt();
+    const hold = createRowHold(now);
+    hold.begin(false);
+    clock.now += 900;
+    hold.pressed(false, false); // the finger goes down on an add button
+    // Between its down and its up nothing may move: still held.
+    expect(hold.holds()).toBe(true);
+    clock.now += 80;
+    expect(hold.holds()).toBe(true);
+    hold.pressHandled(); // the add button has taken its click
+    expect(hold.holds()).toBe(false);
+    expect(hold.checkIn()).toBeNull();
+
+    // Over is over: a press afterwards does not bring the hold back.
+    hold.pressed(false, true);
+    expect(hold.holds()).toBe(false);
+  });
+
+  it('a press outside the rows that turns out to be no press (the browser took it for scrolling) lets nothing go: the next press decides', () => {
+    const { now } = clockAt();
+    const hold = createRowHold(now);
+    hold.begin(false);
+    hold.pressed(false, false); // a finger goes down beside the rows...
+    hold.pressed(false, true); // ...nothing was handled; the next press is on a row's x
+    hold.pressHandled();
+    expect(hold.holds()).toBe(true);
+  });
+
+  it('a finger: 8 s after the last press the rows are let go by time alone', () => {
+    const { clock, now } = clockAt();
+    const hold = createRowHold(now);
+    expect(ROW_HOLD_MS).toBe(8000);
 
     hold.begin(false);
     expect(hold.checkIn()).toBe(ROW_HOLD_MS);
-    clock.now += 900;
+    clock.now += 3000;
     expect(hold.holds()).toBe(true);
-    expect(hold.checkIn()).toBe(600);
-    hold.pressed(false); // the next tap, 0.9 s later: the time starts again
-    clock.now += 900;
-    hold.pressed(false);
+    expect(hold.checkIn()).toBe(ROW_HOLD_MS - 3000);
+    hold.pressed(false, true); // a tap on the rows: the time starts again
+    expect(hold.checkIn()).toBe(ROW_HOLD_MS);
     clock.now += ROW_HOLD_MS - 1;
     expect(hold.holds()).toBe(true);
     clock.now += 1;
     expect(hold.holds()).toBe(false);
     expect(hold.checkIn()).toBeNull();
+  });
 
-    // Over is over: a press afterwards does not bring the hold back.
-    hold.pressed(false);
+  it('the keyboard is held like a finger: Enter on a row\'s button keeps the hold, Enter on a button outside the rows ends it once it is handled', () => {
+    const { clock, now } = clockAt();
+    const hold = createRowHold(now);
+    hold.begin(false);
+    clock.now += 2000;
+    hold.pressed(false, true);
+    hold.pressHandled();
+    expect(hold.holds()).toBe(true);
+    clock.now += 2000;
+    hold.pressed(false, false);
+    hold.pressHandled();
     expect(hold.holds()).toBe(false);
   });
 
@@ -181,6 +236,11 @@ describe('the rows keep their place after a removal (createRowHold)', () => {
     const hold = createRowHold(now);
     hold.begin(true);
     expect(hold.checkIn()).toBeNull(); // no timer: time alone never lets go under a resting mouse
+    clock.now += 60_000;
+    expect(hold.holds()).toBe(true);
+    // Clicks on the rows change nothing about that.
+    hold.pressed(true, true);
+    hold.pressHandled();
     clock.now += 60_000;
     expect(hold.holds()).toBe(true);
     hold.mouseLeft();
@@ -197,7 +257,7 @@ describe('the rows keep their place after a removal (createRowHold)', () => {
     const both = createRowHold(now);
     both.begin(true);
     clock.now += 5000;
-    both.pressed(false); // now a finger taps in the panel
+    both.pressed(false, true); // now a finger taps on the rows
     expect(both.checkIn()).toBe(ROW_HOLD_MS);
     clock.now += ROW_HOLD_MS;
     expect(both.holds()).toBe(false);
@@ -207,12 +267,42 @@ describe('the rows keep their place after a removal (createRowHold)', () => {
     const { clock, now } = clockAt();
     const hold = createRowHold(now);
     hold.begin(false);
-    clock.now += 1000;
+    clock.now += 5000;
     hold.begin(false);
-    clock.now += 1000;
-    expect(hold.holds()).toBe(true);
-    clock.now += 500;
+    clock.now += 5000;
+    expect(hold.holds()).toBe(true); // 10 s after the first removal, 5 s after the second
+    clock.now += ROW_HOLD_MS - 5000;
     expect(hold.holds()).toBe(false);
+  });
+});
+
+describe('the change a press asked for has shown on the screen (createChangeWatch)', () => {
+  const BEFORE = 'c1_rome:warrior,scout,settler';
+  const AFTER = 'c1_rome:warrior,scout';
+
+  it('says so exactly once: when the queue on the screen is no longer the one the press was made on', () => {
+    const watch = createChangeWatch();
+    expect(watch.shown(BEFORE, false)).toBe(false); // nothing was pressed
+    watch.sent(BEFORE);
+    expect(watch.shown(BEFORE, true)).toBe(false); // the answer is on its way; the panel is printed for other reasons meanwhile
+    expect(watch.shown(BEFORE, true)).toBe(false);
+    expect(watch.shown(AFTER, true)).toBe(true); // the view with the changed queue (it comes before the acknowledgement)
+    expect(watch.shown(AFTER, false)).toBe(false);
+    expect(watch.shown(BEFORE, false)).toBe(false);
+  });
+
+  it('a press that was refused, or changed nothing, is forgotten when its answer is in: a later change is not its change', () => {
+    const watch = createChangeWatch();
+    watch.sent(BEFORE);
+    expect(watch.shown(BEFORE, false)).toBe(false); // the answer has come, the queue is as it was
+    expect(watch.shown(AFTER, false)).toBe(false); // the turn went on and the queue changed by itself
+  });
+
+  it('is forgotten with its city: the panel shows another one, or is hidden', () => {
+    const watch = createChangeWatch();
+    watch.sent(BEFORE);
+    watch.forget();
+    expect(watch.shown(AFTER, true)).toBe(false);
   });
 });
 

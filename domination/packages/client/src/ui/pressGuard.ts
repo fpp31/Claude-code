@@ -67,6 +67,16 @@ export interface KeyedPressGuard {
    * not count there. Does nothing if no press went out within the guard time.
    */
   carryOver(key: string): void;
+  /**
+   * The change the last press asked for has shown on the screen: the
+   * server's answer has arrived. The guard time of that press starts again
+   * from this moment, for its button (and for a button it is then carried
+   * over to). The guard is there because another entry slides under the
+   * pointer, and on a slow link it slides there only now: counted from the
+   * press alone, a tap "to make sure" 0.7 s later hit the next entry 0.2 s
+   * after it had appeared. Does nothing if no press has gone out.
+   */
+  changeShown(): void;
 }
 
 /**
@@ -92,6 +102,13 @@ export function createKeyedPressGuard(guardMs: number, now: () => number = Date.
       if (lastSentAt === null || now() - lastSentAt >= guardMs) return;
       const before = sentAt.get(key);
       if (before === undefined || before < lastSentAt) sentAt.set(key, lastSentAt);
+    },
+    changeShown() {
+      if (lastSentAt === null) return;
+      const time = now();
+      // The button that was pressed last, and any button its time was carried over to.
+      for (const [key, at] of sentAt) if (at === lastSentAt) sentAt.set(key, time);
+      lastSentAt = time;
     },
   };
 }

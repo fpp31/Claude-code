@@ -151,9 +151,22 @@ describe('units', () => {
   });
 });
 
-/** What every one-line description for players must be: one line, at most 45 characters, no digit, ending with a full stop. */
+/**
+ * What every one-line description for players must be: one line, at most
+ * 42 characters, no digit, ending with a full stop.
+ *
+ * Why 42: under an add button of the city panel a description has 258
+ * pixels in a browser that shows its scroll bars, and the longest one there
+ * is (the Worker's, 42 characters) takes 241. With 45 characters the
+ * Warrior's took 262 and stood on two lines. Characters are not pixels, so
+ * the end-to-end test looks at the lines themselves (step 33); a line that
+ * is too long for a font wraps and is never cut.
+ */
 function expectOneLineDescription(description: string, what: string): void {
-  expect(description.length, `${what}: at most 45 characters, so that it is one line in a panel`).toBeLessThanOrEqual(45);
+  expect(
+    description.length,
+    `${what}: at most 42 characters, so that it is one line under an add button of the city panel, also beside a scroll bar`,
+  ).toBeLessThanOrEqual(42);
   expect(description.length, what).toBeGreaterThan(10);
   expect(description, `${what}: one line`).not.toMatch(/[\n\r]/);
   expect(description, `${what}: no digit (the numbers are in the other columns and would go stale here)`).not.toMatch(/[0-9]/);
@@ -162,13 +175,13 @@ function expectOneLineDescription(description: string, what: string): void {
 }
 
 describe('descriptions for players', () => {
-  it('every unit has a description: one line, at most 45 characters, no digit, ending with a full stop', () => {
+  it('every unit has a description: one line, at most 42 characters, no digit, ending with a full stop', () => {
     for (const id of UNIT_TYPE_IDS) expectOneLineDescription(UNITS[id].description, id);
     // No two units are described with the same words.
     expect(new Set(UNIT_TYPE_IDS.map((id) => UNITS[id].description)).size).toBe(UNIT_TYPE_IDS.length);
   });
 
-  it('the improvement ids match the table, and every improvement has a name, a "needs" phrase, at least 1 turn, and a description of one line, at most 45 characters, no digit, ending with a full stop', () => {
+  it('the improvement ids match the table, and every improvement has a name, a "needs" phrase, at least 1 turn, and a description of one line, at most 42 characters, no digit, ending with a full stop', () => {
     expect([...IMPROVEMENT_IDS].sort()).toEqual(Object.keys(IMPROVEMENTS).sort());
     expect(new Set(IMPROVEMENT_IDS).size).toBe(IMPROVEMENT_IDS.length);
     expect(IMPROVEMENT_IDS.length).toBeGreaterThan(0);
@@ -257,13 +270,36 @@ describe('improvements', () => {
     }
   });
 
+  it('a mined hill\'s food + production is higher than that of every FARMED tile', () => {
+    // The same first choice, one step on: a Worker goes on building farms.
+    // With +2 production a mined hill (0 + 4) stood level with a farmed
+    // grassland tile (3 + 1) and a farmed plains tile (2 + 2) and lost the
+    // tie on food. Every farm after the first then pushed the mine one
+    // citizen back: measured on generated capitals with a Worker that went on
+    // farming, the mine was worked in fewer than half of the turns after it
+    // stood, and a mine that had been worked fell out of use again.
+    const farmed = grounds.filter((candidate) => improvementFits('farm', candidate)).map((ground) => tileYields({ ...ground, improvement: 'farm' }));
+    expect(farmed.length).toBeGreaterThan(0);
+    const best = Math.max(...farmed.map((yields) => yields.food + yields.production));
+    for (const ground of grounds.filter((candidate) => improvementFits('mine', candidate))) {
+      const mined = tileYields({ ...ground, improvement: 'mine' });
+      expect(
+        mined.food + mined.production,
+        `a mine on ${ground.terrain} hills gives ${mined.food} food + ${mined.production} production, and the best farmed tile gives ${best} in all: ` +
+          'the mine must give MORE. Level with a farmed tile it loses the tie (it gives no food), so every farm a Worker ' +
+          'builds pushes the mine one citizen back and a mine that was worked stands unused again. ' +
+          'Do not put the Mine back to +2 production (or make a Farm give more) without changing how citizens choose their tiles (rules/city.ts)',
+      ).toBeGreaterThan(best);
+    }
+  });
+
   it('tileYields adds the improvement to what the tile yields; without one, and with null, nothing changes; the result is a copy', () => {
     // Added, where a feature replaces.
     expect(tileYields({ terrain: 'grassland', feature: null, improvement: 'farm' })).toEqual({ food: 3, production: 1 });
     expect(tileYields({ terrain: 'plains', feature: null, improvement: 'farm' })).toEqual({ food: 2, production: 2 });
     expect(tileYields({ terrain: 'desert', feature: null, improvement: 'farm' })).toEqual({ food: 1, production: 1 });
-    expect(tileYields({ terrain: 'grassland', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 4 });
-    expect(tileYields({ terrain: 'desert', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 4 });
+    expect(tileYields({ terrain: 'grassland', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 5 });
+    expect(tileYields({ terrain: 'desert', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 5 });
 
     // In general: the tile's own yields plus the table's, for every improvement on every ground it fits.
     for (const id of IMPROVEMENT_IDS) {

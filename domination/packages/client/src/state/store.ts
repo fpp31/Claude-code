@@ -53,6 +53,15 @@ export interface Toast {
    * the latest of matters, such as "Turn 8 has begun."
    */
   slot?: string;
+  /**
+   * Set on the news of the game (what a server message's events say): the
+   * turn the game was in when it arrived. When news of a later turn
+   * arrives, the news of every earlier turn goes (see toastsWith), so that
+   * a farm finished last turn never stands under "Turn 12 has begun."
+   * A message without it (a refusal, a word of the page itself) is no news
+   * of a turn and is never removed that way.
+   */
+  turn?: number;
 }
 
 /** The running game this client is attached to. */
@@ -121,11 +130,20 @@ export interface AppState {
    * True while a game action is waiting for the server's answer. Only one
    * action is in flight at a time, so the client never has to reorder
    * anything; buttons and map taps that would send an action are ignored
-   * while it is set. (One exception: a press on an add button of the build
+   * while it is set. (Two exceptions: a press on an add button of the build
    * queue waits for the answer to an edit of the same queue, see
-   * Controller.addToQueue.)
+   * Controller.addToQueue; and one press on End Turn waits for the answers
+   * to be in, see Controller.toggleEndTurn.)
    */
   busy: boolean;
+  /**
+   * How many times the server has said no so far: to an action of this
+   * page (`actionRejected`), or with a plain `error`. Nothing on screen
+   * shows the number. A press that waits for an answer (End Turn, see
+   * Controller.toggleEndTurn) notes it and is dropped when it has gone up:
+   * the answer it waited for was a refusal, or may have been one.
+   */
+  refusals: number;
   toasts: Toast[];
   /**
    * A message that blocks the whole app until the page is reloaded (for
@@ -155,7 +173,7 @@ export interface Store {
 /**
  * The state of a freshly opened page: connection 'connecting', no lobby, no
  * game, no join problem, nothing selected, no tile card, no hover box, not
- * busy, no toasts.
+ * busy, no refusal counted, no toasts.
  *
  * @param playerName  the remembered name (loadPlayerName())
  * @param joining     the game code in the address bar (gameCodeFromUrl()),
@@ -175,6 +193,7 @@ export function initialState(playerName: string, joining: GameCode | null = null
     hoverTile: null,
     hoverInfoTile: null,
     busy: false,
+    refusals: 0,
     toasts: [],
     fatalMessage: null,
   };
@@ -214,6 +233,24 @@ export function createStore(initial: AppState): Store {
       };
     },
   };
+}
+
+/**
+ * True while this page can hold no seat anybody could see, so that a page on
+ * its first visit may still become the player another tab of the same
+ * browser has stored (ConnectionHandlers.mayChangeIdentity in
+ * net/connection.ts; the app answers the connection with this).
+ *
+ * False in a lobby and in a game: those are seats. False also while the
+ * first screen says that the game "could not be opened" (`joinProblem`
+ * 'gameNotLoaded'): the server has that game on its disk, this page may own
+ * a seat in it, and it is let back in by itself once the game is repaired,
+ * as the player it is now. The address alone decides nothing: a stranger on
+ * an invite link holds no seat, and must still be able to become the player
+ * this browser's other tab is.
+ */
+export function mayChangeIdentity(state: AppState): boolean {
+  return state.lobby === null && state.game === null && state.joinProblem !== 'gameNotLoaded';
 }
 
 /** Which screen to show: 'game' if `game` is set, else 'lobby' if `lobby` is set, else 'home'. */

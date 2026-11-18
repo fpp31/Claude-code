@@ -62,9 +62,39 @@ export function setText(element: HTMLElement, text: string): void {
   if (element.textContent !== text) element.textContent = text;
 }
 
-/** Shows or hides an element through its `hidden` attribute. */
+/** Who wants to hear that the page took the keyboard focus from a control (see onFocusFellBack). */
+let focusListeners: (() => void)[] = [];
+
+/**
+ * Calls `listener` whenever the control that has the keyboard focus is
+ * greyed out (setDisabled) or hidden, itself or with the part of the page
+ * it stands in (setHidden): the focus then falls back to the page, where
+ * the keys mean something else than on the control. The game screen's key
+ * handling listens, so that Enter does not end the turn in that moment
+ * (createEndTurnKeyGuard in input/keys.ts). Returns a function that stops
+ * the calls.
+ */
+export function onFocusFellBack(listener: () => void): () => void {
+  focusListeners = [...focusListeners, listener];
+  return () => {
+    focusListeners = focusListeners.filter((other) => other !== listener);
+  };
+}
+
+function tellFocusFellBack(): void {
+  for (const listener of focusListeners) listener();
+}
+
+/**
+ * Shows or hides an element through its `hidden` attribute. Hiding the
+ * element that holds the keyboard focus is reported (onFocusFellBack): the
+ * browser gives the focus back to the page.
+ */
 export function setHidden(element: HTMLElement, hidden: boolean): void {
-  if (element.hidden !== hidden) element.hidden = hidden;
+  if (element.hidden === hidden) return;
+  const focused = hidden ? document.activeElement : null;
+  element.hidden = hidden;
+  if (focused !== null && focused !== document.body && element.contains(focused)) tellFocusFellBack();
 }
 
 /** Sets an attribute only if it differs, for example data-ended="true". */
@@ -83,12 +113,15 @@ export function setClass(element: HTMLElement, className: string, on: boolean): 
  * A button that is disabled while it has the keyboard focus would swallow
  * every key press: browsers send no key events to a disabled control, so the
  * map shortcuts would stop working after a click on End Turn. The focus is
- * therefore given back to the page first.
+ * therefore given back to the page first, and that is reported
+ * (onFocusFellBack): the next Enter would otherwise end the turn.
  */
 export function setDisabled(control: HTMLButtonElement | HTMLInputElement | HTMLSelectElement, disabled: boolean): void {
   if (control.disabled === disabled) return;
-  if (disabled && document.activeElement === control) control.blur();
+  const focused = disabled && document.activeElement === control;
+  if (focused) control.blur();
   control.disabled = disabled;
+  if (focused) tellFocusFellBack();
 }
 
 /** Fills a progress bar (`div.bar > div.bar-fill`) to a fraction from 0 to 1. */

@@ -199,4 +199,22 @@ describe('greyed words can still be read (styles.css)', () => {
       }
     }
   });
+
+  it('in the lobby "connected" and "not connected" beside a seat have at least 4.5 to 1 on every ground a seat row has', () => {
+    // "not connected" is the word the host must notice before pressing Start. It was the red of the error
+    // messages, which is 2.98 to 1 on a taken seat's row (12 pixel letters).
+    const grounds = ['.seat', '.seat.taken'].map((selector) => ({ selector, color: fromHex(resolved(selector, 'background')) }));
+    for (const state of ['.seat-status', '.seat-status.absent']) {
+      const words = fromHex(resolved(state, 'color'));
+      for (const ground of grounds) {
+        expect(contrast(words, ground.color), `${state} on ${ground.selector}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+    // The two states are told apart by their colour, and nothing dims a row that shows one after the fact.
+    expect(resolved('.seat-status.absent', 'color')).not.toBe(resolved('.seat-status', 'color'));
+    for (const selector of ['.seat', '.seat.taken', '.seat-status', '.seat-status.absent']) {
+      expect(RULES.get(selector)?.has('opacity'), selector).toBe(false);
+      expect(RULES.get(selector)?.has('filter'), selector).toBe(false);
+    }
+  });
 });

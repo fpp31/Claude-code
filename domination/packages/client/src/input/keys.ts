@@ -89,6 +89,54 @@ export function clickWasByPointer(detail: number): boolean {
 }
 
 /**
+ * For this long after a key pressed a button, and after the control that
+ * had the keyboard focus went away or was greyed out, the End Turn key does
+ * nothing (see createEndTurnKeyGuard).
+ */
+export const END_TURN_KEY_QUIET_MS = 600;
+
+/**
+ * Keeps the End Turn key (Enter) from ending the turn by accident.
+ *
+ * Enter means two things: on a focused button it presses that button, with
+ * the focus on the page it ends the turn. Which of the two it is can change
+ * between two presses of one finger. Enter on the x of the only row of a
+ * build queue removes the row; the focus goes to the panel's close button;
+ * a second Enter closes the panel, and the focus falls back to the page; a
+ * third Enter, meant for the queue like the first two, would end the turn.
+ * The same happens when a button is greyed out while it has the focus (an
+ * add button when the queue is full): the browser gives no key to a greyed
+ * button, so the focus is handed back to the page (setDisabled in
+ * ui/dom.ts), and the next Enter would be End Turn.
+ *
+ * So the key keeps quiet for END_TURN_KEY_QUIET_MS after each of the two.
+ * The map input (input/mapInput.ts) tells this guard what happened and asks
+ * it before it passes an End Turn key on.
+ */
+export interface EndTurnKeyGuard {
+  /** A key (Enter or Space) was pressed while a button had the focus: the button took it. */
+  keyPressedButton(): void;
+  /** The control that had the keyboard focus went away or was greyed out, so that the focus fell back to the page. */
+  focusFellBack(): void;
+  /** May a press of the End Turn key end (or take back) the turn right now? */
+  allows(): boolean;
+}
+
+/** @param now  the clock in milliseconds; only tests pass one */
+export function createEndTurnKeyGuard(now: () => number = Date.now): EndTurnKeyGuard {
+  /** When the later of the two things last happened; null: never. */
+  let quietSince: number | null = null;
+  const startQuiet = (): void => {
+    quietSince = now();
+  };
+  return {
+    keyPressedButton: startQuiet,
+    focusFellBack: startQuiet,
+    allows: () => quietSince === null || now() - quietSince >= END_TURN_KEY_QUIET_MS,
+  };
+}
+
+/**
  * The command for a key press, or null if the key does nothing here.
  *
  *  - Keys pressed with Ctrl, Alt or Meta are the browser's: null.
@@ -98,7 +146,8 @@ export function clickWasByPointer(detail: number): boolean {
  *    Enter ends (or takes back) the turn; Escape deselects; F founds a
  *    city; N selects the next unit with moves left.
  *  - On a focused button, Enter and Space are left to the button, so that
- *    End Turn is not pressed twice by one key.
+ *    End Turn is not pressed twice by one key. (For a short time after
+ *    such a press the End Turn key does nothing at all: createEndTurnKeyGuard.)
  */
 export function keyCommand(press: KeyPress): KeyCommand | null {
   if (press.ctrlKey || press.altKey || press.metaKey) return null;

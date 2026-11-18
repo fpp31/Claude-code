@@ -61,6 +61,7 @@
  *  21b. On the phone a queue of eight greys every add button, and the
  *       sentence that says why stays in sight; on a small phone no line of
  *       the panel is cut.
+ *  21c. On a tablet two taps on one x, 1.8 s apart, take two neighbours.
  *
  * The queue runs empty (`checkTheQueueRunsEmpty`):
  *  22. Ada's city completes a unit, its queue runs empty, and the game says so.
@@ -76,6 +77,8 @@
  *  28b. While Ada has ended her turn, "Stop work" and every button of the
  *       queue are grey, the sentence that says why is in sight with them,
  *       and the bars are as long as the numbers say.
+ *  28c. A double-click (and, on a phone, a double tap) on a unit at the
+ *       edge of the map does not send it to the tile beside it.
  *
  * What the panels grey out and say is one rule in plain functions
  * (packages/client/src/ui/panelButtons.ts, tested in plain Node). Steps 5a,
@@ -107,10 +110,24 @@
  *  35. Through a link with delay, two quick clicks on an add button are
  *      still two items.
  *
- * Steps 19 and 26 and the card look of steps 22 and 24 depend on the map
- * the fixed seed gives, and steps 21, 21a, 21b, 28a and 28b on a browser
- * that can pretend to have a touch screen; each fails with a sentence that
- * says what to change.
+ * The second repair after round 2 added steps 21c and 28c and a dozen looks
+ * inside older steps, each for one press or key that went wrong: step 2
+ * (Ben's page, which holds no seat yet, becomes the player another tab of
+ * his browser stores) and step 8 (in the game it does not, and its secret
+ * is the stored one again after the restart); step 21a (two taps on the
+ * LAST add button: neither the panel nor the button moves); step 28 (on a
+ * phone held sideways both greyed job buttons are in view after End Turn);
+ * step 28b (a tap in the strip above End Turn does nothing, a tap on the map
+ * beside "Show me" still opens a card); step 34 (three Enters on the x of
+ * the only row do not end the turn, and the two halves of that rule each
+ * alone); step 35 (End Turn pressed while an add is on its way ends the
+ * turn after it; a second press on an x 0.65 s after the first removes
+ * nothing more).
+ *
+ * Steps 19, 26 and 28c and the card look of steps 22 and 24 depend on the
+ * map the fixed seed gives, and steps 21, 21a, 21b, 21c, 28, 28a, 28b and
+ * 28c on a browser that can pretend to have a touch screen; each fails with
+ * a sentence that says what to change.
  *
  * Playwright is NOT a dependency of this project and `npm install` does not
  * fetch it. It is loaded from a global install; the default path below only
@@ -140,6 +157,7 @@ import {
   IMPROVEMENT_IDS,
   RULE_ERROR_MESSAGES,
   UNITS,
+  UNIT_TYPE_IDS,
   distance,
   improvementFits,
   neighbors,
@@ -191,6 +209,22 @@ const GUARD_PAUSE_MS = 700;
  * to find the button.
  */
 const SELECTION_PAUSE_MS = 600;
+
+/**
+ * The client gives no order for a tap on the map for 0.5 s after the map
+ * moved by itself (MAP_MOVE_GUARD_MS in game/controller.ts): it stepped
+ * aside for a panel, and the tile under the pointer is another one. Before
+ * a unit is sent somewhere after such a move the test waits a little longer
+ * than that, as a person does who first has to find the tile again.
+ */
+const MAP_MOVE_PAUSE_MS = 600;
+
+/**
+ * The key under which the page keeps a player's secret in the browser's
+ * storage. (STORAGE_KEYS.token in packages/client/src/net/identity.ts, a
+ * file that touches the page and cannot be imported here.)
+ */
+const SECRET_KEY = 'domination.token';
 
 // The small functions handed to `page.evaluate` and `page.waitForFunction`
 // run inside the browser, where `window` and `document` exist. This file
@@ -294,6 +328,52 @@ function describeFound(found: string | null, verb: string): string {
 async function waitForTurn(page: any, turn: number): Promise<void> {
   await waitForText(page, TEST_IDS.topTurn, `Turn ${turn}`);
   await waitForText(page, TEST_IDS.topConnection, 'online');
+}
+
+/**
+ * Collects the secret of every `hello` a page says from now on, oldest
+ * first: who the page tells the server it is, each time it connects.
+ */
+function watchHellos(page: any): (string | null)[] {
+  const secrets: (string | null)[] = [];
+  page.on('websocket', (socket: any) => {
+    socket.on('framesent', (frame: { payload: string | Buffer }) => {
+      try {
+        const message = JSON.parse(String(frame.payload));
+        if (message.type === 'hello') secrets.push(message.token);
+      } catch {
+        // Not one of the game's messages.
+      }
+    });
+  });
+  return secrets;
+}
+
+/** The secret in the storage of the browser this page belongs to. */
+async function storedSecret(page: any): Promise<string | null> {
+  return page.evaluate((key: string) => window.localStorage.getItem(key), SECRET_KEY);
+}
+
+/**
+ * Another tab of the same browser stores a secret, as a second tab does
+ * that was opened on the browser's first visit: a page of the game's
+ * address that runs none of the game's code writes it into the storage both
+ * share. Returns when the browser has told `page` about it (the `storage`
+ * event), and the page has had the time of a few frames to act on it.
+ */
+async function anotherTabStores(page: any, baseUrl: string, secret: string): Promise<void> {
+  await page.evaluate((key: string) => {
+    window.__heardOfSecret = false;
+    window.addEventListener('storage', (event: { key: string | null }) => {
+      if (event.key === key) window.__heardOfSecret = true;
+    });
+  }, SECRET_KEY);
+  const tab = await page.context().newPage();
+  await tab.goto(`${baseUrl}/healthz`);
+  await tab.evaluate(([key, value]: string[]) => window.localStorage.setItem(key, value), [SECRET_KEY, secret]);
+  await page.waitForFunction(() => window.__heardOfSecret === true, undefined, { timeout: WAIT_MS });
+  await tab.close();
+  await page.waitForTimeout(150);
 }
 
 /** Number of taken seats shown in the lobby of this page. */
@@ -1029,6 +1109,9 @@ async function zoomBackOut(page: any, steps: number): Promise<void> {
  * @param address  what the new page opens; left out, the address of `from`
  * @param origin   the origin the copied storage is filed under, when
  *                 `address` is not on the origin of `from` (a link with delay)
+ * @param mobile   true (with `touch`): the browser also behaves as a phone's
+ *                 does. Only then does it aim a finger's tap at the nearest
+ *                 button, as a phone does
  */
 async function openSecondDevice(
   browser: any,
@@ -1039,10 +1122,11 @@ async function openSecondDevice(
   touch: boolean,
   address: string = from.url(),
   origin: string | null = null,
+  mobile = false,
 ): Promise<any> {
   const storage = await from.context().storageState();
   if (origin !== null) for (const filed of storage.origins) filed.origin = origin;
-  const context = await browser.newContext(touch ? { viewport, hasTouch: true, storageState: storage } : { viewport, storageState: storage });
+  const context = await browser.newContext(touch ? { viewport, hasTouch: true, isMobile: mobile, storageState: storage } : { viewport, storageState: storage });
   const page = await context.newPage();
   page.setDefaultTimeout(WAIT_MS);
   page.on('pageerror', (error: Error) => crashes.push(`${name}'s page: ${error.message}`));
@@ -1345,6 +1429,7 @@ async function playTwoPlayers(setup: TestSetup): Promise<void> {
   const crashes: string[] = [];
   const ada = await openPlayer(setup.browser, 'Ada', crashes);
   const ben = await openPlayer(setup.browser, 'Ben', crashes);
+  const benSaidHello = watchHellos(ben);
 
   step('1. Ada opens the page, types her name and creates a game');
   await ada.goto(setup.baseUrl);
@@ -1367,6 +1452,21 @@ async function playTwoPlayers(setup: TestSetup): Promise<void> {
   // ("you have no seat in that game"). Up to this moment Ben has only looked.
   await ben.waitForSelector(`${byTestId(TEST_IDS.homeJoinButton)}:enabled`);
   check((await seatCount(ada)) === 1, 'opening the link did not take a seat');
+  // One browser is one player. This is the browser's first visit, and Ben
+  // holds no seat yet: when another tab of his browser stores a secret, his
+  // page becomes that player (a second tab opened in the same instant would
+  // otherwise be a second player).
+  const benFirst = await storedSecret(ben);
+  const benSecret = 'b'.repeat(32);
+  check(benFirst !== null && benFirst !== benSecret && isDeepStrictEqual(benSaidHello, [benFirst]), 'Ben\'s page made a secret of its own, stored it, and said hello with it');
+  await anotherTabStores(ben, setup.baseUrl, benSecret);
+  for (let waited = 0; waited < WAIT_MS && benSaidHello.length < 2; waited += 25) await ben.waitForTimeout(25);
+  check(
+    isDeepStrictEqual(benSaidHello, [benFirst, benSecret]),
+    `a page that holds no seat takes over the secret another tab of its browser stores, and says hello again as that player (it said hello ${benSaidHello.length} times)`,
+  );
+  await ben.waitForSelector(`${byTestId(TEST_IDS.homeJoinButton)}:enabled`);
+  check((await ben.inputValue(byTestId(TEST_IDS.homeCodeInput))) === code && (await ben.inputValue(byTestId(TEST_IDS.homeNameInput))) === 'Ben', 'the code and the name are still filled in');
   await ben.click(byTestId(TEST_IDS.homeJoinButton));
   await ben.waitForSelector(byTestId(TEST_IDS.lobbySeat + 'p2'));
   await ada.waitForSelector(byTestId(TEST_IDS.lobbySeat + 'p2'));
@@ -1552,10 +1652,22 @@ async function playTwoPlayers(setup: TestSetup): Promise<void> {
 
   step('8. The server stops and a new one starts on the same saved games: both come back');
   const before = { ada: await viewOf(ada), ben: await viewOf(ben) };
+  // Ben's page has not been reloaded since his browser's first visit, and it
+  // holds a seat: when another tab stores another secret now, it stays who
+  // it is. (His seat would be gone with the secret: nobody else knows it.)
+  await anotherTabStores(ben, setup.baseUrl, 'c'.repeat(32));
+  check(
+    benSaidHello.length === 2 && (await ben.isVisible(byTestId(TEST_IDS.gameCanvas))),
+    `a page that is in a game keeps its secret when another tab stores another one (it said hello ${benSaidHello.length} times, and ${(await ben.isVisible(byTestId(TEST_IDS.gameCanvas))) ? 'shows' : 'does not show'} the game)`,
+  );
   await setup.stopServer();
   for (const page of [ada, ben]) await waitForText(page, TEST_IDS.topConnection, 'reconnecting');
   await setup.startServer();
   await waitForTurn(ben, 2); // Ben's page finds the new server by itself
+  check(
+    benSaidHello.length > 2 && benSaidHello.slice(2).every((secret) => secret === benSecret) && (await storedSecret(ben)) === benSecret,
+    'Ben came back as himself, and his secret is the stored one again',
+  );
   await ada.reload(); // Ada tries her luck with a reload
   await waitForTurn(ada, 2);
   check(isDeepStrictEqual(await viewOf(ada), before.ada), 'Ada sees exactly what she saw before the restart');
@@ -2039,10 +2151,12 @@ async function checkTheMapExplainsItself(setup: TestSetup, crashes: string[], ad
   check(lowCard.height <= 150, `the card is at most 150 pixels tall (it is ${lowCard.height})`);
   check(holds(lowCard, under), `the card opened on top of its own tile (if not, the next check checks nothing: move the corner; the tile was at ${at(under)})`);
   check(await comesOutFromUnder(ada, spot, byTestId(TEST_IDS.tileCard)), 'within a second the map has stepped aside, and the tile is no longer under its card');
+  const steppedAsideAt = Date.now();
   await ada.keyboard.press('Escape');
   await ada.setViewportSize(LAPTOP);
 
   step('19. A tile Ada has seen and left says so');
+  await waitUntilSince(ada, steppedAsideAt, MAP_MOVE_PAUSE_MS); // the map has just stepped aside: a tap on it gives no order yet
   await tapTile(ada, warrior.tile);
   await waitForText(ada, TEST_IDS.unitName, 'Warrior');
   const fromCity = (tile: TileIndex): number => distance(tile, city.tile, view);
@@ -2180,6 +2294,7 @@ async function checkTheMapExplainsItself(setup: TestSetup, crashes: string[], ad
   await turningThePhoneKeepsTheCityOnTheMap(eve, eveCity);
   await checkAPhoneTakesEveryTap(eve, eveCity, eveWarrior.id);
   await checkAFullQueueSaysSo(eve, eveCity);
+  await checkASlowFingerTakesNeighbours(eve, eveCity);
   await aTapGoesThroughTheNews(eve, eveCity);
   await eve.context().close();
 }
@@ -2390,6 +2505,25 @@ async function checkAWorkerImprovesTheLand(setup: TestSetup, crashes: string[], 
     (await textOf(ada, TEST_IDS.unitPanel)).split(ordersClosedText('turnEnded')).length === 2,
     'and the panel says it once, not a second time at its bottom',
   );
+  // The same moment on Ada's phone, held on its side: the sentence takes two
+  // lines there, in a panel 220 pixels tall, and both greyed job buttons
+  // must still be in view under it. (The second one used to be cut.)
+  const phone = await openSecondDevice(setup.browser, 'Ada\'s phone', crashes, ada, LOW_WINDOW, true);
+  check(
+    await phone.evaluate(() => window.matchMedia('(pointer: coarse)').matches),
+    'the page takes the second browser for one with a touch screen (if not, this checks nothing: start it with a touch screen another way)',
+  );
+  await fingerTileUntil(phone, site, TEST_IDS.unitName, UNITS.worker.name);
+  await settled(phone);
+  const lowScrolledBy: number = await phone.evaluate((selector: string) => document.querySelector(selector).scrollTop, byTestId(TEST_IDS.unitPanel));
+  const jobButtonsInSight: boolean[] = [];
+  for (const improvement of IMPROVEMENT_IDS) jobButtonsInSight.push(await isInSight(phone, TEST_IDS.jobStart + improvement));
+  check(
+    lowScrolledBy === 0 && jobButtonsInSight.every((inSight) => inSight) && (await isInSight(phone, TEST_IDS.unitJobsClosed)),
+    `with a phone on its side, after End Turn: every greyed job button and the sentence that says why are in view without scrolling the panel (in view: ${IMPROVEMENT_IDS.map((improvement, index) => `${improvement} ${jobButtonsInSight[index]}`).join(', ')}; scrolled by ${lowScrolledBy})`,
+  );
+  await phone.setViewportSize(PHONE);
+  await settled(phone);
   await waitUntilSince(ada, endedAt, END_TURN_PAUSE_MS);
   await ada.click(byTestId(TEST_IDS.endTurnButton));
   await waitForAttribute(ada, TEST_IDS.endTurnButton, 'data-ended', 'false');
@@ -2400,16 +2534,14 @@ async function checkAWorkerImprovesTheLand(setup: TestSetup, crashes: string[], 
 
   step('28a. A double-click on the Worker, where its own "Stop work" comes up, does not stop its work; nor does a double tap on a phone');
   await doublePressOnTheWorker(ada, false, site, worker.id);
-  // The same with a finger: Ada's phone, held upright. The deck with the
-  // Worker's panel comes up where the lower part of the map was.
-  const phone = await openSecondDevice(setup.browser, 'Ada\'s phone', crashes, ada, PHONE, true);
-  check(
-    await phone.evaluate(() => window.matchMedia('(pointer: coarse)').matches),
-    'the page takes the second browser for one with a touch screen (if not, this checks nothing: start it with a touch screen another way)',
-  );
+  // The same with a finger: Ada's phone (opened in step 28), held upright.
+  // The deck with the Worker's panel comes up where the lower part of the map was.
   await fingerTileUntil(phone, site, TEST_IDS.unitName, UNITS.worker.name);
   await doublePressOnTheWorker(phone, true, site, worker.id);
   await checkThePanelsWhileTheTurnIsEnded(ada, phone, city, worker.id);
+  await checkTheStripAboveEndTurn(setup, crashes, ada, city);
+  await phone.tap(`${byTestId(TEST_IDS.cityPanel)} .panel-close`);
+  await checkADoublePressAtTheEdge(ada, phone);
   await phone.context().close();
 
   step('29. In a low window "Stop work" is in view, and the Worker is not under its own panel');
@@ -2717,7 +2849,7 @@ async function checkAFullQueueSaysSo(eve: any, city: CityView): Promise<void> {
  *
  * @param page  nothing is selected, and "Show me" is on the screen
  */
-async function theMapBesideShowMeTakesATap(page: any, city: CityView): Promise<void> {
+async function theMapBesideShowMeTakesATap(page: any, city: CityView, finger = false): Promise<void> {
   const show = await boxOf(page, '.show-next');
   const endTurn = await boxOf(page, byTestId(TEST_IDS.endTurnButton));
   const beside: Point = { x: endTurn.left + 24, y: (show.top + show.bottom) / 2 };
@@ -2731,7 +2863,7 @@ async function theMapBesideShowMeTakesATap(page: any, city: CityView): Promise<v
   const zoomedIn = await bringTileTo(page, tile, beside);
   const onTop = await onTopAt(page, beside);
   check(onTop === 'map', `the map is on top beside "Show me", at ${at(beside)} (on top there: "${onTop}")`);
-  await page.mouse.click(beside.x, beside.y);
+  await pressAt(page, beside, finger);
   await waitUntilShown(page, TEST_IDS.tileCard);
   check((await shownTile(page, TILE_CARD)).tile === tile, 'a tap on the map beside "Show me" opens the card of the tile that lies there');
   await zoomBackOut(page, zoomedIn);
@@ -2819,24 +2951,171 @@ async function checkThePanelsWhileTheTurnIsEnded(ada: any, phone: any, city: Cit
 }
 
 /**
+ * A look at the end of step 28b: the ten pixels between "Show me" and End
+ * Turn. A finger that came down there, a few pixels above End Turn, was
+ * handed to the nearest button by the browser, and the turn was ended. The
+ * strip takes the press now and does nothing; the map beside "Show me",
+ * above the strip, still takes taps.
+ *
+ * A phone aims a finger's tap at the nearest thing that can be pressed. The
+ * browser of this test does that only when it is told to behave as a phone
+ * in every way, so this look opens a device of its own: Ada's phone held on
+ * its side.
+ *
+ * @param ada   Ada's laptop page; the turn is not ended, and a unit of hers can still move
+ */
+async function checkTheStripAboveEndTurn(setup: TestSetup, crashes: string[], ada: any, city: CityView): Promise<void> {
+  const phone = await openSecondDevice(setup.browser, 'Ada\'s phone on its side', crashes, ada, LOW_WINDOW, true, ada.url(), null, true);
+  await settled(phone);
+  // End Turn ignores presses for 0.6 s after the page's first view came in
+  // (its meaning changed then). A tap inside that time would not end the
+  // turn wherever it landed, and this look would check nothing.
+  await phone.waitForTimeout(END_TURN_PAUSE_MS);
+  check(
+    (await phone.isVisible('.show-next')) && !(await hasEndedTurn(phone)),
+    'with the phone on its side "Show me" stands above End Turn, and the turn is not ended (if not, this look checks nothing: it needs a unit that can still move)',
+  );
+  const endTurn = await boxOf(phone, byTestId(TEST_IDS.endTurnButton));
+  const above: Point = { x: endTurn.left + 40, y: endTurn.top - 3 };
+  const onTop: string = await phone.evaluate(([x, y]: number[]) => document.elementFromPoint(x, y)?.className ?? '', [above.x, above.y]);
+  check(onTop === 'end-turn-gap', `3 pixels above End Turn lies the strip between the two buttons, not the map (on top at ${at(above)}: "${onTop}")`);
+  await phone.touchscreen.tap(above.x, above.y);
+  await phone.waitForTimeout(400); // the answer to End Turn would be here by now
+  check(!(await hasEndedTurn(phone)), 'with a phone on its side, a tap 3 pixels above End Turn does not end the turn');
+  check(
+    !(await phone.isVisible(byTestId(TEST_IDS.tileCard))) && !(await phone.isVisible(byTestId(TEST_IDS.unitPanel))) && !(await phone.isVisible(byTestId(TEST_IDS.cityPanel))),
+    'and it does nothing else either: no card and no panel opens',
+  );
+  await theMapBesideShowMeTakesATap(phone, city, true);
+  await phone.context().close();
+}
+
+/**
+ * Step 28c for one page: a unit is brought to a side edge of the map, its
+ * middle about 10 pixels from the edge, and one spot on it is pressed
+ * twice. The first press selects the unit, and the map steps aside to bring
+ * it into the open; the second press then lies on the tile BESIDE the unit
+ * (east of it at the right edge, west of it at the left edge), which it
+ * could walk to. That press must do nothing at all.
+ *
+ * @param thenSend  true: press the spot a third time, 0.7 s after the map
+ *                  stepped aside: that one is an order, and the unit walks
+ */
+async function pressTwiceAtTheEdge(page: any, finger: boolean, thenSend: boolean): Promise<void> {
+  const how = finger ? 'double tap' : 'double-click';
+  const view = await viewOf(page);
+  // A unit that stands alone outside every city and can walk to the empty tile east or west of it.
+  let found: { unit: UnitView; beside: TileIndex; edge: 'right' | 'left' } | null = null;
+  for (const candidate of view.units) {
+    if (found !== null || candidate.owner !== view.you || candidate.own === null || candidate.own.movesLeft === 0 || candidate.own.job !== null) continue;
+    if (view.cities.some((city) => city.tile === candidate.tile) || view.units.some((other) => other.id !== candidate.id && other.tile === candidate.tile)) continue;
+    const reach = await reachableOf(page, candidate.id);
+    for (const edge of ['right', 'left'] as const) {
+      const beside = edge === 'right' ? candidate.tile + 1 : candidate.tile - 1;
+      const empty = !view.units.some((other) => other.tile === beside) && !view.cities.some((city) => city.tile === beside);
+      if (found === null && empty && neighbors(candidate.tile, view).includes(beside) && reach.includes(beside)) found = { unit: candidate, beside, edge };
+    }
+  }
+  if (found === null) {
+    throw new Error(
+      'Check failed: one of the player\'s units stands alone, outside every city, and can walk to the empty tile east or west of it ' +
+        '(if not, step 28c checks nothing: let a unit walk somewhere first, or pick another seed)',
+    );
+  }
+  const { unit, beside, edge } = found;
+  const canvas = await boxOf(page, byTestId(TEST_IDS.gameCanvas));
+  const y = canvas.top + 150;
+  const zoomedIn = await bringTileTo(page, unit.tile, { x: edge === 'right' ? canvas.right - 10 : canvas.left + 10, y });
+  const spot: Point = { x: edge === 'right' ? canvas.right - 2 : canvas.left + 2, y };
+  check((await onTopAt(page, spot)) === 'map', `the map is on top at its ${edge} edge, at ${at(spot)}`);
+  const before = await screenOf(page, unit.tile);
+
+  const pressedAt = Date.now();
+  await pressAt(page, spot, finger);
+  await settled(page); // the map steps aside a frame or two after the selection
+  const steppedAt = Date.now();
+  // The guard runs for half a second from the moment the map moved. A computer too busy to press again in time skips the second press.
+  const inTime = steppedAt - pressedAt < 400;
+  if (inTime) await pressAt(page, spot, finger);
+  await page.waitForTimeout(400); // the answer to an order would be here by now
+  const stepped = await screenOf(page, unit.tile);
+  const besideAt = await screenOf(page, beside);
+  const after = unitOf(await viewOf(page), unit.id);
+  check(
+    after.tile === unit.tile && after.own?.movesLeft === unit.own?.movesLeft,
+    `a ${how} on a unit at the edge of the map did not send it to the tile beside it (it stood on tile ${unit.tile}, it stands on ${after.tile})`,
+  );
+  check(
+    Math.abs(before.x - stepped.x) > 20 && Math.hypot(spot.x - besideAt.x, spot.y - besideAt.y) < Math.hypot(spot.x - stepped.x, spot.y - stepped.y),
+    `after the first press the map had stepped aside, and the tile beside the unit lay under the pointer (the unit's middle was at x ${Math.round(before.x)}, it is at ${Math.round(stepped.x)}; the tile beside it at ${at(besideAt)}; the pointer at ${at(spot)}; if not, the ${how} checks nothing)`,
+  );
+  check(
+    (await page.isVisible(byTestId(TEST_IDS.unitPanel))) && (await textOf(page, TEST_IDS.unitName)) === UNITS[unit.type].name && !(await page.isVisible(byTestId(TEST_IDS.tileCard))),
+    `after the ${how} the unit is still selected: the second press did nothing at all`,
+  );
+
+  if (thenSend) {
+    await waitUntilSince(page, steppedAt, 700);
+    await pressAt(page, spot, finger);
+    try {
+      await waitForView(page, 'the unit to walk to the tile beside it', (now) => unitOf(now, unit.id).tile === beside);
+    } catch (error) {
+      throw new Error(`Check failed: a press on the tile beside the unit 0.7 s after the map stepped aside is an order, and the unit walks. ${String(error)}`);
+    }
+  }
+  await zoomBackOut(page, zoomedIn);
+}
+
+/**
+ * Step 28c: a double press on a unit at the edge of the map. When the map
+ * moves by itself, another tile lies under the pointer; for half a second
+ * after that a press on the map gives no order.
+ *
+ * @param ada    Ada's laptop page (a mouse)
+ * @param phone  Ada's phone, held upright (a touch screen), with nothing selected
+ */
+async function checkADoublePressAtTheEdge(ada: any, phone: any): Promise<void> {
+  step('28c. A double-click on a unit at the edge of the map does not send it to the tile beside it, nor does a double tap on a phone; a press 0.7 s later does');
+  await ada.keyboard.press('Escape');
+  await pressTwiceAtTheEdge(ada, false, false);
+  await ada.keyboard.press('Escape');
+  await pressTwiceAtTheEdge(phone, true, true);
+  await phone.tap(`${byTestId(TEST_IDS.unitPanel)} .panel-close`);
+}
+
+/**
  * A look in step 33: the city panel in a browser that SHOWS its scroll
  * bars. With five entries the panel scrolls; beside its scroll bar no line
- * is cut, and a panel that does not scroll keeps the same room free, so
- * that nothing gets narrower the moment a queue grows long.
+ * is cut, the description under every add button is ONE line (the table of
+ * units promises that, and with the bar's room kept free the Warrior's took
+ * two), and a panel that does not scroll keeps the same room free, so that
+ * nothing gets narrower the moment a queue grows long.
  *
  * @param ada   Ada's laptop page; the queue of `city` holds five entries
  */
 async function checkThePanelBesideAScrollBar(setup: TestSetup, crashes: string[], ada: any, city: CityView): Promise<void> {
   const page = await openSecondDevice(setup.scrollBarBrowser, 'Ada, with scroll bars', crashes, ada, LAPTOP, false);
   await tapTileUntil(page, city.tile, TEST_IDS.cityName, city.name);
-  const measure = (selector: string): Promise<{ bar: number; inner: number; scrolls: boolean; thin: boolean; lines: number; cut: string[] }> =>
+  const measure = (
+    selector: string,
+  ): Promise<{ bar: number; inner: number; scrolls: boolean; thin: boolean; lines: number; cut: string[]; abouts: number; tall: string[]; spare: number }> =>
     page.evaluate((wanted: string) => {
       const panel = document.querySelector(wanted);
       const style = window.getComputedStyle(panel);
       const lines = [...panel.querySelectorAll('.queue-name, .queue-when, .queue-hint, .build-name, .build-detail, .build-about')].filter(
         (line: any) => line.getClientRects().length > 0,
       );
+      // The descriptions under the add buttons: on how many lines the words of each stand, and how much room is left beside them.
+      const abouts = [...panel.querySelectorAll('.build-menu .build-about')].map((about: any) => {
+        const words = document.createRange();
+        words.selectNodeContents(about);
+        const tops = new Set([...words.getClientRects()].map((box: any) => Math.round(box.top)));
+        return { text: about.textContent, lines: tops.size, spare: about.clientWidth - words.getBoundingClientRect().width };
+      });
       return {
+        abouts: abouts.length,
+        tall: abouts.filter((about) => about.lines !== 1).map((about) => `"${about.text}" (${about.lines} lines)`),
+        spare: Math.floor(Math.min(...abouts.map((about) => about.spare))),
         bar: panel.offsetWidth - panel.clientWidth - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth),
         inner: panel.clientWidth,
         scrolls: panel.scrollHeight > panel.clientHeight,
@@ -2854,6 +3133,11 @@ async function checkThePanelBesideAScrollBar(setup: TestSetup, crashes: string[]
   check(
     cityPanel.lines >= 5 * 2 + 4 * 3 && cityPanel.cut.length === 0,
     `beside the scroll bar no line of the queue or of the add buttons is cut (${cityPanel.lines} lines looked at; cut: ${cityPanel.cut.join(', ')})`,
+  );
+  check(
+    cityPanel.abouts === UNIT_TYPE_IDS.length && cityPanel.tall.length === 0,
+    `beside the scroll bar the description under every add button is one line, as the table of units promises (${cityPanel.abouts} looked at, the longest with ${cityPanel.spare} pixels to spare; not one line: ${cityPanel.tall.join(', ')}; ` +
+      'the limit of 42 characters was measured with the font Inter, so on a computer whose own font is much wider a line may take a second one, which the page allows)',
   );
   // A panel that does not scroll: one of Ada's units.
   await page.keyboard.press('Escape');
@@ -3001,13 +3285,17 @@ async function doublePressOnTheWorker(page: any, finger: boolean, site: TileInde
 
 /**
  * The first item of an idle city, on a phone held upright: "Show me" opens
- * the city, and two taps on one spot of the Scout's add button are two
- * Scouts. The first Scout takes the city's name off the End Turn button
- * and "Show me" away; the add button must not move for that.
+ * the city, and two taps on one spot of an add button are two of its item.
+ * The first one takes the city's name off the End Turn button and "Show me"
+ * away; neither the panel nor the add button may move for that. (The row
+ * under the panel has one height, whatever End Turn says. With the Worker's
+ * button, the last of the list, nothing else can hide a row that grows: the
+ * panel is scrolled to its end and cannot put the button back by scrolling.)
  *
  * @param page  nothing is selected, the city's queue is empty and no unit can still move
  */
-async function twoTapsOnScout(page: any, city: CityView, where: string): Promise<void> {
+async function twoTapsOnAnAddButton(page: any, city: CityView, unitType: UnitTypeId, where: string): Promise<void> {
+  const name = UNITS[unitType].name;
   check(
     (await textOf(page, TEST_IDS.endTurnButton)).includes(`${city.name} has nothing to build`) && (await page.isVisible('.show-next')),
     `${where}: the End Turn button names the idle city, and "Show me" is there`,
@@ -3015,23 +3303,29 @@ async function twoTapsOnScout(page: any, city: CityView, where: string): Promise
   await page.tap('.show-next');
   await waitForText(page, TEST_IDS.cityName, city.name);
   await page.waitForTimeout(SELECTION_PAUSE_MS); // the panel has only just opened (and the queue was emptied before that: the add buttons' quiet time is over sooner)
-  const scoutAt = await pointOf(page, TEST_IDS.buildOption + 'scout');
-  const before = await boxOf(page, byTestId(TEST_IDS.buildOption + 'scout'));
+  const addAt = await pointOf(page, TEST_IDS.buildOption + unitType);
+  const before = await boxOf(page, byTestId(TEST_IDS.buildOption + unitType));
+  const panelBefore = await boxOf(page, byTestId(TEST_IDS.cityPanel));
 
-  await page.touchscreen.tap(scoutAt.x, scoutAt.y);
-  await waitForQueue(page, city.id, ['scout']);
+  await page.touchscreen.tap(addAt.x, addAt.y);
+  await waitForQueue(page, city.id, [unitType]);
   await settled(page);
   check(
     !(await page.isVisible('.show-next')) && !(await textOf(page, TEST_IDS.endTurnButton)).includes(city.name),
-    `${where}: the first Scout took "Show me" and the city's name off the End Turn button (if not, the next check checks nothing: a unit can still move)`,
+    `${where}: the first ${name} took "Show me" and the city's name off the End Turn button (if not, the next check checks nothing: a unit can still move)`,
   );
-  const after = await boxOf(page, byTestId(TEST_IDS.buildOption + 'scout'));
+  const after = await boxOf(page, byTestId(TEST_IDS.buildOption + unitType));
+  const panelAfter = await boxOf(page, byTestId(TEST_IDS.cityPanel));
+  check(
+    Math.abs(panelAfter.top - panelBefore.top) < 1 && Math.abs(panelAfter.bottom - panelBefore.bottom) < 1,
+    `${where}: the panel stayed where it was when the End Turn button changed (it reached from ${panelBefore.top} to ${panelBefore.bottom}, it reaches from ${panelAfter.top} to ${panelAfter.bottom})`,
+  );
   check(
     Math.abs(after.top - before.top) < 1,
-    `${where}: the Scout's add button stayed where it was when the End Turn button changed (its top was at ${before.top}, it is at ${after.top})`,
+    `${where}: the ${name}'s add button stayed where it was when the End Turn button changed (its top was at ${before.top}, it is at ${after.top})`,
   );
-  await page.touchscreen.tap(scoutAt.x, scoutAt.y);
-  await waitForQueue(page, city.id, ['scout', 'scout']);
+  await page.touchscreen.tap(addAt.x, addAt.y);
+  await waitForQueue(page, city.id, [unitType, unitType]);
 }
 
 /**
@@ -3063,13 +3357,20 @@ async function checkAPhoneTakesEveryTap(eve: any, city: CityView, warriorId: Uni
   await eve.waitForTimeout(SELECTION_PAUSE_MS);
   await emptyTheQueue(eve, city.id, true);
   await eve.tap(`${byTestId(TEST_IDS.cityPanel)} .panel-close`);
-  await twoTapsOnScout(eve, city, 'at 390 x 844');
+  await twoTapsOnAnAddButton(eve, city, 'scout', 'at 390 x 844');
+
+  // The same with the last button of the add list, the Worker's.
+  const lastOfTheList = UNIT_TYPE_IDS[UNIT_TYPE_IDS.length - 1];
+  check(lastOfTheList === 'worker', `the Worker's button is the last of the add list (the last unit of the table is "${lastOfTheList}")`);
+  await emptyTheQueue(eve, city.id, true);
+  await eve.tap(`${byTestId(TEST_IDS.cityPanel)} .panel-close`);
+  await twoTapsOnAnAddButton(eve, city, lastOfTheList, 'at 390 x 844');
 
   // The same on a small phone.
   await eve.setViewportSize(SMALL_PHONE);
   await emptyTheQueue(eve, city.id, true);
   await eve.tap(`${byTestId(TEST_IDS.cityPanel)} .panel-close`);
-  await twoTapsOnScout(eve, city, 'at 360 x 640');
+  await twoTapsOnAnAddButton(eve, city, 'scout', 'at 360 x 640');
   await eve.setViewportSize(PHONE);
 
   // The arrows: the queue is Scout, Scout; a Worker joins and is brought to the top.
@@ -3101,6 +3402,74 @@ async function checkAPhoneTakesEveryTap(eve: any, city: CityView, warriorId: Uni
   await eve.touchscreen.tap(stopAt.x, stopAt.y);
   await eve.waitForTimeout(400); // the answer to an added item would be here by now
   check(queueOf(await viewOf(eve), city.id).length === 0, 'on the phone: a second tap on the spot of the x added nothing to the queue');
+}
+
+/** A tablet held upright: a touch screen on which the city panel floats and does not scroll. */
+const TABLET = { width: 768, height: 1024 };
+
+/**
+ * Step 21c: a finger that takes its time, on a tablet. In a panel that is
+ * not scrolled the rows above a removed one would slide down under the
+ * finger the moment the panel is let go; it used to be let go 1.5 s after
+ * the last tap, sooner than a thoughtful finger taps again. The rows are
+ * held until a press lands outside them (and has been handled).
+ *
+ * @param eve   the phone of step 21b, held upright; the panel of `city` is open and its queue is full
+ *              (the step leaves the queue with four entries and the phone as it was)
+ */
+async function checkASlowFingerTakesNeighbours(eve: any, city: CityView): Promise<void> {
+  step('21c. On a tablet, two taps on one x 1.8 s apart take two neighbours, and a tap on an add button after that adds that very item');
+  await eve.setViewportSize(TABLET);
+  await settled(eve);
+  const full = queueOf(await viewOf(eve), city.id);
+  check(full.length === 8, `the queue is full for this step (it has ${full.length} entries)`);
+  // Eight rows are more than the panel shows without scrolling. The last
+  // three are taken out, bottom-up, and a tap on the panel's head (a press
+  // outside the rows) lets the rows settle.
+  for (const row of [7, 6, 5]) {
+    await pressAt(eve, await pointOf(eve, TEST_IDS.queueRemove + row), true);
+    await waitForQueue(eve, city.id, full.slice(0, row));
+  }
+  await eve.tap(byTestId(TEST_IDS.cityName));
+  await settled(eve);
+  const queue = full.slice(0, 5);
+  const fits: boolean = await eve.evaluate((selector: string) => {
+    const panel = document.querySelector(selector);
+    return panel.scrollTop === 0 && panel.scrollHeight <= panel.clientHeight;
+  }, byTestId(TEST_IDS.cityPanel));
+  check(fits, 'on the tablet the city panel shows a queue of five without scrolling (if not, the rows above a removed one cannot slide and this step checks nothing: make the window taller)');
+
+  const spot = await pointOf(eve, TEST_IDS.queueRemove + 2);
+  await eve.touchscreen.tap(spot.x, spot.y);
+  await waitForQueue(eve, city.id, [...queue.slice(0, 2), ...queue.slice(3)]);
+  await eve.waitForTimeout(1800); // a finger that takes its time
+  const onTop = await onTopAt(eve, spot);
+  check(
+    onTop === TEST_IDS.queueRemove + 2,
+    `1.8 s after a tap on the x of row 3, the x of the entry that followed is still under the finger: the rows above have not slid down (on top at ${at(spot)}: "${onTop}")`,
+  );
+  await eve.touchscreen.tap(spot.x, spot.y);
+  await waitForQueue(eve, city.id, [...queue.slice(0, 2), ...queue.slice(4)]);
+
+  // A tap outside the rows: an add button. It adds its own item, and only then the rows settle.
+  await eve.waitForTimeout(GUARD_PAUSE_MS); // the add buttons keep quiet for 0.6 s after a removal
+  const gap = `${byTestId(TEST_IDS.cityPanel)} .queue-spacer`;
+  check(await eve.isVisible(gap), 'the rows are still held 0.7 s after the second tap: the room of the removed rows is kept under them');
+  const item: UnitTypeId = 'scout';
+  const addBox = await boxOf(eve, byTestId(TEST_IDS.buildOption + item));
+  const addAt: Point = { x: (addBox.left + addBox.right) / 2, y: (addBox.top + addBox.bottom) / 2 };
+  check((await onTopAt(eve, addAt)) === TEST_IDS.buildOption + item, `the ${UNITS[item].name}'s add button is in the open at ${at(addAt)}`);
+  await eve.touchscreen.tap(addAt.x, addAt.y);
+  try {
+    await waitForQueue(eve, city.id, [...queue.slice(0, 2), ...queue.slice(4), item]);
+  } catch (error) {
+    throw new Error(`Check failed: a tap on an add button while the rows are held adds that button's item. ${String(error)}`);
+  }
+  await settled(eve);
+  check(!(await eve.isVisible(gap)), 'a tap outside the rows lets them settle: the kept room is gone');
+
+  await eve.setViewportSize(PHONE);
+  await settled(eve);
 }
 
 /**
@@ -3164,7 +3533,7 @@ async function checkEveryPressCounts(setup: TestSetup, crashes: string[], ada: a
   await ada.setViewportSize(LAPTOP);
   await settled(ada);
 
-  step('34. With the keyboard: Enter twice on the x of the last row removes one entry, and does not end the turn');
+  step('34. With the keyboard: Enter twice on the x of the last row removes one entry, and does not end the turn; nor do three Enters on the x of the only row');
   await ada.focus(byTestId(TEST_IDS.queueRemove + 1));
   await ada.keyboard.press('Enter');
   await waitForQueue(ada, city.id, ['warrior']);
@@ -3174,6 +3543,90 @@ async function checkEveryPressCounts(setup: TestSetup, crashes: string[], ada: a
   await ada.waitForTimeout(400); // the answer to a removal, or to End Turn, would be here by now
   check(isDeepStrictEqual(queueOf(await viewOf(ada), city.id), ['warrior']), 'the second Enter removed nothing more');
   check(!(await hasEndedTurn(ada)), 'and it did not end the turn');
+
+  // The x of the ONLY row, three Enters 150 ms apart. The first removes the
+  // row and the focus goes to the panel's close button; the second closes
+  // the panel and the focus falls back to the page, where Enter means End
+  // Turn; the third was meant for the queue like the first two.
+  await ada.waitForTimeout(GUARD_PAUSE_MS - 400); // the guard of the first Enter covers this button for 0.6 s, and 0.4 s of that are over
+  const firstEnterAt = Date.now();
+  await ada.keyboard.press('Enter');
+  await waitForQueue(ada, city.id, []);
+  const closeFocused: boolean = await ada.evaluate(() => document.activeElement?.classList.contains('panel-close') === true);
+  check(closeFocused, 'when the only row went, the keyboard focus moved to the panel\'s close button');
+  await waitUntilSince(ada, firstEnterAt, 150);
+  const secondEnterAt = Date.now();
+  await ada.keyboard.press('Enter');
+  await ada.waitForSelector(byTestId(TEST_IDS.cityPanel), { state: 'hidden' });
+  await waitUntilSince(ada, secondEnterAt, 150);
+  // The key keeps quiet for 0.6 s. A computer too busy to press in that time skips the third Enter.
+  if (Date.now() - secondEnterAt < 450) await ada.keyboard.press('Enter');
+  await ada.waitForTimeout(400); // the answer to End Turn would be here by now
+  check(
+    !(await hasEndedTurn(ada)) && queueOf(await viewOf(ada), city.id).length === 0 && !(await ada.isVisible(byTestId(TEST_IDS.cityPanel))),
+    'three Enters on the x of the only row: the row is gone, the panel is closed, and the turn is not ended',
+  );
+  // The two halves of that rule, each alone. First, a key that pressed a
+  // button: Enter on "+" (which stays where it is), the focus given up by
+  // the page itself, and Enter again at once.
+  await waitUntilSince(ada, secondEnterAt, 650); // the quiet time of the three Enters is over
+  const zoomIn = 'button[aria-label="Zoom in"]';
+  await ada.focus(zoomIn);
+  const buttonEnterAt = Date.now();
+  await ada.keyboard.press('Enter');
+  await ada.evaluate(() => document.activeElement.blur());
+  if (Date.now() - buttonEnterAt < 450) await ada.keyboard.press('Enter');
+  await ada.waitForTimeout(400); // the answer to End Turn would be here by now
+  check(!(await hasEndedTurn(ada)), 'an Enter right after an Enter that pressed a button does not end the turn, wherever the focus is by then');
+  await ada.keyboard.press('-'); // the map as it was
+
+  // An Enter a second later is meant: it ends the turn. (And one more takes that back.)
+  await waitUntilSince(ada, buttonEnterAt, 1000);
+  await ada.keyboard.press('Enter');
+  await waitForAttribute(ada, TEST_IDS.endTurnButton, 'data-ended', 'true');
+  await ada.waitForTimeout(END_TURN_PAUSE_MS);
+  await ada.keyboard.press('Enter');
+  await waitForAttribute(ada, TEST_IDS.endTurnButton, 'data-ended', 'false');
+
+  // Second, a button that is greyed out while it has the focus. The queue
+  // gets three entries, the focus is put on the "down" arrow of the second
+  // row, and the third row is removed by the page's own click (no key):
+  // the second row is the last now, its arrow goes grey and hands the
+  // focus back to the page.
+  await tapTileUntil(ada, city.tile, TEST_IDS.cityName, city.name);
+  await ada.waitForTimeout(SELECTION_PAUSE_MS);
+  for (const item of ['warrior', 'scout', 'worker'] as const) await ada.click(byTestId(TEST_IDS.buildOption + item));
+  await waitForQueue(ada, city.id, ['warrior', 'scout', 'worker']);
+  await settled(ada); // every answer is in
+  await ada.focus(byTestId(TEST_IDS.queueDown + 1));
+  await ada.evaluate((selector: string) => document.querySelector(selector).click(), byTestId(TEST_IDS.queueRemove + 2));
+  await waitForQueue(ada, city.id, ['warrior', 'scout']);
+  const greyedAt = Date.now();
+  const fellBack: boolean = await ada.evaluate(
+    (selector: string) => document.querySelector(selector).disabled === true && document.activeElement === document.body,
+    byTestId(TEST_IDS.queueDown + 1),
+  );
+  check(fellBack, 'the arrow that had the focus is greyed out, and the focus is back on the page (if not, the next check checks nothing)');
+  if (Date.now() - greyedAt < 450) await ada.keyboard.press('Enter');
+  await ada.waitForTimeout(400); // the answer to End Turn would be here by now
+  check(!(await hasEndedTurn(ada)), 'an Enter right after the button that had the focus was greyed out does not end the turn');
+  // The queue as the next step wants it: one Warrior.
+  await ada.click(byTestId(TEST_IDS.queueRemove + 1));
+  await waitForQueue(ada, city.id, ['warrior']);
+
+  // And a control that goes away while it has the focus: the panel's close
+  // button has it, and Escape (no button's key) closes the panel. First the
+  // quiet time of the greyed arrow must be over, or this look checks nothing.
+  await waitUntilSince(ada, greyedAt, 650);
+  await ada.focus(`${byTestId(TEST_IDS.cityPanel)} .panel-close`);
+  await ada.keyboard.press('Escape');
+  const closedAt = Date.now();
+  await ada.waitForSelector(byTestId(TEST_IDS.cityPanel), { state: 'hidden' });
+  // The browser takes the focus off the hidden button with its next frame; only then does Enter reach the page.
+  await ada.waitForFunction(() => document.activeElement === document.body, undefined, { timeout: WAIT_MS });
+  if (Date.now() - closedAt < 450) await ada.keyboard.press('Enter');
+  await ada.waitForTimeout(400); // the answer to End Turn would be here by now
+  check(!(await hasEndedTurn(ada)), 'an Enter right after the panel whose button had the focus was closed does not end the turn');
 
   step('35. Through a link with delay, two quick clicks on an add button are two items');
   const link = await startSlowLink(Number(new URL(setup.baseUrl).port), 100);
@@ -3191,6 +3644,42 @@ async function checkEveryPressCounts(setup: TestSetup, crashes: string[], ada: a
     } catch (error) {
       throw new Error(`Check failed: with 0.1 s of delay each way, two quick clicks on "Scout" add two Scouts. ${String(error)}`);
     }
+
+    // End Turn pressed while the answer to an add is on its way: the press
+    // waits for the answer, and the turn is ended after the add, by that one press.
+    const endTurnBox = await boxOf(far, byTestId(TEST_IDS.endTurnButton));
+    await far.mouse.click(scoutAt.x, scoutAt.y);
+    await far.mouse.click((endTurnBox.left + endTurnBox.right) / 2, (endTurnBox.top + endTurnBox.bottom) / 2);
+    try {
+      await waitForView(
+        far,
+        'the third Scout to be in the queue and the turn to be ended',
+        (now) => isDeepStrictEqual(queueOf(now, city.id), ['warrior', 'scout', 'scout', 'scout']) && now.players.some((player) => player.id === now.you && player.endedTurn),
+      );
+    } catch (error) {
+      throw new Error(`Check failed: with 0.1 s of delay each way, End Turn pressed right after an add button ends the turn once the add has been answered. ${String(error)}`);
+    }
+    await far.waitForTimeout(END_TURN_PAUSE_MS);
+    await far.click(byTestId(TEST_IDS.endTurnButton));
+    await waitForAttribute(far, TEST_IDS.endTurnButton, 'data-ended', 'false');
+
+    // A tap "to make sure" on the x of a row, later than the 0.6 s that are
+    // counted from the first press, and sooner than 0.6 s after the row has
+    // gone from the screen (the answer takes at least 0.2 s): it removes
+    // nothing more. The entry that followed came under the pointer only
+    // when the answer arrived, and the time counts from there.
+    const removeAt = await pointOf(far, TEST_IDS.queueRemove + 1);
+    await far.mouse.click(removeAt.x, removeAt.y);
+    const removedAt = Date.now(); // the press is out; its answer cannot show before 0.2 s from here
+    await waitForQueue(far, city.id, ['warrior', 'scout', 'scout']);
+    await waitUntilSince(far, removedAt, 650);
+    // 0.6 s from the moment the row went, at the earliest 0.2 s after the press. A computer too busy to press in that time skips the press.
+    if (Date.now() - removedAt < 700) await far.mouse.click(removeAt.x, removeAt.y);
+    await far.waitForTimeout(500); // the answer to a second removal would be here by now
+    check(
+      isDeepStrictEqual(queueOf(await viewOf(far), city.id), ['warrior', 'scout', 'scout']),
+      `with 0.1 s of delay each way, a second press on the x of a row, 0.65 s after the first, removes nothing more (the queue is [${queueOf(await viewOf(far), city.id).join(', ')}])`,
+    );
     await far.context().close();
   } finally {
     await link.close();

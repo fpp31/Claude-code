@@ -9,13 +9,18 @@
  *
  * Whether a citizen works an improved tile is decided by cityEconomy
  * (rules/city.ts), which never lets a city stop growing over one. So these
- * numbers can be tuned, with one limit that a table test holds: a mined hill
- * must give more food + production than every unimproved tile. Citizens
- * take the tiles with the highest sum first and a mine gives no food, so at
- * +1 production (level with open grassland and plains) a mine was the last
- * tile a city took and stood unused for a whole game. Even at +2 a mine
- * needs the food of a farm: a city without one cannot spare a citizen for a
- * tile without food for as long as it can still grow.
+ * numbers can be tuned, with one limit that two table tests hold: a mined
+ * hill must give more food + production than every unimproved tile AND than
+ * every farmed tile. Citizens take the tiles with the highest sum first and
+ * a mine gives no food, so it loses every tie. At +1 production (level with
+ * open grassland and plains) a mine was the last tile a city took and stood
+ * unused for a whole game. At +2 (level with a farmed grassland or plains
+ * tile) every farm after the first pushed the mine one citizen back, and a
+ * mine that was worked fell out of use while the Worker went on farming.
+ * At +3 a mined hill is the tile with the most to give and is taken first.
+ * It still needs the food of a farm on grassland (the one tile that feeds
+ * more than the citizen who works it): a city without one cannot spare a
+ * citizen for a tile without food for as long as it can still grow.
  *
  * Never remove or rename an id that saved games may contain without writing
  * a save migration (see data/rules.ts).
@@ -31,8 +36,8 @@ export interface ImprovementDef {
   /**
    * One short line for players: what it is. Shown in the tile information,
    * after the name and what it adds ("Farm (+1 food). Fields that give the
-   * tile more food."). Plain words, no digits, at most 45 characters,
-   * ending with a full stop.
+   * tile more food."). Plain words, no digits, at most 42 characters (the
+   * limit of a unit's description, data/units.ts), ending with a full stop.
    */
   description: string;
   /**
@@ -65,7 +70,7 @@ export const IMPROVEMENTS: Record<ImprovementId, ImprovementDef> = {
     name: 'Mine', description: 'A pit in the hills for more production.',
     needs: 'hills',
     terrains: ['grassland', 'plains', 'desert'], features: ['hills'],
-    yields: { food: 0, production: 2 }, turns: 5,
+    yields: { food: 0, production: 3 }, turns: 5,
   },
 };
 

@@ -219,7 +219,8 @@ export function tokenForHello(): string | null {
  * hello again, as that player.
  *
  * Only a page whose identity is new (see identityIsNew) ever does this, and
- * the connection asks only while the app shows no lobby and no game
+ * the connection asks only while the app can hold no seat: it shows no
+ * lobby and no game and does not wait for a game that could not be opened
  * (ConnectionHandlers.mayChangeIdentity): a page that came back with a
  * stored token may own seats, and never forgets who it is. What is taken
  * over must have the form of a token. Nothing is written: the storage

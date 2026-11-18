@@ -5,10 +5,10 @@
 
 import { isDemoMode, startDemo } from '../demo';
 import { createConnection } from '../net/connection';
-import type { Connection } from '../net/connection';
+import type { Connection, ConnectionHandlers } from '../net/connection';
 import { gameCodeFromUrl, loadPlayerName, reloadPage } from '../net/identity';
 import { handleServerMessage } from '../state/serverMessages';
-import { createStore, currentScreen, initialState } from '../state/store';
+import { createStore, currentScreen, initialState, mayChangeIdentity } from '../state/store';
 import type { AppState, ScreenName, Store } from '../state/store';
 import { h, setAttribute, setHidden } from './dom';
 import type { Unmount } from './dom';
@@ -44,8 +44,10 @@ type Shown = ScreenName | 'fatal';
  *       onDisconnect  -> store.set({ busy: false })
  *       onTokenNotSaved -> one error toast: "This browser is not saving
  *                        data. If you close this tab you will lose your seat."
- *       mayChangeIdentity -> true while neither a lobby nor a game is on
- *                        screen (see ConnectionHandlers)
+ *       mayChangeIdentity -> true while this page can hold no seat: no
+ *                        lobby and no game on screen, and not waiting for
+ *                        a game that "could not be opened" (mayChangeIdentity
+ *                        in state/store.ts; see ConnectionHandlers)
  *       onReady       -> if gameCodeFromUrl() is set: send `joinGame` with
  *                        that code and `name: null`, and store.set({ joining:
  *                        code }). This one line is the whole
@@ -59,6 +61,8 @@ type Shown = ScreenName | 'fatal';
  *                        into the game. Somebody without a seat gets `error
  *                        nameRequired` and sees the home screen with the code
  *                        filled in; taking a seat always needs the Join button.
+ *     (These six answers are appConnectionHandlers below, a function of
+ *     its own so that a test in plain Node can hand them to a connection.)
  *  4. Mount the toasts (always visible) and the screen for
  *     currentScreen(state); when the screen changes, unmount the old one and
  *     mount the new one. If `fatalMessage` is set, show only that message
@@ -75,14 +79,7 @@ export function startApp(root: HTMLElement): Unmount {
     startDemo(store);
     connection = { send: () => false, close: () => {} };
   } else {
-    connection = createConnection({
-      onStatus: (status) => store.set({ connection: status }),
-      onMessage: (message) => handleServerMessage(store, message, (reply) => connection.send(reply)),
-      onDisconnect: () => store.set({ busy: false }),
-      onTokenNotSaved: () => showToast(store, TOKEN_NOT_SAVED_MESSAGE, 'error'),
-      mayChangeIdentity: () => store.get().lobby === null && store.get().game === null,
-      onReady: () => rejoin(store, connection),
-    });
+    connection = createConnection(appConnectionHandlers(store, () => connection));
   }
 
   // ---- The page: one place for the current screen, one for messages on top of it ----
@@ -143,6 +140,22 @@ export function startApp(root: HTMLElement): Unmount {
     connection.close();
     root.replaceChildren();
     root.removeAttribute('data-screen');
+  };
+}
+
+/**
+ * What the app answers its connection (step 3 of startApp). `connection`
+ * hands out the connection these belong to; it is asked only when a message
+ * arrives or a socket is ready, when the connection exists.
+ */
+export function appConnectionHandlers(store: Store, connection: () => Connection): ConnectionHandlers {
+  return {
+    onStatus: (status) => store.set({ connection: status }),
+    onMessage: (message) => handleServerMessage(store, message, (reply) => connection().send(reply)),
+    onDisconnect: () => store.set({ busy: false }),
+    onTokenNotSaved: () => showToast(store, TOKEN_NOT_SAVED_MESSAGE, 'error'),
+    mayChangeIdentity: () => mayChangeIdentity(store.get()),
+    onReady: () => rejoin(store, connection()),
   };
 }
 

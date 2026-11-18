@@ -592,7 +592,7 @@ describe('job texts (the unit panel of a Worker)', () => {
 
   it('what a job adds is said in the words of the tile information ("+1 food")', () => {
     expect(improvementBonusText('farm')).toBe('+1 food');
-    expect(improvementBonusText('mine')).toBe('+2 production');
+    expect(improvementBonusText('mine')).toBe('+3 production');
     expect(improvementBonusText).toBe(bonusTextOfTileInfo);
   });
 });

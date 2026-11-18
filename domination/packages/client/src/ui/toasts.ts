@@ -19,6 +19,8 @@ export interface NewToast {
   kind: 'info' | 'error';
   /** See Toast.slot. */
   slot?: string;
+  /** See Toast.turn. */
+  turn?: number;
 }
 
 /**
@@ -46,16 +48,28 @@ const lastToastId = new WeakMap<Store, number>();
  * In the same way a toast with a `slot` takes the place of the one that
  * holds that slot, whatever it says: "Turn 9 has begun." replaces "Turn 8
  * has begun." instead of piling up under it when turns go by quickly.
+ *
+ * And news of a turn (a toast with a `turn`) takes the place of all news of
+ * EARLIER turns. A message stays four seconds; when turns go by faster
+ * than that, last turn's finished farm stood under "Turn 12 has begun."
+ * and read as this turn's. A toast without a `turn` (a refusal that
+ * answers a press of the player) is never removed by this rule.
  */
 export function toastsWith(store: Store, added: NewToast[]): Toast[] {
   let id = lastToastId.get(store) ?? 0;
   let toasts = store.get().toasts.slice();
   for (const toast of added) {
     id += 1;
+    const turn = toast.turn;
     const replaces = (shown: Toast): boolean =>
-      (shown.text === toast.text && shown.kind === toast.kind) || (toast.slot !== undefined && shown.slot === toast.slot);
+      (shown.text === toast.text && shown.kind === toast.kind) ||
+      (toast.slot !== undefined && shown.slot === toast.slot) ||
+      (turn !== undefined && shown.turn !== undefined && shown.turn < turn);
     toasts = toasts.filter((shown) => !replaces(shown));
-    toasts.push(toast.slot === undefined ? { id, text: toast.text, kind: toast.kind } : { id, text: toast.text, kind: toast.kind, slot: toast.slot });
+    const next: Toast = { id, text: toast.text, kind: toast.kind };
+    if (toast.slot !== undefined) next.slot = toast.slot;
+    if (turn !== undefined) next.turn = turn;
+    toasts.push(next);
   }
   lastToastId.set(store, id);
   return toasts.slice(-MAX_TOASTS);

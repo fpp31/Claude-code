@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sampleLobby, sampleView } from '@domination/shared/testing';
 import * as identity from '../src/net/identity';
-import { createStore, currentScreen, initialState } from '../src/state/store';
+import { createStore, currentScreen, initialState, mayChangeIdentity } from '../src/state/store';
 import type { AppState } from '../src/state/store';
 
 /**
@@ -155,6 +155,23 @@ describe('store (WP4)', () => {
     expect(currentScreen({ ...game, lobby: sampleLobby() })).toBe('game');
   });
 
+  it('mayChangeIdentity: only a page that can hold no seat may become another player; not in a lobby, not in a game, and not while it waits for a game that "could not be opened"', () => {
+    const home = initialState('');
+    expect(mayChangeIdentity(home)).toBe(true);
+    // A stranger on an invite link holds no seat, whatever the address says: opening, asked for a name, or turned away for good.
+    expect(mayChangeIdentity(initialState('', 'K7QXM'))).toBe(true);
+    for (const joinProblem of ['noSuchGame', 'gameAlreadyStarted', 'gameFull'] as const) {
+      expect(mayChangeIdentity({ ...home, joinProblem }), joinProblem).toBe(true);
+    }
+
+    const session = { code: 'K7QXM', view: sampleView(), connected: [], seq: 0, awaitingSync: false };
+    expect(mayChangeIdentity({ ...home, lobby: sampleLobby() })).toBe(false);
+    expect(mayChangeIdentity({ ...home, game: session })).toBe(false);
+    expect(mayChangeIdentity({ ...home, lobby: sampleLobby(), game: session })).toBe(false);
+    // The server has the game on its disk and could not open it: this page may own a seat in it, and gets it back after the repair.
+    expect(mayChangeIdentity({ ...home, joinProblem: 'gameNotLoaded' })).toBe(false);
+  });
+
   it('initialState carries the name and the game code being rejoined (joining)', () => {
     expect(initialState('Ada', 'K7QXM')).toEqual({
       connection: 'connecting',
@@ -168,6 +185,7 @@ describe('store (WP4)', () => {
       hoverTile: null,
       hoverInfoTile: null,
       busy: false,
+      refusals: 0,
       toasts: [],
       fatalMessage: null,
     });

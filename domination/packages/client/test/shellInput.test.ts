@@ -8,7 +8,7 @@ import {
   createWheelStepper,
 } from '../src/input/gestures';
 import type { PointerKind, PointerTracker } from '../src/input/gestures';
-import { clickWasByPointer, focusKind, keyCommand, panDirectionOfKey } from '../src/input/keys';
+import { END_TURN_KEY_QUIET_MS, clickWasByPointer, createEndTurnKeyGuard, focusKind, keyCommand, panDirectionOfKey } from '../src/input/keys';
 import type { KeyPress } from '../src/input/keys';
 
 /**
@@ -356,5 +356,79 @@ describe('keyboard shortcuts (WP4)', () => {
     expect(focusKind({ tagName: 'SELECT' })).toBe('text');
     expect(focusKind({ tagName: 'DIV', isContentEditable: true })).toBe('text');
     expect(focusKind({ tagName: 'BUTTON' })).toBe('button');
+  });
+});
+
+describe('the End Turn key keeps quiet after a key that pressed a button, and after the focus fell back to the page (WP4)', () => {
+  /** A guard with a clock the test moves by hand. */
+  function guardWithClock() {
+    let clock = 10_000;
+    const guard = createEndTurnKeyGuard(() => clock);
+    return {
+      guard,
+      wait(ms: number): void {
+        clock += ms;
+      },
+    };
+  }
+
+  it('with nothing before it, the key ends the turn', () => {
+    const { guard } = guardWithClock();
+    expect(guard.allows()).toBe(true);
+    expect(END_TURN_KEY_QUIET_MS).toBe(600);
+  });
+
+  it('for 600 ms after a key press that pressed a button the key does nothing; after that it works', () => {
+    const { guard, wait } = guardWithClock();
+    guard.keyPressedButton();
+    expect(guard.allows()).toBe(false);
+    wait(150);
+    expect(guard.allows()).toBe(false);
+    wait(END_TURN_KEY_QUIET_MS - 151);
+    expect(guard.allows()).toBe(false);
+    wait(1);
+    expect(guard.allows()).toBe(true);
+  });
+
+  it('for 600 ms after the control that had the focus went away or was greyed out, the key does nothing; after that it works', () => {
+    const { guard, wait } = guardWithClock();
+    guard.focusFellBack();
+    wait(END_TURN_KEY_QUIET_MS - 1);
+    expect(guard.allows()).toBe(false);
+    wait(1);
+    expect(guard.allows()).toBe(true);
+  });
+
+  it('three Enters 150 ms apart on the x of the only row: the first removes it, the second closes the panel, the third is not End Turn; one a second later is', () => {
+    const { guard, wait } = guardWithClock();
+    guard.keyPressedButton(); // Enter on the x; the focus goes to the panel's close button
+    wait(150);
+    guard.keyPressedButton(); // Enter on the close button: the panel closes...
+    guard.focusFellBack(); // ...and the focus falls back to the page
+    wait(150);
+    expect(guard.allows()).toBe(false); // the third Enter, with the focus on the page
+    wait(1000);
+    expect(guard.allows()).toBe(true);
+  });
+
+  it('the time counts from the LATEST of the two: a button that is greyed half a second after the key that pressed it (a slow link) starts it again', () => {
+    const { guard, wait } = guardWithClock();
+    guard.keyPressedButton(); // Enter on "Warrior": the eighth entry
+    wait(500);
+    guard.focusFellBack(); // the answer: the queue is full, the add button is grey, the focus is on the page
+    wait(200);
+    expect(guard.allows()).toBe(false); // 700 ms after the key, 200 ms after the focus went
+    wait(399);
+    expect(guard.allows()).toBe(false);
+    wait(1);
+    expect(guard.allows()).toBe(true);
+    // An older event never shortens a newer one's time.
+    guard.focusFellBack();
+    wait(300);
+    guard.keyPressedButton();
+    wait(400);
+    expect(guard.allows()).toBe(false);
+    wait(200);
+    expect(guard.allows()).toBe(true);
   });
 });

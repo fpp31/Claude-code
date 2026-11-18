@@ -40,6 +40,8 @@ import { todoHints, waitingForText } from './texts';
  *    panel above that row must not move when a tap changes the hint. See
  *    the upright deck in styles.css.);
  *  - once the turn is ended, the hint names who the game is waiting for.
+ * Between "Show me" and End Turn lies a strip of ten pixels that takes a
+ * press and does nothing (.end-turn-gap in styles.css says why).
  *
  * @param showTile  scrolls the map to a tile (the game screen passes the
  *                  renderer's centerOn); the default does nothing
@@ -74,7 +76,13 @@ export function mountEndTurnButton(
     hint,
   );
 
-  const box = h('div', { className: 'end-turn' }, showButton, button);
+  // The strip between the two buttons. It takes a press and does nothing
+  // with it; the listener is what makes it count as the thing that was
+  // pressed. Left see-through, a finger that comes down on it, a few pixels
+  // above End Turn, is handed to the nearest button by the browser.
+  const gap = h('div', { className: 'end-turn-gap', onClick: () => {} });
+
+  const box = h('div', { className: 'end-turn' }, showButton, gap, button);
   parent.append(box);
 
   function update(state: AppState): void {

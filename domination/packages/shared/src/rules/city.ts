@@ -227,7 +227,7 @@ function mostFood(tiles: readonly WorkTile[]): number {
  *    tile index), provided the newcomer has strictly more food. This stops
  *    when the surplus is reached or no such swap is left. So a city never
  *    stands still over a mine, a hill or plains while it owns food that
- *    nobody works. (Without it a mined hill, 0 food and 4 production, would
+ *    nobody works. (Without it a mined hill, 0 food and 5 production, would
  *    be taken before every unimproved tile, and could stop a city growing
  *    for good.)
  *  - 3. When no swap is left and the city still cannot grow (the surplus is

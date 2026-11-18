@@ -34,10 +34,11 @@ export interface ConnectionHandlers {
    */
   onTokenNotSaved(): void;
   /**
-   * True while the app shows no lobby and no game, that is, while this page
-   * holds no seat anybody could see. Only then may a page on its first visit
-   * still become the player another tab of the same browser has stored
-   * (identity.ts, adoptStoredToken); the connection asks before every such change.
+   * True while this page can hold no seat anybody could see: the app shows
+   * no lobby and no game, and is not waiting for a game the server could not
+   * open (mayChangeIdentity in state/store.ts). Only then may a page on its
+   * first visit still become the player another tab of the same browser has
+   * stored (identity.ts, adoptStoredToken); the connection asks before every such change.
    */
   mayChangeIdentity(): boolean;
 }
@@ -166,7 +167,8 @@ export function browserEnvironment(): ConnectionEnvironment {
  *    tabs that found the storage empty in the same instant each made a
  *    token. So before a `welcome` is taken, and whenever the browser says
  *    that another tab has stored a token, a page whose identity is new and
- *    that shows no lobby and no game takes over the token in the storage
+ *    that can hold no seat (it shows no lobby and no game, and does not wait
+ *    for a game that could not be opened) takes over the token in the storage
  *    (adoptStoredToken) and says hello again on a new socket, as that player.
  *  - On `welcome`: saveToken(token) (THIS module is the one place that
  *    stores the token; if saveToken returns false, tell the app through

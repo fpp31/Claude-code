@@ -139,6 +139,48 @@ describe('keyed press guard: the row buttons of the build queue', () => {
     expect(sent).toEqual(['remove:0', 'remove:0']);
   });
 
+  it('changeShown: the guard time of the last press starts again when its change shows on the screen (a slow link: the entry that followed comes under the finger only then)', () => {
+    const { clock, sent, press, guard } = guardAt();
+    guard.changeShown(); // nothing was pressed: nothing to start again
+    press('remove:2'); // a tap on the x of row 3
+    clock.now += 500;
+    guard.changeShown(); // the answer took half a second: the row is gone and the next entry is under the finger NOW
+    clock.now += 200;
+    press('remove:2'); // a tap "to make sure", 0.7 s after the first and 0.2 s after the screen changed
+    expect(sent).toEqual(['remove:2']);
+    clock.now += GUARD_MS - 201;
+    press('remove:2'); // one millisecond before the new time is over
+    expect(sent).toEqual(['remove:2']);
+    clock.now += 1;
+    press('remove:2');
+    expect(sent).toEqual(['remove:2', 'remove:2']);
+  });
+
+  it('changeShown starts the time again also when the first 0.6 s are long over, only for the button that was pressed last, and together with a button the focus was carried to', () => {
+    const { clock, sent, press, guard } = guardAt();
+    press('up:4');
+    clock.now += 100;
+    press('remove:2');
+    clock.now += 1500; // a very slow link
+    guard.changeShown();
+    press('remove:2'); // the last press: guarded again
+    press('up:4'); // an older press on another button: not
+    expect(sent).toEqual(['up:4', 'remove:2', 'up:4']);
+
+    // The keyboard: the row went away, the focus is moved to the x of the new last row, in the moment the change shows.
+    const keys = guardAt();
+    keys.press('remove:2');
+    keys.clock.now += 900;
+    keys.guard.changeShown();
+    keys.guard.carryOver('remove:1');
+    keys.clock.now += 300;
+    keys.press('remove:1'); // the second Enter, 0.3 s after the row went
+    expect(keys.sent).toEqual(['remove:2']);
+    keys.clock.now += 300;
+    keys.press('remove:1');
+    expect(keys.sent).toEqual(['remove:2', 'remove:1']);
+  });
+
   it('carryOver: the button the keyboard focus was moved to is guarded for the rest of the last press\'s time, and no longer', () => {
     const { clock, sent, press, guard } = guardAt();
     guard.carryOver('remove:1'); // nothing was pressed yet: nothing to carry
