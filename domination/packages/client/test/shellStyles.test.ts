@@ -294,3 +294,33 @@ describe('"Grow first" / "Build first", and "Stop work" while it asks (styles.cs
     expect(written('.job-stop-row .button', 'margin-left')).toBe('auto');
   });
 });
+
+describe('the add buttons of the city panel keep their height (styles.css)', () => {
+  it('each of the three lines of an add button is one line whatever the font: never wrapped, cut with an ellipsis where a font is too wide, and no rule anywhere lets one wrap again', () => {
+    // A middle line that took a second line made the Settler's button a line taller at an answer: the buttons
+    // under it moved, and a quick second press landed on another unit. The words are short enough for the fonts
+    // they were measured in (ADD_LINE_MAX in ui/texts.ts); this rule holds the height in every other font.
+    const lines = ['.build-name', '.build-detail', '.build-about'];
+    for (const line of lines) {
+      expect(written(line, 'white-space'), line).toBe('nowrap');
+      expect(written(line, 'overflow'), line).toBe('hidden');
+      expect(written(line, 'text-overflow'), line).toBe('ellipsis');
+    }
+    // The line can only be cut where its column can get narrower than its words: the button's one column starts at 0.
+    expect(written('.build-button', 'grid-template-columns')).toBe('minmax(0, 1fr)');
+    // No rule, in any window, takes that back or wraps the words another way.
+    let looked = 0;
+    for (const rules of [RULES, ...SHEET.blocks.map((block) => block.inside.rules)]) {
+      for (const [selector, declarations] of rules) {
+        if (!lines.some((line) => selector.includes(line))) continue;
+        looked += 1;
+        expect(declarations.get('white-space') ?? 'nowrap', selector).toBe('nowrap');
+        expect(declarations.get('overflow') ?? 'hidden', selector).toBe('hidden');
+        for (const wrapping of ['text-wrap', 'overflow-wrap', 'word-break', 'display', 'height', 'max-height', '-webkit-line-clamp']) {
+          expect(declarations.has(wrapping), `${selector} { ${wrapping} }`).toBe(false);
+        }
+      }
+    }
+    expect(looked).toBeGreaterThanOrEqual(5); // the three lines, the greyed description, "Added to the queue"
+  });
+});

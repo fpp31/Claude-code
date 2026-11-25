@@ -25,11 +25,13 @@ import type { OrdersClosed } from '../game/selectors';
 import {
   STOP_ASK,
   STOP_LABEL,
+  addButtonTitleText,
   jobButtonText,
   jobReasonText,
   jobsReasonText,
   ordersClosedText,
   queueNoteText,
+  stopTitleText,
   stopWarningText,
   unitHintParts,
 } from './texts';
@@ -54,6 +56,12 @@ export interface QueueRowButtons {
 export interface AddButton {
   unitType: UnitTypeId;
   disabled: boolean;
+  /**
+   * Its tooltip: the button's three lines as one sentence
+   * (addButtonTitleText). A line of an add button is never wrapped, and is
+   * cut where a font is too wide for it; here every word can be read.
+   */
+  title: string;
 }
 
 /** One of the two buttons "Grow first" / "Build first": how the city's citizens are placed. */
@@ -130,7 +138,11 @@ export function cityPanelButtons(own: OwnCityDetail, closed: OrdersClosed | null
       chosen: own.focus === focus,
       disabled: shut,
     })),
-    adds: own.buildOptions.map((option) => ({ unitType: option.item.unitType, disabled: shut || option.addError !== null })),
+    adds: own.buildOptions.map((option) => ({
+      unitType: option.item.unitType,
+      disabled: shut || option.addError !== null,
+      title: addButtonTitleText(option),
+    })),
   };
 }
 
@@ -182,9 +194,12 @@ export interface JobBlock {
    *  - `label`: 'Stop work', or 'Tap again to stop' (STOP_ASK) while asking;
    *  - `warning`: the small print beside it, stopWarningText(job, asking);
    *    null while the button is greyed: beside a button that cannot be
-   *    pressed it would only read as bad news.
+   *    pressed it would only read as bad news;
+   *  - `title`: the button's tooltip, stopTitleText(job). It follows the
+   *    small print: "nothing is lost yet" with no turn worked, the number
+   *    of turns afterwards.
    */
-  stop: { disabled: boolean; label: string; asking: boolean; warning: string | null } | null;
+  stop: { disabled: boolean; label: string; asking: boolean; warning: string | null; title: string } | null;
 }
 
 /** The buttons of the unit panel, and its hint. */
@@ -241,6 +256,7 @@ export function unitPanelButtons(
         label: asking ? STOP_ASK : STOP_LABEL,
         asking,
         warning: shut ? null : stopWarningText(own.job, asking),
+        title: stopTitleText(own.job),
       },
     };
   } else if (own.jobOptions.length > 0) {

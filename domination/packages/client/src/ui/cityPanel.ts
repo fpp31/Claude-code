@@ -108,8 +108,11 @@ interface ScreenBox {
  *    "Empty the queue" (queueClear);
  *  - the add list: one button per city.own.buildOptions entry
  *    (`build-<unitTypeId>`) with name, cost and when it would be done
- *    (buildOptionText), and the unit's description. A press puts the item
- *    at the END of the queue.
+ *    (buildOptionText), and the unit's description. Each of the three is
+ *    one line in every font (the stylesheet cuts a line that is too wide
+ *    with "..."), so a button never changes its height; the button's
+ *    tooltip has all three in full (AddButton.title). A press puts the
+ *    item at the END of the queue.
  *
  * HOW THE BUTTONS BEHAVE
  *  - Nothing is shown at a press. The panel sends what the player wants
@@ -741,6 +744,7 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
       if (option === undefined || add === undefined) continue;
       const justAdded = addedNote === unitType;
       setText(parts.detail, justAdded ? 'Added to the queue' : buildOptionText(option));
+      setAttribute(parts.button, 'title', add.title);
       setClass(parts.button, 'added', justAdded);
       setDisabled(parts.button, add.disabled);
     }

@@ -1,17 +1,48 @@
 import { describe, expect, it } from 'vitest';
-import { CITY_FOCUS, IMPROVEMENTS, IMPROVEMENT_IDS, MAP_SIZES, MAP_SIZE_IDS, RULES, RULE_ERROR_MESSAGES, UNITS, UNIT_TYPE_IDS, cloneJson } from '@domination/shared';
-import type { BuildOption, BuildWait, JobOption, OwnCityDetail, PlayerView, QueueEntryView, RuleErrorCode, UnitJobView, UnitTypeId } from '@domination/shared';
+import {
+  CITY_FOCUS,
+  CIV_IDS,
+  IMPROVEMENTS,
+  IMPROVEMENT_IDS,
+  MAP_SIZES,
+  MAP_SIZE_IDS,
+  RULES,
+  RULE_ERROR_MESSAGES,
+  UNITS,
+  UNIT_TYPE_IDS,
+  buildPlayerView,
+  cloneJson,
+  createGame,
+  distance,
+  playerIdForSeat,
+  tilesInRange,
+} from '@domination/shared';
+import type {
+  BuildOption,
+  BuildWait,
+  JobOption,
+  OwnCityDetail,
+  PlayerView,
+  QueueEntryView,
+  RuleErrorCode,
+  TileView,
+  UnitJobView,
+  UnitTypeId,
+} from '@domination/shared';
+import { landOfACityAt } from '../src/game/selectors';
 import { sampleView } from '@domination/shared/testing';
 import { improvementBonusText as bonusTextOfTileInfo } from '../src/game/tileInfo';
 import {
   ADD_LINE_MAX,
   CITY_TILES_HINT,
   FOCUS_GROUP_LABEL,
+  FOUND_HERE_NOTE,
   LOCAL_LINK_NOTE,
   NEEDS_WATER,
   REMOVE_HINT,
   STOP_ASK,
   STOP_LABEL,
+  addButtonTitleText,
   buildOptionText,
   buildWaitText,
   codeHintText,
@@ -37,9 +68,11 @@ import {
   queueNoteText,
   queueRowText,
   signed,
+  stopTitleText,
   stopWarningText,
   tabTitleText,
   todoHints,
+  turnsLostByStopping,
   unitHintParts,
   unitHintText,
   waitingForText,
@@ -338,7 +371,7 @@ describe('city panel texts (WP4)', () => {
     expect(todoHints(view)).toEqual(['2 cities are waiting to finish a unit', '2 units can still move']);
   });
 
-  it('buildOptionText gives cost ("costs 18"), turns ("ready in 1 turn", "ready in 4 turns") and population, and the reason in brackets where there is no number', () => {
+  it('buildOptionText gives cost ("costs 18"; for a Settler "costs 30 + 1 citizen") and turns ("ready in 1 turn", "ready in 4 turns"), and the reason in brackets where there is no number', () => {
     const options = rome().buildOptions;
     const warrior = menuOption('warrior');
     const settler = menuOption('settler');
@@ -348,16 +381,18 @@ describe('city panel texts (WP4)', () => {
     expect(options.map(buildOptionText)).toEqual([
       'costs 18, ready in 12 turns',
       'costs 12, ready in 10 turns',
-      'costs 30, ready in 14 turns, uses 1 population',
+      'costs 30 + 1 citizen, ready in 14 turns',
       'costs 20, ready in 12 turns',
       "needs water inside this city's borders",
       "needs water inside this city's borders",
     ]);
     expect(buildOptionText({ ...warrior, turns: 4 })).toBe('costs 18, ready in 4 turns');
     expect(buildOptionText({ ...warrior, turns: 1 })).toBe('costs 18, ready in 1 turn');
-    expect(buildOptionText({ ...settler, turns: 18 })).toBe(`costs 30, ready in 18 turns, uses ${UNITS.settler.populationCost} population`);
+    expect(UNITS.settler.populationCost).toBe(1);
+    expect(buildOptionText({ ...settler, turns: 18 })).toBe('costs 30 + 1 citizen, ready in 18 turns');
+    expect(buildOptionText({ ...settler, turns: 1 })).toBe('costs 30 + 1 citizen, ready in 1 turn');
 
-    // No number: the reason in brackets, and then NOT "uses 1 population" (the Settler's third line says
+    // No number: the reason in brackets, and then NOT "+ 1 citizen" (the Settler's third line says
     // "Takes one citizen."; with both, the line took two lines and the button grew under the finger)...
     expect(buildOptionText({ ...settler, turns: null, wait: 'needsPopulation' })).toBe('costs 30 (the city must grow first)');
     expect(buildOptionText({ ...settler, turns: null, wait: 'tooFar' })).toBe('costs 30 (more than 50 turns)');
@@ -367,7 +402,8 @@ describe('city panel texts (WP4)', () => {
     expect(buildOptionText({ ...warrior, turns: null, wait: 'noProduction' })).toBe('costs 18 (this city makes no production)');
     // ...except behind a queue that has no end: the rows above already say why.
     expect(buildOptionText({ ...warrior, turns: null, wait: 'earlier' })).toBe('costs 18');
-    expect(buildOptionText({ ...settler, turns: null, wait: 'earlier' })).toBe('costs 30, uses 1 population');
+    expect(buildOptionText({ ...settler, turns: null, wait: 'earlier' })).toBe('costs 30 + 1 citizen');
+    expect(buildOptionText({ ...settler, turns: null, wait: null })).toBe('costs 30 + 1 citizen');
     // A full queue changes nothing in this line: the head of the panel says it.
     expect(buildOptionText({ ...warrior, addError: 'queueFull' })).toBe('costs 18, ready in 12 turns');
   });
@@ -396,12 +432,13 @@ describe('city panel texts (WP4)', () => {
     expect(buildOptionText(menuOption('fishingBoat', { turns: null, wait: 'earlier', addError: 'queueFull' }))).toBe('costs 20');
   });
 
-  it('buildOptionText is ONE line: for every unit type and every wait, with and without a number of turns from 1 to 50, at most ADD_LINE_MAX (46) characters; with a reason in brackets it never says "uses 1 population"; with a number the Settler\'s still does', () => {
-    expect(ADD_LINE_MAX).toBe(46);
+  it('buildOptionText is ONE line: for every unit type and every wait, with and without a number of turns from 1 to 50, at most ADD_LINE_MAX (42) characters, and the Settler\'s at most 40; with a reason in brackets it never names the citizen; with a number the Settler\'s still does', () => {
+    expect(ADD_LINE_MAX).toBe(42);
     const waits: BuildWait[] = ['needsPopulation', 'noRoom', 'noProduction', 'tooFar', 'earlier'];
     const numbers: (number | null)[] = [null, ...Array.from({ length: RULES.forecastTurns }, (_unused, index) => index + 1)];
     expect(numbers).toHaveLength(51);
     let longest = '';
+    let longestWithANumber = '';
     let answers = 0;
     for (const unitType of UNIT_TYPE_IDS) {
       const base: BuildOption = { item: { kind: 'unit', unitType }, cost: UNITS[unitType].cost, turns: null, wait: null, addError: null };
@@ -414,24 +451,47 @@ describe('city panel texts (WP4)', () => {
             expect(text.length, `${about}: "${text}"`).toBeLessThanOrEqual(ADD_LINE_MAX);
             expect(text, about).not.toMatch(/[\r\n]/);
             if (text.length > longest.length) longest = text;
-            // A reason in brackets never stands beside "uses 1 population".
-            if (text.includes('(')) expect(text, about).not.toContain('population');
+            // The line that says the most, a cost of two parts and a number, has real room: at most 40 characters.
+            if (text.includes('citizen')) expect(text.length, `${about}: "${text}"`).toBeLessThanOrEqual(40);
+            // A reason in brackets never stands beside the citizen. And nothing calls a citizen "population" any more.
+            if (text.includes('(')) expect(text, about).not.toContain('citizen');
+            expect(text, about).not.toContain('population');
             // With a number, the units that take a citizen still say so, and every line names the turn.
             if (turns !== null && addError !== 'noWaterForBoat') {
               expect(text, about).toContain(`ready in ${turns} turn`);
-              expect(text.includes('uses 1 population'), about).toBe(UNITS[unitType].populationCost > 0);
+              expect(text.includes('costs 30 + 1 citizen,'), about).toBe(UNITS[unitType].populationCost > 0);
+              if (text.length > longestWithANumber.length) longestWithANumber = text;
             }
           }
         }
       }
     }
     expect(answers).toBe(6 * 6 * 51 * 3);
-    // The longest answer there is fills the line to the last character: the Settler with a number of two digits.
-    expect(longest).toBe('costs 30, ready in 10 turns, uses 1 population');
+    // The longest answer there is: a boat that is paid for and finds every water tile of its city taken.
+    expect(longest).toBe('costs 20 (no free water tile for the boat)');
     expect(longest.length).toBe(ADD_LINE_MAX);
-    expect(buildOptionText(menuOption('settler', { turns: 48 }))).toBe('costs 30, ready in 48 turns, uses 1 population');
-    // What the Settler said in round 2, which took two lines in the narrow panel.
-    expect('costs 30, uses 1 population (the city must grow first)'.length).toBeGreaterThan(ADD_LINE_MAX);
+    // The longest line with a number is the Settler's with a number of two digits: 39 characters. (It had 46
+    // as 'costs 30, ready in 48 turns, uses 1 population', which fitted the narrowest panel by less than a pixel.)
+    expect(longestWithANumber).toBe('costs 30 + 1 citizen, ready in 10 turns');
+    expect(buildOptionText(menuOption('settler', { turns: 48 }))).toBe('costs 30 + 1 citizen, ready in 48 turns');
+    expect(buildOptionText(menuOption('settler', { turns: 48 })).length).toBe(39);
+    // What the Settler would say with the reason AND the citizen, which is why the reason stands alone.
+    expect('costs 30 + 1 citizen (the city must grow first)'.length).toBeGreaterThan(ADD_LINE_MAX);
+    // The words are those of the Settler's own description, the third line of the same button.
+    expect(UNITS.settler.description).toContain('citizen');
+  });
+
+  it('addButtonTitleText, the tooltip of an add button: its three lines as one sentence, for every unit type', () => {
+    expect(addButtonTitleText(menuOption('warrior', { turns: 4 }))).toBe('Warrior: costs 18, ready in 4 turns. A soldier who guards and blocks the way.');
+    expect(addButtonTitleText(menuOption('settler', { turns: 12 }))).toBe('Settler: costs 30 + 1 citizen, ready in 12 turns. Founds a new city. Takes one citizen.');
+    expect(addButtonTitleText(menuOption('settler', { turns: null, wait: 'needsPopulation' }))).toBe('Settler: costs 30 (the city must grow first). Founds a new city. Takes one citizen.');
+    expect(addButtonTitleText(menuOption('fishingBoat'))).toBe("Fishing Boat: needs water inside this city's borders. Builds fishing nets inside the borders.");
+    for (const option of [...rome().buildOptions, ...(shoreView().cities[0].own?.buildOptions ?? [])]) {
+      const unit = UNITS[option.item.unitType];
+      const title = addButtonTitleText(option);
+      expect(title).toBe(`${unit.name}: ${buildOptionText(option)}. ${unit.description}`);
+      expect(title).not.toMatch(/[\r\n]/);
+    }
   });
 
   it('queueNoteText says why the city cannot be changed: no connection, turn ended, queue full', () => {
@@ -750,6 +810,7 @@ describe('unit hint and first steps', () => {
     const start = viewWith((view) => {
       view.cities = view.cities.filter((city) => city.owner !== view.you);
     });
+    // (The sample Settler stands inland, with no hill a city there would take: the two sentences of every game.)
     expect(firstStepsText(start)).toBe('Tap one of your units on the map to select it. Your Settler can found your first city.');
 
     // With a city of one's own there is nothing left to explain...
@@ -766,6 +827,156 @@ describe('unit hint and first steps', () => {
       view.units = [{ id: 'u2_zzzzzz', type: 'settler', owner: 'p2', tile: SAMPLE.emptyTile, own: null }];
     });
     expect(firstStepsText(foreignSettler)).toBeNull();
+  });
+});
+
+describe('the "First steps" note says where to found (firstStepsText, FOUND_HERE_NOTE)', () => {
+  const TWO = 'Tap one of your units on the map to select it. Your Settler can found your first city.';
+  const THREE = `${TWO} Where it stands now, a city would own water and a hill.`;
+  /** The tile the Settler of these tests stands on: the middle of the sample map, with every tile within three of it on the map. */
+  const SPOT = 4 * 14 + 6;
+
+  /**
+   * A view of a player who has no city yet: open grassland that belongs to
+   * nobody, all of it in sight, and the player's Settler on SPOT with its
+   * Found City button open. `change` puts water, hills and owners on it.
+   */
+  function meadow(change: (view: PlayerView, ring: (distanceFromSpot: number) => number[]) => void = () => {}): PlayerView {
+    const view = sampleView();
+    view.cities = [];
+    view.units = view.units.filter((unit) => unit.id === SAMPLE.settlerId);
+    view.tiles = view.tiles.map(() => ({ terrain: 'grassland', feature: null, improvement: null, owner: null, visible: true }));
+    const settler = unitIn(view, SAMPLE.settlerId);
+    settler.tile = SPOT;
+    ownOf(view, SAMPLE.settlerId).foundCityError = null;
+    const ring = (distanceFromSpot: number): number[] => tilesInRange(SPOT, 3, view).filter((tile) => distance(tile, SPOT, view) === distanceFromSpot);
+    change(view, ring);
+    return view;
+  }
+
+  /** The tile of a view, which every tile of a meadow is. */
+  function ground(view: PlayerView, tile: number): TileView {
+    const seen = view.tiles[tile];
+    if (seen === null) throw new Error(`tile ${tile} was never seen`);
+    return seen;
+  }
+
+  it('the sentence is added exactly while a city founded on the Settler\'s tile would own a water tile AND a hill: both within two tiles, both nobody\'s', () => {
+    expect(FOUND_HERE_NOTE).toBe('Where it stands now, a city would own water and a hill.');
+    expect(RULES.cityClaimRadius).toBe(2);
+    expect(meadow().tiles).toHaveLength(140);
+    expect(firstStepsText(meadow())).toBe(TWO);
+    // Water alone, a hill alone: not yet.
+    expect(firstStepsText(meadow((view, ring) => (ground(view, ring(2)[0]).terrain = 'coast')))).toBe(TWO);
+    expect(firstStepsText(meadow((view, ring) => (ground(view, ring(1)[0]).feature = 'hills')))).toBe(TWO);
+    // Both, at the edge of what a city takes (two tiles away) and right beside it: the third sentence.
+    for (const [waterAt, hillAt] of [[2, 2], [1, 2], [2, 1], [1, 1]]) {
+      const good = meadow((view, ring) => {
+        ground(view, ring(waterAt)[0]).terrain = 'coast';
+        ground(view, ring(hillAt)[3]).feature = 'hills';
+      });
+      expect(firstStepsText(good), `water ${waterAt} away, a hill ${hillAt} away`).toBe(THREE);
+    }
+    // Ocean is water a boat can enter; hills on plains and on desert are hills.
+    const ocean = meadow((view, ring) => {
+      ground(view, ring(2)[0]).terrain = 'ocean';
+      Object.assign(ground(view, ring(2)[5]), { terrain: 'desert', feature: 'hills' });
+    });
+    expect(firstStepsText(ocean)).toBe(THREE);
+    // Three tiles away is beyond a city's borders, which never grow.
+    const far = meadow((view, ring) => {
+      for (const tile of ring(3)) Object.assign(ground(view, tile), { terrain: 'coast' });
+      ground(view, ring(1)[0]).feature = 'hills';
+    });
+    expect(firstStepsText(far)).toBe(TWO);
+    const farHill = meadow((view, ring) => {
+      ground(view, ring(1)[0]).terrain = 'coast';
+      for (const tile of ring(3)) ground(view, tile).feature = 'hills';
+    });
+    expect(firstStepsText(farHill)).toBe(TWO);
+  });
+
+  it('it counts only what a new city would take: not another city\'s land, not a tile never seen, not mountains or forest, and not the Settler\'s own tile', () => {
+    const good = (change: (view: PlayerView, ring: (distanceFromSpot: number) => number[]) => void): PlayerView =>
+      meadow((view, ring) => {
+        ground(view, ring(2)[0]).terrain = 'coast';
+        ground(view, ring(2)[6]).feature = 'hills';
+        change(view, ring);
+      });
+    expect(firstStepsText(good(() => {}))).toBe(THREE);
+    // The water belongs to somebody's city already (a new city takes only what nobody owns): no boats here.
+    expect(firstStepsText(good((view, ring) => (ground(view, ring(2)[0]).owner = 'p2')))).toBe(TWO);
+    expect(firstStepsText(good((view, ring) => (ground(view, ring(2)[6]).owner = 'p2')))).toBe(TWO);
+    expect(firstStepsText(good((view, ring) => (ground(view, ring(2)[6]).owner = 'p1')))).toBe(TWO);
+    // A tile the player has never seen says nothing.
+    expect(firstStepsText(good((view, ring) => (view.tiles[ring(2)[0]] = null)))).toBe(TWO);
+    expect(firstStepsText(good((view, ring) => (view.tiles[ring(2)[6]] = null)))).toBe(TWO);
+    // Mountains and forest are no place for a Mine.
+    expect(firstStepsText(good((view, ring) => (ground(view, ring(2)[6]).feature = 'mountains')))).toBe(TWO);
+    expect(firstStepsText(good((view, ring) => (ground(view, ring(2)[6]).feature = 'forest')))).toBe(TWO);
+    // The hill under the city itself is not one to mine: nothing is built on the tile of a city.
+    const onTheHill = meadow((view, ring) => {
+      ground(view, ring(2)[0]).terrain = 'coast';
+      ground(view, SPOT).feature = 'hills';
+    });
+    expect(firstStepsText(onTheHill)).toBe(TWO);
+    // A tile out of sight but remembered counts as it was last seen, like everything the page says about tiles.
+    expect(firstStepsText(good((view, ring) => (ground(view, ring(2)[0]).visible = false)))).toBe(THREE);
+  });
+
+  it('it is about the tile the Settler stands on NOW: gone after a walk to a dry spot, back on the good one; not said of a tile no city can stand on; still said when only the moves are used up', () => {
+    const shore = (change: (view: PlayerView) => void = () => {}): PlayerView =>
+      meadow((view, ring) => {
+        // Water and a hill west of SPOT, two tiles away: in reach of SPOT, out of reach three tiles further east.
+        for (const tile of ring(2).filter((candidate) => candidate % 14 < SPOT % 14 - 1)) ground(view, tile).terrain = 'coast';
+        ground(view, SPOT - 1).feature = 'hills';
+        change(view);
+      });
+    expect(firstStepsText(shore())).toBe(THREE);
+    const walked = shore((view) => (unitIn(view, SAMPLE.settlerId).tile = SPOT + 3));
+    expect(landOfACityAt(walked, SPOT + 3)).toEqual({ water: false, hill: false });
+    expect(firstStepsText(walked)).toBe(TWO);
+    // Used-up moves change nothing about the spot...
+    expect(firstStepsText(shore((view) => (ownOf(view, SAMPLE.settlerId).foundCityError = 'noMovesLeft')))).toBe(THREE);
+    // ...but a tile that takes no city does: too close to a city, another player's land, forest.
+    for (const refusal of ['tooCloseToCity', 'tileOwned', 'badCityTile'] as const) {
+      expect(firstStepsText(shore((view) => (ownOf(view, SAMPLE.settlerId).foundCityError = refusal))), refusal).toBe(TWO);
+    }
+    // Two Settlers and no city (it can happen late in a game): said only if it is true of both.
+    const two = shore((view) => {
+      addOwnUnit(view, 'u1_second', 'settler', SPOT + 3);
+      ownOf(view, 'u1_second').foundCityError = null;
+    });
+    expect(firstStepsText(two)).toBe(TWO);
+    const twoGood = shore((view) => {
+      addOwnUnit(view, 'u1_second', 'settler', SPOT + 1);
+      ownOf(view, 'u1_second').foundCityError = null;
+    });
+    expect(landOfACityAt(twoGood, SPOT + 1)).toEqual({ water: false, hill: true });
+    expect(firstStepsText(twoGood)).toBe(TWO);
+  });
+
+  it('every new game begins with the third sentence, for every player: on generated maps of every size the start has water and a hill (rules H6 and H7), and the real view shows them', () => {
+    let starts = 0;
+    for (const mapSize of MAP_SIZE_IDS) {
+      for (const count of [1, 2, 4, 6, 8]) {
+        for (const seed of ['first-steps-a', 'first-steps-b']) {
+          const players = Array.from({ length: count }, (_unused, seat) => ({ id: playerIdForSeat(seat + 1), name: `Player ${seat + 1}`, civ: CIV_IDS[seat % CIV_IDS.length] }));
+          const state = createGame({ seed: `${seed}-${mapSize}-${count}`, settings: { mapSize, turnMode: 'simultaneous' }, players });
+          for (const player of players) {
+            const view = buildPlayerView(state, player.id);
+            starts += 1;
+            expect(firstStepsText(view), `${mapSize}, ${count} players, ${seed}, ${player.id}`).toBe(THREE);
+          }
+        }
+      }
+    }
+    expect(starts).toBe(3 * 2 * (1 + 2 + 4 + 6 + 8));
+  });
+
+  it('the note is short enough for its box: three sentences, no more than 150 characters', () => {
+    expect(THREE.length).toBeLessThanOrEqual(150);
+    expect(THREE.split('. ')).toHaveLength(3);
   });
 });
 
@@ -884,6 +1095,31 @@ describe('job texts (the unit panel of a Worker)', () => {
     for (const turns of [1, 2, 3, 4]) {
       expect(stopWarningText(job(turns), true).length).toBeLessThan(stopWarningText(job(turns), false).length);
       expect(stopWarningText(job(turns), true).length).toBeLessThanOrEqual('3 turns will be lost.'.length);
+    }
+  });
+
+  it('stopTitleText, the tooltip of "Stop work", follows the small print: "nothing is lost yet" before a turn is worked, the number of turns afterwards; both from turnsLostByStopping', () => {
+    const job = (turnsWorked: number, improvement: UnitJobView['improvement'] = 'farm'): UnitJobView => ({
+      improvement, turnsWorked, turnsTotal: IMPROVEMENTS[improvement].turns, turnsLeft: Math.max(1, IMPROVEMENTS[improvement].turns - turnsWorked),
+    });
+    expect(stopTitleText(job(0))).toBe('Stop this work (nothing is lost yet)');
+    expect(stopTitleText(job(1))).toBe('Stop this work (1 turn of work is lost)');
+    expect(stopTitleText(job(3))).toBe('Stop this work (3 turns of work are lost)');
+    expect(stopTitleText(job(2, 'fishingNet'))).toBe('Stop this work (2 turns of work are lost)');
+    // The fault this replaces: one fixed sentence that said "the turns worked are lost" beside "Stopping now loses nothing."
+    expect(stopTitleText(job(0))).not.toMatch(/turn/);
+    expect(stopWarningText(job(0), false)).toBe('Stopping now loses nothing.');
+
+    // One number behind both sentences: the turns worked, and never less than none.
+    expect([0, 1, 3, 4].map((turns) => turnsLostByStopping(job(turns)))).toEqual([0, 1, 3, 4]);
+    expect(turnsLostByStopping(job(-1))).toBe(0);
+    for (const turns of [0, 1, 2, 3, 4]) {
+      const lost = turnsLostByStopping(job(turns));
+      const sentences = [stopTitleText(job(turns)), stopWarningText(job(turns), false), stopWarningText(job(turns), true)];
+      for (const sentence of sentences) {
+        expect(sentence.includes('nothing'), `${turns}: "${sentence}"`).toBe(lost === 0);
+        if (lost > 0) expect(sentence, `${turns}`).toContain(`${lost} turn${lost === 1 ? ' ' : 's '}`);
+      }
     }
   });
 

@@ -3,9 +3,10 @@
  * functions of the view/state: easy to test without a browser.
  */
 
-import { UNITS, boardFromView, pathTo, reachableTiles } from '@domination/shared';
+import { RULES, UNITS, boardFromView, improvementFits, pathTo, reachableTiles, tileMoveCost, tilesInRange } from '@domination/shared';
 import type {
   CityView,
+  OwnCityDetail,
   PlayerPublic,
   PlayerView,
   ReachStep,
@@ -216,6 +217,50 @@ export function citiesWithoutProduction(view: PlayerView): CityView[] {
   return view.cities
     .filter((city) => city.owner === view.you && city.own !== null && city.own.buildQueue.length === 0)
     .sort((a, b) => compareIds(a.id, b.id));
+}
+
+/**
+ * What a city founded on this tile now would own of the two things a first
+ * city is glad of, as far as the viewer's own view tells:
+ *  - `water`: a tile a boat can enter. A city that owns none can never
+ *    build boats, because borders do not grow;
+ *  - `hill`: a tile a Mine can be built on (hills), the city's own tile
+ *    not counted: nothing is built on the tile of a city.
+ * It looks at the tiles a new city takes by the shared rule (foundCity):
+ * its own tile and, within RULES.cityClaimRadius of it, what nobody owns
+ * yet. A tile the viewer has never seen counts for nothing, so the answer
+ * never says more than the view does. (A Settler sees further than a city
+ * reaches, so around an own Settler every such tile is in the view.)
+ *
+ * The "First steps" note asks this about the tile the player's Settler
+ * stands on (firstStepsText in ui/texts.ts). It is worked out here, from
+ * the view, and not sent by the server, so it is as true in a game whose
+ * map was made before every start was given the sea and a hill as in a new
+ * one.
+ */
+export function landOfACityAt(view: PlayerView, tile: TileIndex): { water: boolean; hill: boolean } {
+  let water = false;
+  let hill = false;
+  for (const near of tilesInRange(tile, RULES.cityClaimRadius, view)) {
+    const seen = view.tiles[near] ?? null;
+    if (seen === null || near === tile || seen.owner !== null) continue;
+    if (tileMoveCost(seen, 'sea') !== null) water = true;
+    if (improvementFits('mine', seen)) hill = true;
+  }
+  return { water, hill };
+}
+
+/**
+ * Is this city "not growing"? It is when its citizens gather no more food
+ * than the city eats: a surplus of 0 or less per turn (the view's
+ * foodPerTurn). ONE answer for every place that says the words: the food
+ * line of the city panel (foodText in ui/texts.ts) and the line of the tile
+ * information about a city set to "Build first" (game/tileInfo.ts). The
+ * comparison stood in both files, where one could be changed without the
+ * other.
+ */
+export function cityNotGrowing(own: OwnCityDetail): boolean {
+  return own.foodPerTurn <= 0;
 }
 
 /**

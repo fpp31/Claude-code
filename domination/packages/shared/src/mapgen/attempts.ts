@@ -90,7 +90,9 @@ export function generateForSize(
   }
   throw new Error(
     `generateMap: no valid start positions after ${MAPGEN.maxAttempts} attempts ` +
-      `(seed '${seed}', ${size.width} x ${size.height} tiles, ${playerCount} players). ` +
-      'This is a bug in the map generator.',
+      `(seed '${seed}', ${size.width} x ${size.height} tiles, ${playerCount} ${playerCount === 1 ? 'player' : 'players'}). ` +
+      'With the numbers the game came with, this is a bug in the map generator. ' +
+      'If a number in mapgen/tuning.ts was changed (startCoastTiles, for example), ' +
+      'that number asks for more than a map of this size can give that many players.',
   );
 }

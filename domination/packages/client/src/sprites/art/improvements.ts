@@ -139,12 +139,14 @@ const NET_FLOATS: [x: number, y: number][] = [[8, 0], [1, 3], [15, 3], [1, 11], 
  *
  * The top float and the worked-tile token. The token lies in the top point
  * of the tile (x 9 to 18, y 0 to 5 of the tile box), the top float right
- * under it (x 11 to 14, y 6 to 9), and both are a warm disc with the same
- * light pixel. They were looked at on the map at the smallest zoom, a net
- * nobody gathers from beside a net with the token: the token is twice as
- * wide (eight pixels against four, ten with its shadow) and yellow, the
- * float one of six equal orange dots of a ring, and the lone float was not
- * taken for a token. So the ring keeps a float in the top point.
+ * under it (x 11 to 14, y 6 to 9), and both are a warm disc. They were
+ * looked at on the map at the smallest zoom, a net nobody gathers from
+ * beside a net with the token: the token is twice as wide (eight pixels
+ * against four, ten with its shadow) and yellow, the float one of six
+ * equal orange dots of a ring, and the lone float was not taken for a
+ * token. So the ring keeps a float in the top point. (Since the review of
+ * round 3 the token has a white face inside its gold rim, which a float
+ * has not; the two were looked at together again, at every zoom.)
  *
  * The other ring, with floats at the left, at the right and at the four
  * slanted sides (corners (4,1) (12,1) (0,7) (16,7) (4,13) (12,13), the

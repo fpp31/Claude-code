@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { boardFromView, cloneJson, reachableTiles } from '@domination/shared';
-import type { CityView, PlayerView, ReachStep, TileIndex, UnitView } from '@domination/shared';
+import { boardFromView, cloneJson, distance, reachableTiles, tilesInRange } from '@domination/shared';
+import type { CityView, PlayerView, ReachStep, TileIndex, TileView, UnitView } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import {
   canActNow,
   citiesWaiting,
   citiesWithoutProduction,
+  cityNotGrowing,
   idleUnits,
+  landOfACityAt,
   markedTile,
   myPlayer,
   ordersClosed,
@@ -413,6 +415,69 @@ describe('selectors (WP4)', () => {
     expect(citiesWaiting(view).map((city) => city.id)).toEqual(['c1_aaaaaa', 'c1_zzzzzz']);
     // The two lists never share a city.
     expect(citiesWithoutProduction(view).map((city) => city.id)).toEqual(['c1_dddddd']);
+  });
+
+  it('landOfACityAt: what a city founded on a tile would own, read from the view: water and a hill among the tiles within two that nobody owns, the tile itself not counted', () => {
+    // Open grassland that is nobody's, all in sight; the spot is the middle of the sample map.
+    const view = sampleView();
+    view.cities = [];
+    view.tiles = view.tiles.map(() => ({ terrain: 'grassland', feature: null, improvement: null, owner: null, visible: true }));
+    const spot = 4 * 14 + 6;
+    const at = (steps: number): TileIndex[] => tilesInRange(spot, 3, view).filter((tile) => distance(tile, spot, view) === steps);
+    const set = (tile: TileIndex, change: Partial<TileView>): void => {
+      view.tiles[tile] = { ...(view.tiles[tile] as TileView), ...change };
+    };
+    expect([at(1).length, at(2).length, at(3).length]).toEqual([6, 12, 18]);
+    expect(landOfACityAt(view, spot)).toEqual({ water: false, hill: false });
+
+    set(at(2)[0], { terrain: 'coast' });
+    expect(landOfACityAt(view, spot)).toEqual({ water: true, hill: false });
+    set(at(2)[11], { feature: 'hills' });
+    expect(landOfACityAt(view, spot)).toEqual({ water: true, hill: true });
+    // The same land asked about another tile, the one right of the water: the water is beside it, and the
+    // hill, which lies on the far side of the spot, is out of that tile's reach.
+    expect(distance(at(2)[0] + 1, at(2)[11], view)).toBeGreaterThan(2);
+    expect(landOfACityAt(view, at(2)[0] + 1)).toEqual({ water: true, hill: false });
+
+    // What somebody owns already is not taken by a new city, whoever it is; what was never seen says nothing.
+    set(at(2)[0], { owner: 'p2' });
+    expect(landOfACityAt(view, spot)).toEqual({ water: false, hill: true });
+    set(at(2)[0], { owner: null });
+    set(at(2)[11], { owner: view.you });
+    expect(landOfACityAt(view, spot)).toEqual({ water: true, hill: false });
+    set(at(2)[11], { owner: null });
+    view.tiles[at(2)[0]] = null;
+    expect(landOfACityAt(view, spot)).toEqual({ water: false, hill: true });
+
+    // Three tiles away is out of a city's reach; and the hill under the city itself is not one for a Mine.
+    set(at(2)[11], { feature: null });
+    for (const tile of at(3)) set(tile, { terrain: 'coast', feature: null });
+    set(at(3)[4], { terrain: 'plains', feature: 'hills' });
+    set(spot, { feature: 'hills' });
+    expect(landOfACityAt(view, spot)).toEqual({ water: false, hill: false });
+    // Ocean is water too; a hill with a Mine on it is still the city's hill; mountains and forest are no hills.
+    set(at(1)[0], { terrain: 'ocean' });
+    set(at(1)[1], { feature: 'mountains' });
+    set(at(1)[2], { feature: 'forest' });
+    expect(landOfACityAt(view, spot)).toEqual({ water: true, hill: false });
+    set(at(1)[3], { terrain: 'desert', feature: 'hills', improvement: 'mine' });
+    expect(landOfACityAt(view, spot)).toEqual({ water: true, hill: true });
+    // A tile at the edge of the map has fewer neighbours and no trouble.
+    expect(landOfACityAt(view, 0)).toEqual({ water: false, hill: false });
+  });
+
+  it('cityNotGrowing: a city is "not growing" exactly when its food surplus is 0 or less, whatever its citizens put first', () => {
+    // The one question behind the food line of the city panel (foodText) and the line of a tile's
+    // box about a city set to "Build first" (describeTile); each of the two has its own test of the words.
+    const own = romeOf(sampleView());
+    for (const focus of ['grow', 'build'] as const) {
+      expect(cityNotGrowing({ ...own, focus, foodPerTurn: 2 }), focus).toBe(false);
+      expect(cityNotGrowing({ ...own, focus, foodPerTurn: 1 }), focus).toBe(false);
+      expect(cityNotGrowing({ ...own, focus, foodPerTurn: 0 }), focus).toBe(true);
+      expect(cityNotGrowing({ ...own, focus, foodPerTurn: -2 }), focus).toBe(true);
+    }
+    // Only the surplus counts: a full store with nothing coming in is not growing either.
+    expect(cityNotGrowing({ ...own, foodStored: own.foodToGrow, foodPerTurn: 0 })).toBe(true);
   });
 
   it('idleUnits come sorted by id, whatever order the view lists them in', () => {

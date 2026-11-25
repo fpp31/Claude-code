@@ -22,7 +22,7 @@ import type {
   UnitTypeId,
   UnitView,
 } from '@domination/shared';
-import { citiesWaiting, citiesWithoutProduction, idleUnits, ownThingsAt } from '../game/selectors';
+import { citiesWaiting, citiesWithoutProduction, cityNotGrowing, idleUnits, landOfACityAt, ownThingsAt } from '../game/selectors';
 import type { OrdersClosed } from '../game/selectors';
 import type { JoinProblem } from '../state/store';
 
@@ -132,10 +132,23 @@ export const STOP_LABEL = 'Stop work';
 export const STOP_ASK = 'Tap again to stop';
 
 /**
+ * How many turns of work a press on "Stop work" throws away: the turns the
+ * unit has worked on its job (UnitJobView.turnsWorked, the view's number),
+ * and 0 while none is worked yet. ONE answer for the small print beside the
+ * button (stopWarningText) and for the button's tooltip (stopTitleText), so
+ * that the two can never say different things about one job. (They did:
+ * with no turn worked the small print said "Stopping now loses nothing."
+ * while the tooltip, one fixed sentence, said "the turns worked are lost".)
+ */
+export function turnsLostByStopping(job: UnitJobView): number {
+  return Math.max(0, job.turnsWorked);
+}
+
+/**
  * The small print beside "Stop work" (it replaces round 2's one fixed
  * sentence, "Stopping loses the work done so far."). It is about the
  * button, not about the job: "The work done so far is lost." read as news
- * of a loss. The numbers are the view's (UnitJobView.turnsWorked).
+ * of a loss. The number is turnsLostByStopping(job).
  *   no turn worked yet        -> 'Stopping now loses nothing.' (the button
  *                                does not ask then, whatever `asking` says)
  *   not asking, turns worked  -> 'Stopping loses 3 turns of work.',
@@ -150,9 +163,25 @@ export const STOP_ASK = 'Tap again to stop';
  * @param asking  is the button waiting for its second press?
  */
 export function stopWarningText(job: UnitJobView, asking: boolean): string {
-  if (job.turnsWorked <= 0) return 'Stopping now loses nothing.';
-  const turns = countOf(job.turnsWorked, 'turn', 'turns');
+  const lost = turnsLostByStopping(job);
+  if (lost === 0) return 'Stopping now loses nothing.';
+  const turns = countOf(lost, 'turn', 'turns');
   return asking ? `${turns} will be lost.` : `Stopping loses ${turns} of work.`;
+}
+
+/**
+ * The tooltip of "Stop work", for a mouse that rests on the button. It says
+ * what the small print says, from the same number (turnsLostByStopping):
+ *   no turn worked yet  -> 'Stop this work (nothing is lost yet)'
+ *   turns worked        -> 'Stop this work (1 turn of work is lost)',
+ *                          'Stop this work (3 turns of work are lost)'
+ * The same words whether the button asks or not, and while it is greyed
+ * out: they say what a press that stops the work costs.
+ */
+export function stopTitleText(job: UnitJobView): string {
+  const lost = turnsLostByStopping(job);
+  if (lost === 0) return 'Stop this work (nothing is lost yet)';
+  return `Stop this work (${countOf(lost, 'turn', 'turns')} of work ${lost === 1 ? 'is' : 'are'} lost)`;
 }
 
 /**
@@ -255,16 +284,41 @@ export function jobProgressText(job: UnitJobView): string {
 export { improvementBonusText } from '../game/tileInfo';
 
 /**
+ * The last sentence of the "First steps" note while it is true: a city
+ * founded on the tile the player's Settler stands on would own water and a
+ * hill. Every new game starts on such a tile (the map generator's rules H6
+ * and H7), and a newcomer who walks the Settler off first can found a city
+ * that reaches no water and never builds a boat; nothing on the screen said
+ * so. "own" is the word of the tile information ("Belongs to you").
+ */
+export const FOUND_HERE_NOTE = 'Where it stands now, a city would own water and a hill.';
+
+/**
  * The words of the "First steps" note, shown at the very start of a game
  * while nothing is selected; null once the player has a city (or has
  * nothing that could found one). A new player sees a map, two little
  * figures and a big End Turn button: this says which of them to touch.
+ *
+ * FOUND_HERE_NOTE is added while it holds for the Settler as it stands in
+ * the view (for each of them, should the player have several): the tile is
+ * one a city can be founded on, and a city there would own water and a hill
+ * (landOfACityAt). It is read from the view and not taken for granted, so
+ * the note never promises it in a game whose map was made before every
+ * start had both, nor after the Settler has walked to a spot without them.
+ * A Settler that has only run out of moves still stands on its good spot.
  */
 export function firstStepsText(view: PlayerView): string | null {
   const hasCity = view.cities.some((city) => city.owner === view.you);
-  const hasFounder = view.units.some((unit) => unit.owner === view.you && UNITS[unit.type].canFoundCity);
-  if (hasCity || !hasFounder) return null;
-  return 'Tap one of your units on the map to select it. Your Settler can found your first city.';
+  const founders = view.units.filter((unit) => unit.owner === view.you && UNITS[unit.type].canFoundCity);
+  if (hasCity || founders.length === 0) return null;
+  const first = 'Tap one of your units on the map to select it. Your Settler can found your first city.';
+  const goodSpot = founders.every((unit) => {
+    const refusal = unit.own === null ? 'noSuchUnit' : unit.own.foundCityError;
+    if (refusal !== null && refusal !== 'noMovesLeft') return false; // no city can stand on this tile
+    const land = landOfACityAt(view, unit.tile);
+    return land.water && land.hill;
+  });
+  return goodSpot ? `${first} ${FOUND_HERE_NOTE}` : first;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,11 +335,13 @@ export function populationText(population: number): string {
  * turn): not growing", "Food 6/22 (-2 per turn): not growing". The last
  * words are said under either way of placing citizens, whenever they are
  * true: they are how a player sees what "Build first" costs, and that a
- * city has reached the limit of its land.
+ * city has reached the limit of its land. When they are true is one
+ * question, cityNotGrowing (game/selectors.ts), which the tile information
+ * asks too.
  */
 export function foodText(own: OwnCityDetail): string {
   const food = `Food ${own.foodStored}/${own.foodToGrow} (${signed(own.foodPerTurn)} per turn)`;
-  return own.foodPerTurn <= 0 ? `${food}: not growing` : food;
+  return cityNotGrowing(own) ? `${food}: not growing` : food;
 }
 
 /** The label of the pair of buttons "Grow first" / "Build first", for screen readers. */
@@ -450,39 +506,68 @@ export function progressFraction(stored: number, total: number | null): number {
 export const NEEDS_WATER = "needs water inside this city's borders";
 
 /**
- * The longest middle line of an add button that was seen on ONE line in the
- * narrowest panel (282 pixels): 'costs 30, ready in 48 turns, uses 1
- * population'. A test holds every answer of buildOptionText to it.
+ * The longest middle line of an add button there is, in characters: 'costs
+ * 20 (no free water tile for the boat)'. A test holds every answer of
+ * buildOptionText to it, and the Settler's line, the one that says the most,
+ * to 40 ('costs 30 + 1 citizen, ready in 48 turns' has 39).
+ *
+ * Characters are not pixels, so the lines were measured on the page, in the
+ * narrowest city panel there is at the six window sizes the game is tried
+ * in (the 320-pixel panel of a laptop window, where a line has 258 pixels):
+ * the Settler's 39 characters take 212.6 pixels in the font the page was
+ * built with (Inter) and 228.9 in a wider one (DejaVu Sans), so 17 % and 11 %
+ * of the room stay free; the 42 characters of the boat's reason take 226 and
+ * 241.1. Until the review of round 3 the Settler's line was 'costs 30, ready
+ * in 48 turns, uses 1 population', 46 characters and 257.2 pixels: it fitted
+ * by less than a pixel, and in the wider font it took a second line.
  */
-export const ADD_LINE_MAX = 46;
+export const ADD_LINE_MAX = 42;
 
 /**
  * The second (middle) line of an add button: what the item costs (in
- * production) and the turn it would be ready in if it were added now. ONE
- * line in every state, at most ADD_LINE_MAX characters: when the line of
- * the Settler took two, its button grew from 62 to 76 pixels at an answer,
- * every button under it moved down, and a second press on the same spot
- * queued another unit than the first. The first that applies:
+ * production, and for a Settler a citizen) and the turn it would be ready
+ * in if it were added now. ONE line in every state, at most ADD_LINE_MAX
+ * characters: when the line of the Settler took two, its button grew from
+ * 62 to 76 pixels at an answer, every button under it moved down, and a
+ * second press on the same spot queued another unit than the first. (The
+ * stylesheet now also keeps each line of an add button to one line whatever
+ * the font; this function keeps the words short enough to be read whole.)
+ * The first that applies:
  *   addError 'noWaterForBoat'    -> NEEDS_WATER alone
  *   a number of turns            -> 'costs 18, ready in 4 turns', 'costs 18, ready in 1 turn',
- *                                   'costs 30, ready in 18 turns, uses 1 population'
- *   wait null or 'earlier'       -> 'costs 18', 'costs 30, uses 1 population'
+ *                                   'costs 30 + 1 citizen, ready in 18 turns'
+ *   wait null or 'earlier'       -> 'costs 18', 'costs 30 + 1 citizen'
  *                                   ('earlier': the rows above already say why)
- *   any other wait               -> the reason in brackets, WITHOUT ', uses 1 population':
+ *   any other wait               -> the reason in brackets, WITHOUT ' + 1 citizen':
  *                                   'costs 30 (the city must grow first)', 'costs 18 (more than 50 turns)',
  *                                   'costs 20 (no free water tile for the boat)'
  *                                   (the Settler's third line already says "Takes one citizen.")
- * A full queue ('queueFull') changes nothing in this line: the head of the
- * panel says it (queueNoteText).
+ * "citizen" is the word of that third line and of the panel's last line
+ * (this line said "uses 1 population" before; the head of the panel counts
+ * "Population 4", but what a Settler takes away is one citizen). A full
+ * queue ('queueFull') changes nothing in this line: the head of the panel
+ * says it (queueNoteText).
  */
 export function buildOptionText(option: BuildOption): string {
   if (option.addError === 'noWaterForBoat') return NEEDS_WATER;
   const cost = `costs ${option.cost}`;
   const populationCost = UNITS[option.item.unitType].populationCost;
-  const uses = populationCost > 0 ? `, uses ${populationCost} population` : '';
-  if (option.turns !== null) return `${cost}, ready in ${countOf(option.turns, 'turn', 'turns')}${uses}`;
-  if (option.wait === null || option.wait === 'earlier') return `${cost}${uses}`;
+  const all = populationCost > 0 ? `${cost} + ${countOf(populationCost, 'citizen', 'citizens')}` : cost;
+  if (option.turns !== null) return `${all}, ready in ${countOf(option.turns, 'turn', 'turns')}`;
+  if (option.wait === null || option.wait === 'earlier') return all;
   return `${cost} (${buildWaitText(option.wait, option.item.unitType)})`;
+}
+
+/**
+ * The tooltip of an add button: its three lines as one sentence, "Settler:
+ * costs 30 + 1 citizen, ready in 12 turns. Founds a new city. Takes one
+ * citizen." Each line of an add button is one line in every font, and where
+ * a font is too wide for the room a line is cut with "..." (the stylesheet,
+ * .build-detail): the tooltip then still has every word.
+ */
+export function addButtonTitleText(option: BuildOption): string {
+  const unit = UNITS[option.item.unitType];
+  return `${unit.name}: ${buildOptionText(option)}. ${unit.description}`;
 }
 
 // ---------------------------------------------------------------------------

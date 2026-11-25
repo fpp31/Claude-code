@@ -59,7 +59,8 @@ interface JobRow {
  *    ("Building a Farm: 3 turns left", unitJob), a bar, and "Stop work"
  *    (jobStop) with, while it can be pressed, the small print that says
  *    what stopping loses ("Stopping loses 3 turns of work.",
- *    jobStopWarning).
+ *    jobStopWarning). The button's tooltip says the same, from the same
+ *    number ("Stop this work (3 turns of work are lost)").
  *    Click: controller.stopJob();
  *  - one line about the tile the unit stands on (unitTile; unitTileText in
  *    game/tileInfo.ts, the words of the tile card);
@@ -175,7 +176,7 @@ export function mountUnitPanel(parent: HTMLElement, store: Store, controller: Co
   const stopButton = h('button', {
     className: 'button job-stop',
     testId: TEST_IDS.jobStop,
-    attributes: { title: 'Stop this work (the turns worked are lost)', 'data-asking': 'false' },
+    attributes: { 'data-asking': 'false' }, // its tooltip is printed with its words (update, below)
     onClick: () => {
       // A press that was sent shows when the server's view comes back, and an ignored one never. Only the
       // question changes the panel without the store: print it now, and again when its four seconds are over.
@@ -278,6 +279,7 @@ export function mountUnitPanel(parent: HTMLElement, store: Store, controller: Co
       }
       if (block.stop !== null) {
         setText(stopButton, block.stop.label);
+        setAttribute(stopButton, 'title', block.stop.title);
         setClass(stopButton, 'armed', block.stop.asking);
         setAttribute(stopButton, 'data-asking', block.stop.asking ? 'true' : 'false');
         setDisabled(stopButton, block.stop.disabled);

@@ -168,7 +168,9 @@ export type MapGenerator = (seed: string, mapSize: MapSizeId, playerCount: numbe
  *  starts are chosen, so it moves no start. Then every rule is checked on
  *  the map as it is handed out; if one does not hold, generate again from
  *  the next attempt stream (see Determinism). Give up with a thrown Error
- *  after 100 attempts: that would be a bug in the generator. In practice
+ *  after 100 attempts: with the numbers the game came with that would be a
+ *  bug in the generator (the error also names mapgen/tuning.ts, whose
+ *  numbers can ask for more than a map can give). In practice
  *  the first attempt succeeds on every map size of the game (a test counts
  *  it over thousands of maps), so the tests reach the retry and the giving
  *  up through `generateForSize` (attempts.ts) with map sizes too small for

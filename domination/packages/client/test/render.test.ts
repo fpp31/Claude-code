@@ -637,6 +637,53 @@ describe('the art (WP5)', () => {
     expect(covered('unit.scoutBoat')).toBe(0);
   });
 
+  it('the worked-tile token has what no hill has: a white face inside its gold rim; no hill on any ground, and no float of a net, has a pixel near white', () => {
+    // The token was a gold oval with a dark line, as one mound of hills on plains is, in nearly the same three
+    // colours; "Build first" puts the citizens on hills, and such a tile showed three gold lumps.
+    const token = spriteImage('marker.worked').image;
+    const white = rgba(PALETTE.tokenFace);
+    expect(white).toEqual([255, 255, 255, 255]);
+    // The picture: a face of 4 x 2 white pixels in the middle, a rim of gold around it that is deeper at the
+    // lower right, the dark line and the shadow as they always were.
+    expect([token.width, token.height]).toEqual([10, 6]);
+    for (const y of [2, 3]) for (const x of [2, 3, 4, 5]) expect(getPixel(token, x, y), `the face at (${x}, ${y})`).toEqual(white);
+    expect(countPixels(token, white)).toBe(8);
+    expect(countPixels(token, rgba(PALETTE.gold))).toBe(7);
+    expect(countPixels(token, rgba(PALETTE.tokenShade))).toBe(5);
+    expect(countPixels(token, OUTLINE)).toBe(16);
+    expect(countPixels(token, SHADOW)).toBe(7);
+    expect(countPixels(token, NOTHING)).toBe(60 - 8 - 7 - 5 - 16 - 7);
+    // Still a gold token: more gold than white inside the dark line, and the gold touches the line all around.
+    expect(countPixels(token, rgba(PALETTE.gold)) + countPixels(token, rgba(PALETTE.tokenShade))).toBeGreaterThan(countPixels(token, white));
+    // The rim alone would not do: the token's gold is nearly the gold of a hill on plains.
+    const apart = (a: number[], b: number[]): number => Math.max(...[0, 1, 2].map((channel) => Math.abs(a[channel] - b[channel])));
+    expect(apart(rgba(PALETTE.gold), rgba(PALETTE.plainsHill))).toBeLessThan(32);
+
+    // No hill has a pixel that could be taken for the face: on every ground, bright and fogged, each of its
+    // pixels is more than 48 away from white in some colour channel. The same for the floats of a fishing net,
+    // the top one of which lies right under the token.
+    let looked = 0;
+    for (const terrain of TERRAIN_IDS) {
+      for (const look of ['normal', 'fogged'] as const) {
+        for (const id of ['feature.hills', 'improvement.fishingNet', 'improvement.mine'] as const) {
+          const picture = spriteImage(id, terrain, '', look).image;
+          for (let y = 0; y < picture.height; y++) {
+            for (let x = 0; x < picture.width; x++) {
+              const pixel = getPixel(picture, x, y);
+              if (pixel[3] !== 255) continue;
+              looked += 1;
+              expect(apart(pixel, white), `${id} on ${terrain}, ${look}, at (${x}, ${y}): ${pixel.join()}`).toBeGreaterThan(48);
+            }
+          }
+        }
+      }
+    }
+    expect(looked).toBeGreaterThan(5 * 2 * 3 * 60);
+    // The lightest pixel of a hill, the lit edge of one on desert, is the nearest any comes.
+    expect(apart(rgba(PALETTE.desertHillLight), white)).toBe(55);
+    expect(apart(rgba(PALETTE.plainsHillLight), white)).toBe(87);
+  });
+
   it('the "at work" sign is 7 x 7 and the "builds nothing" sign 7 x 9; they differ from each other and from the path dot in more than 12 pixels', () => {
     const working = spriteImage('marker.working');
     const idle = spriteImage('marker.idle');

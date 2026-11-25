@@ -23,6 +23,18 @@ export const MAPGEN = {
    * the sea inside the land its capital is sure to own. With 1 a quarter of
    * the capitals had a single tile to fish (495 of 1800 on 360 maps); with 3
    * every capital has three or more and the starts are as fair as before.
+   *
+   * 6 is as far as it can go. Measured with the number set to 1, 2, 3, 4,
+   * 5 and 6, on 200 seeds for every map size with 1 to 8 players (4800 maps
+   * for each number): a map every time. Up to 3 the first attempt gave it
+   * every time; with 4 and 5 no map needed more than two. With 6 the
+   * generator has to work for it: a small map for eight players takes 10
+   * attempts on average, and of 5000 such maps one took 82 of the 100 it
+   * has (maxAttempts above). From 7 on it gives up on many maps (with 7 on
+   * 1399 of 4800: on a small map on 26 of 200 for three players, and on
+   * every one for eight). generateMap then throws, and "Start game" answers
+   * the host "The server had a problem. Please try again." A test holds the
+   * 6 and the 7 (mapgenPlacement.test.ts).
    */
   startCoastTiles: 3,
 

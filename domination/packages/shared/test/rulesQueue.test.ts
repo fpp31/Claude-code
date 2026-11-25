@@ -1721,6 +1721,43 @@ describe('building boats (round 3)', () => {
     }
   });
 
+  it('a city that owns only two water tiles, one of the sea two tiles away and a one-tile lake beside it, puts its boats on the sea; so does a city that owns three, two sea tiles that do not touch and the lake: however few the tiles are, the bodies of water are counted when the tiles do not hang together', () => {
+    // The town by the lake of the test above, at (4,3) with the lake at (5,3), behind a shore of
+    // mountains: `shore` is the row of the sea, and an 'm' in it closes one of the three sea tiles
+    // the city would own, (3,1), (4,1) and (5,1). A later city by a lake is like this; a first
+    // city is not (rule H6 of the generator gives it three tiles of the sea).
+    const townBehind = (shore: string): { state: GameState; city: City } =>
+      townOn(['~ ~ ~ ~ ~ ~ ~ ~ ~', shore, '~ g g g g g g g ~', ' ~ g g g g , g g ~', '~ g g g g g g g ~', ' ~ g g g g g g g ~', '~ ~ ~ ~ ~ ~ ~ ~ ~'], 4, 3);
+    const towns: [what: string, shore: string, sea: [x: number, y: number][]][] = [
+      ['one sea tile and the lake', ' ~ ~ ~ m m ~ ~ ~ ~', [[5, 1]]],
+      ['two sea tiles that do not touch and the lake', ' ~ ~ ~ ~ m ~ ~ ~ ~', [[5, 1], [3, 1]]],
+    ];
+    for (const [what, shore, seaAt] of towns) {
+      const { state, city } = townBehind(shore);
+      const map = state.map;
+      const LAKE = at(map, 5, 3);
+      const SEA = seaAt.map(([x, y]) => at(map, x, y)); // the higher tile first, as the rule takes them
+      // The drawing is what it says: the city owns these water tiles and no other, the lake beside
+      // it and the sea two tiles away, and no two of them touch.
+      expect(waterOf(state, city), what).toEqual([...SEA, LAKE].sort((a, b) => a - b));
+      expect(distance(city.tile, LAKE, map), what).toBe(1);
+      for (const tile of SEA) expect(distance(city.tile, tile, map), what).toBe(2);
+      for (const tile of [...SEA, LAKE]) expect(neighbors(tile, map).some((next) => tileIsWater(map.tiles[next]) && map.tiles[next].cityId === city.id), what).toBe(false);
+      // The lake is one tile; the sea is everything else.
+      expect(neighbors(LAKE, map).some((next) => tileIsWater(map.tiles[next])), what).toBe(false);
+      // By "nearer, then higher" alone the lake would come first. The sea does, for both boat types,
+      // and the lake only when the sea is full: the order worked out the long way.
+      expect(boatOrderByTheBook(state, city), what).toEqual([...SEA, LAKE]);
+      for (const type of BOATS) {
+        expect(findSpawnTile(state, city, type), `${what}, ${type}`).toBe(SEA[0]);
+        expect(boatOrderOfTheEngine(state, city, type), `${what}, ${type}`).toEqual([...SEA, LAKE]);
+        // Through the real turn: the boat is born on the sea, where a Scout Boat can sail away.
+        const launched = endTurnForAll(withCity(state, city.id, { queue: [type], productionStored: UNITS[type].cost })).state;
+        expect(unitOf(launched, 'p1', type).tile, `${what}, ${type}`).toBe(SEA[0]);
+      }
+    }
+  });
+
   it('a boat may appear on water the city owns across a strip of land (no "joined" rule for boats); a land unit still may not appear across water, and still takes the LOWER tile among equals', () => {
     // A city behind its own beach: one water tile, two tiles away, land in between.
     const inland = townOn(['m m m m m m m', ' m m m m m m m', 'm m m m m m m', ' m m m g g , m', 'm m m m m m m', ' m m m m m m m', 'm m m m m m m'], 3, 3);

@@ -4,12 +4,15 @@
  *
  * It is "render ready": numbers a panel prints (food per turn, turns left...)
  * are already computed by the server. The client needs no rule maths, with
- * two exceptions, both on facts of its own view and both through shared
+ * three exceptions, each on facts of its own view and each through shared
  * functions: the reachable-tile highlight
- * (`reachableTiles(boardFromView(view), unit)`), and the tile information
+ * (`reachableTiles(boardFromView(view), unit)`), the tile information
  * (`tileYields`, `tileMoveCost`, `tileIsWorkable`, `cityCenterYields`,
- * `improvementSiteError(siteInView(view, tile), id)`). Nothing else is
- * worked out on the client.
+ * `improvementSiteError(siteInView(view, tile), id)`), and one sentence of
+ * the "First steps" note: whether a city founded on the Settler's tile would
+ * own water and a hill (`tilesInRange` with `RULES.cityClaimRadius`,
+ * `tileMoveCost`, `improvementFits`). Nothing else is worked out on the
+ * client.
  *
  * What a view contains:
  *  - terrain and feature of every tile the player has ever seen;

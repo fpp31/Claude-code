@@ -1,11 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import { CITY_FOCUS, CITY_FOCUS_IDS, RULES, RULE_ERROR_MESSAGES, UNITS, UNIT_TYPE_IDS } from '@domination/shared';
-import type { BuildOption, CityFocusId, OwnCityDetail, PlayerView, QueueEntryView, RuleErrorCode, UnitTypeId } from '@domination/shared';
+import type { BuildOption, CityFocusId, OwnCityDetail, PlayerView, QueueEntryView, RuleErrorCode, UnitJobView, UnitTypeId } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import type { OrdersClosed } from '../src/game/selectors';
 import { cityPanelButtons, unitPanelButtons } from '../src/ui/panelButtons';
 import type { JobBlock } from '../src/ui/panelButtons';
-import { NEEDS_WATER, REMOVE_HINT, STOP_ASK, STOP_LABEL, buildOptionText, ordersClosedText, productionNoteText, productionText, stopWarningText } from '../src/ui/texts';
+import {
+  NEEDS_WATER,
+  REMOVE_HINT,
+  STOP_ASK,
+  STOP_LABEL,
+  addButtonTitleText,
+  buildOptionText,
+  ordersClosedText,
+  productionNoteText,
+  productionText,
+  stopTitleText,
+  stopWarningText,
+  turnsLostByStopping,
+} from '../src/ui/texts';
 import { SAMPLE, SHORE, addOwnUnit, ownOf, putToWork, romeOf, shoreView, unitIn } from './shellKit';
 
 /**
@@ -94,7 +107,7 @@ describe('the city panel: what is greyed out and why (cityPanelButtons)', () => 
     ]);
     expect(buttons.hasQueue).toBe(true);
     expect(buttons.clearDisabled).toBe(false);
-    expect(buttons.adds).toEqual(UNIT_TYPE_IDS.map((unitType) => ({ unitType, disabled: false })));
+    expect(buttons.adds.map(({ unitType, disabled }) => ({ unitType, disabled }))).toEqual(UNIT_TYPE_IDS.map((unitType) => ({ unitType, disabled: false })));
   });
 
   it('a queue of one: its row can go neither up nor down, and it can be removed', () => {
@@ -135,7 +148,7 @@ describe('the city panel: what is greyed out and why (cityPanelButtons)', () => 
   it('an add button is greyed by its OWN option only: one option with an error greys one button', () => {
     const own = romeBySea();
     own.buildOptions = own.buildOptions.map((option): BuildOption => (option.item.unitType === 'settler' ? { ...option, addError: 'queueFull' } : option));
-    expect(cityPanelButtons(own, null).adds).toEqual([
+    expect(cityPanelButtons(own, null).adds.map(({ unitType, disabled }) => ({ unitType, disabled }))).toEqual([
       { unitType: 'warrior', disabled: false },
       { unitType: 'scout', disabled: false },
       { unitType: 'settler', disabled: true },
@@ -143,6 +156,25 @@ describe('the city panel: what is greyed out and why (cityPanelButtons)', () => 
       { unitType: 'fishingBoat', disabled: false },
       { unitType: 'scoutBoat', disabled: false },
     ]);
+  });
+
+  it('every add button carries its three lines as one sentence for its tooltip (addButtonTitleText), whatever is greyed', () => {
+    // A line of an add button is one line in every font and is cut where a font is too wide: the tooltip has every word.
+    for (const own of [rome(), romeBySea(), rome({ buildQueue: [] }), fullRome()]) {
+      for (const closed of [null, ...CLOSED]) {
+        const adds = cityPanelButtons(own, closed).adds;
+        expect(adds).toHaveLength(own.buildOptions.length);
+        adds.forEach((add, index) => {
+          const option = own.buildOptions[index];
+          expect(add.unitType).toBe(option.item.unitType);
+          expect(add.title, `${add.unitType} ${closed}`).toBe(addButtonTitleText(option));
+          expect(add.title, `${add.unitType} ${closed}`).toBe(`${UNITS[add.unitType].name}: ${buildOptionText(option)}. ${UNITS[add.unitType].description}`);
+        });
+      }
+    }
+    const titles = cityPanelButtons(rome(), null).adds.map((add) => add.title);
+    expect(titles[2]).toBe('Settler: costs 30 + 1 citizen, ready in 14 turns. Founds a new city. Takes one citizen.');
+    expect(titles[4]).toBe("Fishing Boat: needs water inside this city's borders. Builds fishing nets inside the borders.");
   });
 
   it('an empty queue has no rows, no "Empty the queue" and nothing about the queue to print; the add buttons follow the same rule', () => {
@@ -207,7 +239,7 @@ describe('the city panel: what is greyed out and why (cityPanelButtons)', () => 
 
     // With water: all six can be pressed, and the boats' lines are a cost and a number like any other.
     expect(greyed(romeBySea())).toEqual(SIX_OPEN);
-    for (const option of romeBySea().buildOptions) expect(buildOptionText(option), option.item.unitType).toMatch(/^costs \d+, ready in \d+ turns/);
+    for (const option of romeBySea().buildOptions) expect(buildOptionText(option), option.item.unitType).toMatch(/^costs \d+( \+ 1 citizen)?, ready in \d+ turns$/);
     expect(cityPanelButtons(romeBySea(), null).note).toBeNull();
   });
 
@@ -387,7 +419,7 @@ describe('the unit panel: what is greyed out and why (unitPanelButtons)', () => 
       reason: null,
       showTitle: false,
       start: [],
-      stop: { disabled: false, label: 'Stop work', asking: false, warning: 'Stopping loses 1 turn of work.' },
+      stop: { disabled: false, label: 'Stop work', asking: false, warning: 'Stopping loses 1 turn of work.', title: 'Stop this work (1 turn of work is lost)' },
     });
     expect(unitPanelButtons(view, unitIn(view, SAMPLE.workerId), null)?.hint.main).toBe('At work here. Stop the work to move this unit.');
     // The fourth argument left out is "not asking".
@@ -398,7 +430,7 @@ describe('the unit panel: what is greyed out and why (unitPanelButtons)', () => 
     for (const closed of CLOSED) {
       const view = viewWith((changed) => (changed.players[0].endedTurn = closed === 'turnEnded'));
       const buttons = unitPanelButtons(view, unitIn(view, SAMPLE.workerId), closed);
-      expect(buttons?.jobs?.stop, closed).toEqual({ disabled: true, label: 'Stop work', asking: false, warning: null });
+      expect(buttons?.jobs?.stop, closed).toEqual({ disabled: true, label: 'Stop work', asking: false, warning: null, title: 'Stop this work (1 turn of work is lost)' });
       expect(buttons?.jobs?.closed, closed).toBe(ordersClosedText(closed));
       expect(buttons?.jobs?.start, closed).toEqual([]);
       expect(buttons?.hint.main, closed).toBe('');
@@ -415,31 +447,71 @@ describe('the unit panel: what is greyed out and why (unitPanelButtons)', () => 
       return unitPanelButtons(view, unitIn(view, SAMPLE.workerId), closed, asking)?.jobs?.stop ?? null;
     }
 
-    it('no turn worked yet: "Stop work", "Stopping now loses nothing."', () => {
-      expect(stopRow(0, false)).toEqual({ disabled: false, label: 'Stop work', asking: false, warning: 'Stopping now loses nothing.' });
+    it('no turn worked yet: "Stop work", "Stopping now loses nothing.", and the tooltip says the same: "nothing is lost yet"', () => {
+      expect(stopRow(0, false)).toEqual({
+        disabled: false, label: 'Stop work', asking: false, warning: 'Stopping now loses nothing.', title: 'Stop this work (nothing is lost yet)',
+      });
     });
 
     it('1 turn worked: "Stop work", "Stopping loses 1 turn of work."', () => {
-      expect(stopRow(1, false)).toEqual({ disabled: false, label: 'Stop work', asking: false, warning: 'Stopping loses 1 turn of work.' });
+      expect(stopRow(1, false)).toEqual({
+        disabled: false, label: 'Stop work', asking: false, warning: 'Stopping loses 1 turn of work.', title: 'Stop this work (1 turn of work is lost)',
+      });
     });
 
     it('3 turns worked: "Stop work", "Stopping loses 3 turns of work."', () => {
-      expect(stopRow(3, false)).toEqual({ disabled: false, label: 'Stop work', asking: false, warning: 'Stopping loses 3 turns of work.' });
+      expect(stopRow(3, false)).toEqual({
+        disabled: false, label: 'Stop work', asking: false, warning: 'Stopping loses 3 turns of work.', title: 'Stop this work (3 turns of work are lost)',
+      });
     });
 
     it('after the first press, 1 turn worked: "Tap again to stop", "1 turn will be lost."', () => {
-      expect(stopRow(1, true)).toEqual({ disabled: false, label: 'Tap again to stop', asking: true, warning: '1 turn will be lost.' });
+      expect(stopRow(1, true)).toEqual({
+        disabled: false, label: 'Tap again to stop', asking: true, warning: '1 turn will be lost.', title: 'Stop this work (1 turn of work is lost)',
+      });
     });
 
     it('after the first press, 3 turns worked: "Tap again to stop", "3 turns will be lost."', () => {
-      expect(stopRow(3, true)).toEqual({ disabled: false, label: 'Tap again to stop', asking: true, warning: '3 turns will be lost.' });
+      expect(stopRow(3, true)).toEqual({
+        disabled: false, label: 'Tap again to stop', asking: true, warning: '3 turns will be lost.', title: 'Stop this work (3 turns of work are lost)',
+      });
+    });
+
+    it('the tooltip never says more than the small print: both come from one number, in every state of the row', () => {
+      // (Until the review of round 3 the tooltip was one fixed sentence, "the turns worked are lost", also
+      // beside "Stopping now loses nothing.")
+      const view = sampleView();
+      for (const turns of [0, 1, 2, 3]) {
+        for (const asking of [false, true]) {
+          for (const closed of [null, ...CLOSED]) {
+            const row = stopRow(turns, asking, closed);
+            const job = { ...ownOf(view, SAMPLE.workerId).job, turnsWorked: turns } as UnitJobView;
+            const about = `${turns} ${asking} ${closed}`;
+            expect(row?.title, about).toBe(stopTitleText(job));
+            expect(turnsLostByStopping(job), about).toBe(turns);
+            // "nothing" stands in both or in neither.
+            expect(row?.title.includes('nothing'), about).toBe(turns === 0);
+            if (row?.warning != null) expect(row.warning.includes('nothing'), about).toBe(turns === 0);
+            // With turns to lose, both name the same count.
+            if (turns > 0) expect(row?.title, about).toContain(`${turns} turn`);
+            if (turns > 0 && row?.warning != null) expect(row.warning, about).toContain(`${turns} turn`);
+          }
+        }
+      }
     });
 
     it('orders closed: "Stop work", greyed, no small print, and never asking, whatever the controller says', () => {
       for (const closed of CLOSED) {
         for (const turns of [0, 1, 3]) {
           for (const asking of [false, true]) {
-            expect(stopRow(turns, asking, closed), `${closed} ${turns} ${asking}`).toEqual({ disabled: true, label: 'Stop work', asking: false, warning: null });
+            // (The tooltip stays: it says what stopping costs, and follows the turns worked like the small print did.)
+            expect(stopRow(turns, asking, closed), `${closed} ${turns} ${asking}`).toEqual({
+              disabled: true,
+              label: 'Stop work',
+              asking: false,
+              warning: null,
+              title: turns === 0 ? 'Stop this work (nothing is lost yet)' : turns === 1 ? 'Stop this work (1 turn of work is lost)' : 'Stop this work (3 turns of work are lost)',
+            });
           }
         }
       }
@@ -472,10 +544,11 @@ describe('the unit panel: what is greyed out and why (unitPanelButtons)', () => 
         reason: null,
         showTitle: false,
         start: [],
-        stop: { disabled: false, label: 'Stop work', asking: false, warning: 'Stopping loses 3 turns of work.' },
+        stop: { disabled: false, label: 'Stop work', asking: false, warning: 'Stopping loses 3 turns of work.', title: 'Stop this work (3 turns of work are lost)' },
       });
-      expect(unitPanelButtons(view, boat, null, true)?.jobs?.stop).toEqual({ disabled: false, label: 'Tap again to stop', asking: true, warning: '3 turns will be lost.' });
-      expect(unitPanelButtons(view, boat, 'turnEnded', true)?.jobs?.stop).toEqual({ disabled: true, label: 'Stop work', asking: false, warning: null });
+      const title = 'Stop this work (3 turns of work are lost)';
+      expect(unitPanelButtons(view, boat, null, true)?.jobs?.stop).toEqual({ disabled: false, label: 'Tap again to stop', asking: true, warning: '3 turns will be lost.', title });
+      expect(unitPanelButtons(view, boat, 'turnEnded', true)?.jobs?.stop).toEqual({ disabled: true, label: 'Stop work', asking: false, warning: null, title });
     });
   });
 

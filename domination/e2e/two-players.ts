@@ -139,10 +139,12 @@
  *  36. The start keeps its promises, and a city has six things to build:
  *      the two boats are the last add buttons; every add button is pressed
  *      at three laptop sizes and three phone sizes and is 62 pixels tall,
- *      also under a Settler that waits; an idle city on a small phone; both
- *      capitals own coast and a hill (Ben founds his for it); and on the
- *      demo page, whose city owns no water, the boats are greyed out with
- *      the reason inside their buttons.
+ *      with each of its three lines on one line and none cut, also under a
+ *      Settler that waits, and with letters set wider than any font (a
+ *      line is then cut, and the tooltip has it whole); an idle city on a
+ *      small phone; both capitals own coast and a hill (Ben founds his for
+ *      it); and on the demo page, whose city owns no water, the boats are
+ *      greyed out with the reason inside their buttons.
  *  37. "Grow first" / "Build first": the two buttons with their words on
  *      the screen at four sizes; a press moves the citizens and changes
  *      every number; a press too soon, on the chosen button, or right after
@@ -156,7 +158,8 @@
  *      a unit at work (two looks at the map's own pixels); a Worker is
  *      offered no net.
  *  41. "Stop work" asks once: the whole course with a mouse, the short one
- *      for the Worker and with a finger at two phone sizes.
+ *      for the Worker and with a finger at two phone sizes; the button's
+ *      tooltip says what its small print says.
  *  42. The net is finished; a citizen gathers from it, a gold token marks
  *      it, and it is all still there after a reload.
  *  43. A Scout Boat sails four tiles and shows Ada water she had never seen.
@@ -171,6 +174,14 @@
  * step 25 (a Worker's panel has no button for a net), step 28a (a double
  * press on the Worker does not start the question either), and every look
  * at the unit panel (what "Stop work" says, and whether it asks).
+ *
+ * The repair after the review of round 3 added looks to steps 4 and 21
+ * (the "First steps" note says where to found, "Where it stands now, a
+ * city would own water and a hill.", and its box is whole on the screen in
+ * three laptop windows and at three phone sizes), to step 36 (no line of an
+ * add button is cut, and with wider letters no add button grows) and to
+ * step 41 (the tooltip of "Stop work"); and every look at the two panels
+ * now also reads the tooltips of the add buttons and of "Stop work".
  *
  * Steps 19, 26 and 28c, the card look of steps 22 and 24, the last look of
  * step 31 and steps 36 to 43 depend on the map the fixed seed gives, and
@@ -191,7 +202,7 @@ import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { idleUnits } from '../packages/client/src/game/selectors';
+import { idleUnits, landOfACityAt } from '../packages/client/src/game/selectors';
 import { describeTile, unitTileText } from '../packages/client/src/game/tileInfo';
 import type { TileInfo } from '../packages/client/src/game/tileInfo';
 import { cityPanelButtons, unitPanelButtons } from '../packages/client/src/ui/panelButtons';
@@ -200,12 +211,15 @@ import { HOVER_BOX_GAP } from '../packages/client/src/ui/hoverPlacement';
 import { TEST_IDS } from '../packages/client/src/ui/testIds';
 import {
   FOCUS_GROUP_LABEL,
+  FOUND_HERE_NOTE,
   NEEDS_WATER,
   REMOVE_HINT,
   STOP_ASK,
   STOP_LABEL,
+  addButtonTitleText,
   buildOptionText,
   countOf,
+  firstStepsText,
   foodText,
   jobProgressText,
   ordersClosedText,
@@ -213,6 +227,7 @@ import {
   productionText,
   progressFraction,
   queueRowText,
+  stopTitleText,
   stopWarningText,
   todoHints,
 } from '../packages/client/src/ui/texts';
@@ -1224,6 +1239,69 @@ async function fingerTileUntil(page: any, tile: TileIndex, id: string, text: str
   throw new Error(`Tapped tile ${tile} ${most} times with a finger, but "${id}" never showed "${text}".`);
 }
 
+/**
+ * The "First steps" note of a game that has just begun, at one window size:
+ * it prints what firstStepsText says for the player's own view; in a new
+ * game those are three sentences, the last one about the spot the Settler
+ * stands on ("Where it stands now, a city would own water and a hill."),
+ * because every start is given both; and the note's box lies wholly on the
+ * screen, with every word in it and nothing lying on it.
+ *
+ * @param page  a page of a player who has no city yet and has not moved the
+ *              Settler, with nothing selected and no tile card open
+ * @param where begins the message: "at 390 x 844, with a finger"
+ */
+async function theNoteSaysWhereToFound(page: any, where: string): Promise<void> {
+  const view = await viewOf(page);
+  const settler = ownUnit(view, 'settler');
+  const land = landOfACityAt(view, settler.tile);
+  check(
+    land.water && land.hill,
+    `${where}: a city founded where the Settler starts would own water and a hill (water: ${land.water}, a hill: ${land.hill}; ` +
+      'if not, the start rule of the map generator has changed, or this look is made after the Settler has walked)',
+  );
+  const wanted = firstStepsText(view);
+  const look: { words: string; box: Box; cut: boolean; onTop: boolean; lines: number; screen: Box } | null = await page.evaluate((selector: string) => {
+    const note = document.querySelector(selector);
+    const words = note?.querySelector('.panel-hint');
+    if (note == null || words == null || note.getClientRects().length === 0) return null;
+    const rect = note.getBoundingClientRect();
+    const text = document.createRange();
+    text.selectNodeContents(words);
+    const rows = [...text.getClientRects()];
+    const last = rows[rows.length - 1];
+    // What lies on top where the last line of words ends, and where the first begins: the note itself?
+    const lies = [
+      document.elementFromPoint(last.right - 2, (last.top + last.bottom) / 2),
+      document.elementFromPoint(rows[0].left + 2, (rows[0].top + rows[0].bottom) / 2),
+    ];
+    return {
+      words: (words.textContent ?? '').trim(),
+      box: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height },
+      cut: note.scrollHeight > note.clientHeight || note.scrollWidth > note.clientWidth || words.scrollWidth > words.clientWidth,
+      onTop: lies.every((element) => element !== null && note.contains(element)),
+      lines: new Set(rows.map((row: any) => Math.round(row.top))).size,
+      screen: { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight, width: window.innerWidth, height: window.innerHeight },
+    };
+  }, byTestId(TEST_IDS.startHint));
+  if (look === null) throw new Error(`Check failed: ${where}: a new game shows the "First steps" note while nothing is selected`);
+  check(
+    wanted !== null && look.words === wanted,
+    `${where}: the "First steps" note prints what firstStepsText says for the view (the note: "${look.words}"; the function: "${wanted}")`,
+  );
+  check(
+    look.words === `Tap one of your units on the map to select it. Your Settler can found your first city. ${FOUND_HERE_NOTE}` &&
+      FOUND_HERE_NOTE === 'Where it stands now, a city would own water and a hill.',
+    `${where}: in a new game its last sentence says that a city founded where the Settler stands would own water and a hill (it says "${look.words}")`,
+  );
+  check(
+    isInside(look.box, look.screen) && !look.cut && look.onTop,
+    `${where}: the note's box lies wholly on the screen, none of its words is cut and nothing lies on them ` +
+      `(the box reaches from ${at({ x: look.box.left, y: look.box.top })} to ${at({ x: look.box.right, y: look.box.bottom })} in a window of ${look.screen.width} x ${look.screen.height}; ` +
+      `its words stand on ${look.lines} lines; cut: ${look.cut}; the note is on top where its words begin and end: ${look.onTop})`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers for the presses that could go wrong: what lies under a point, a
 // press on a point, a second device, a link with delay
@@ -1502,7 +1580,7 @@ interface ShownCityButtons {
    * city's choice (aria-pressed) and whether it is greyed out.
    */
   focus: FocusButton[];
-  /** The add buttons on the screen, top to bottom. */
+  /** The add buttons on the screen, top to bottom: which unit, whether it is greyed out, and its tooltip. */
   adds: AddButton[];
 }
 
@@ -1513,8 +1591,9 @@ interface ShownCityButtons {
  * out, and the sentence that says why; since round 3 also the two buttons
  * "Grow first" / "Build first" with their words, which of them is the
  * city's choice, and that they are greyed exactly while no order can be
- * given. The rule itself is tested in plain Node; this is the check that
- * the panel prints it. Returns what the page shows.
+ * given; and the tooltip of every add button, which holds the button's
+ * three lines in full. The rule itself is tested in plain Node; this is
+ * the check that the panel prints it. Returns what the page shows.
  *
  * @param where  begins the message: "on the phone, with a full queue"
  */
@@ -1562,7 +1641,11 @@ async function cityPanelPrintsItsButtons(page: any, cityId: CityId, where: strin
           })),
         adds: [...panel.querySelectorAll(`[data-testid^="${ids.add}"]`)]
           .filter((button: any) => button.getClientRects().length > 0)
-          .map((button: any) => ({ unitType: button.getAttribute('data-testid').slice(ids.add.length), disabled: button.disabled })),
+          .map((button: any) => ({
+            unitType: button.getAttribute('data-testid').slice(ids.add.length),
+            disabled: button.disabled,
+            title: button.getAttribute('title'),
+          })),
       };
     },
     {
@@ -1592,14 +1675,15 @@ interface ShownUnitButtons {
   /**
    * The job block: its first line (why nothing can be ordered), the one
    * reason for all, its heading, the job buttons, and "Stop work" with the
-   * words on it, whether it is asking (its data-asking) and its small print.
+   * words on it, whether it is asking (its data-asking), its small print
+   * and its tooltip (its title attribute).
    */
   jobs: {
     closed: string | null;
     reason: string | null;
     showTitle: boolean;
     start: JobButton[];
-    stop: { disabled: boolean; label: string; asking: boolean; warning: string | null } | null;
+    stop: { disabled: boolean; label: string; asking: boolean; warning: string | null; title: string | null } | null;
   } | null;
   /** The two sentences of the hint at the panel's bottom ('' for one that is not there). */
   hint: { main: string; more: string };
@@ -1613,8 +1697,9 @@ interface ShownUnitButtons {
  * Whether "Stop work" is waiting for its second press is the controller's
  * to know, not the view's. So the page is read first: what its button says
  * about that (data-asking) is handed to the function, and the button's
- * words, its small print and its greying must then be the function's for
- * that state. (That the button asks when it should is step 41's look.)
+ * words, its small print, its tooltip and its greying must then be the
+ * function's for that state. (That the button asks when it should is step
+ * 41's look.)
  */
 async function unitPanelPrintsItsButtons(page: any, unitId: UnitId, where: string): Promise<ShownUnitButtons> {
   const view = await viewOf(page);
@@ -1660,7 +1745,13 @@ async function unitPanelPrintsItsButtons(page: any, unitId: UnitId, where: strin
                   }),
                 stop:
                   stop.getClientRects().length > 0
-                    ? { disabled: stop.disabled, label: stop.textContent.trim(), asking: stop.getAttribute('data-asking') === 'true', warning: words.warning }
+                    ? {
+                        disabled: stop.disabled,
+                        label: stop.textContent.trim(),
+                        asking: stop.getAttribute('data-asking') === 'true',
+                        warning: words.warning,
+                        title: stop.getAttribute('title'),
+                      }
                     : null,
               }
             : null,
@@ -1783,6 +1874,12 @@ async function playTwoPlayers(setup: TestSetup): Promise<void> {
   const warrior = ownUnit(start, 'warrior');
   const settler = ownUnit(start, 'settler');
   check(await ada.isVisible(byTestId(TEST_IDS.startHint)), 'a new game shows the "First steps" note while nothing is selected');
+  // The note says where to found, and its box is whole on the screen: in the three laptop windows.
+  for (const size of [LAPTOP, LAPTOP_WIDE, LAPTOP_SMALL]) {
+    if (size !== LAPTOP) await resizeTo(ada, size);
+    await theNoteSaysWhereToFound(ada, `at ${size.width} x ${size.height}, with a mouse`);
+  }
+  await resizeTo(ada, LAPTOP);
   await tapTile(ada, warrior.tile);
   await waitForText(ada, TEST_IDS.unitName, 'Warrior');
   check((await textOf(ada, TEST_IDS.unitMoves)) === 'Moves 2/2', 'a fresh Warrior has 2 of 2 moves');
@@ -2164,17 +2261,39 @@ async function checkTheSmallThings(setup: TestSetup, crashes: string[]): Promise
   await dora.keyboard.press('Escape');
   // Where Found City comes up for this Settler. Then nothing is selected,
   // and the Settler is brought to that very spot. While nothing is
-  // selected the "First steps" note lies bottom left, over the lower part
-  // of where the button will be: the spot is taken from the strip of the
-  // button that is above the note.
+  // selected the "First steps" note lies bottom left, over the place of
+  // the button. Since the note says where to found it has three lines of
+  // words in the font this was measured in, and covers the button wholly
+  // (it left a strip of it free before): nobody can press the Settler
+  // there while the note shows. The note makes room for a tile card, and
+  // the card of a tile never seen is one heading tall. So where the note
+  // leaves no strip of the button free, Dora opens that card first, as
+  // somebody does who clicks on the dark to see what it is, and the spot
+  // is taken from the strip of the button above the card.
   await tapTileUntil(dora, doraSettler.tile, TEST_IDS.unitName, 'Settler');
   const foundBox = await boxOf(dora, byTestId(TEST_IDS.foundCityButton));
   await dora.keyboard.press('Escape');
-  const noteTop = (await boxOf(dora, byTestId(TEST_IDS.startHint))).top;
-  const strip = { top: foundBox.top + 2, bottom: Math.min(foundBox.bottom, noteTop) - 2 };
+  let cover = { name: 'the "First steps" note', top: (await boxOf(dora, byTestId(TEST_IDS.startHint))).top };
+  if (Math.min(foundBox.bottom, cover.top) - foundBox.top < 8) {
+    const dark = await viewOf(dora);
+    let unseen = -1;
+    dark.tiles.forEach((ground, tile) => {
+      if (ground === null && (unseen === -1 || distance(tile, doraSettler.tile, dark) < distance(unseen, doraSettler.tile, dark))) unseen = tile;
+    });
+    check(unseen !== -1, 'Dora has not seen the whole map yet');
+    await tapTile(dora, unseen);
+    await waitUntilShown(dora, TEST_IDS.tileCard);
+    const darkCard = await shownTile(dora, TILE_CARD);
+    check(
+      darkCard.tile === unseen && darkCard.title === 'Unexplored' && !(await dora.isVisible(byTestId(TEST_IDS.startHint))),
+      `a click on a tile Dora has never seen opens its card, "Unexplored", and the "First steps" note makes room for it (the card says "${wordsOf(darkCard)}")`,
+    );
+    cover = { name: 'the card of a tile never seen', top: (await boxOf(dora, byTestId(TEST_IDS.tileCard))).top };
+  }
+  const strip = { top: foundBox.top + 2, bottom: Math.min(foundBox.bottom, cover.top) - 2 };
   check(
     strip.bottom - strip.top >= 4,
-    `a strip of the Found City button lies above the "First steps" note (the button starts at ${foundBox.top}, the note at ${noteTop}; if not, this step has no spot to press: do it in a taller panel)`,
+    `a strip of the Found City button lies above ${cover.name} (the button starts at ${foundBox.top}, ${cover.name} at ${cover.top}; if not, this step has no spot to press: do it in a taller panel)`,
   );
   const foundAt = { x: (foundBox.left + foundBox.right) / 2, y: (strip.top + strip.bottom) / 2 };
   await bringTileTo(dora, doraSettler.tile, foundAt);
@@ -2510,6 +2629,12 @@ async function checkTheMapExplainsItself(setup: TestSetup, crashes: string[], ad
   const eveWarrior = ownUnit(eveStart, 'warrior');
   const home = eveWarrior.tile;
   const phoneScreen = { left: 0, top: 0, right: PHONE.width, bottom: PHONE.height, width: PHONE.width, height: PHONE.height };
+  // The "First steps" note on a phone: held upright, on its side, and on a small one.
+  for (const size of [PHONE, LOW_WINDOW, SMALL_PHONE]) {
+    if (size !== PHONE) await resizeTo(eve, size);
+    await theNoteSaysWhereToFound(eve, `at ${size.width} x ${size.height}, with a finger`);
+  }
+  await resizeTo(eve, PHONE);
 
   await fingerTile(eve, home);
   await waitForText(eve, TEST_IDS.unitName, 'Warrior');
@@ -3508,10 +3633,12 @@ async function checkADoublePressAtTheEdge(ada: any, phone: any): Promise<void> {
 /**
  * A look in step 33: the city panel in a browser that SHOWS its scroll
  * bars. With five entries the panel scrolls; beside its scroll bar no line
- * is cut, the description under every add button is ONE line (the table of
- * units promises that, and with the bar's room kept free the Warrior's took
- * two), and a panel that does not scroll keeps the same room free, so that
- * nothing gets narrower the moment a queue grows long.
+ * is cut, the description under every add button is ONE line with all its
+ * words (the table of units promises that, and with the bar's room kept
+ * free the Warrior's took two; since the review of round 3 a description
+ * that is too wide is cut instead, and this look then says so), and a panel
+ * that does not scroll keeps the same room free, so that nothing gets
+ * narrower the moment a queue grows long.
  *
  * @param ada   Ada's laptop page; the queue of `city` holds five entries
  */
@@ -3532,11 +3659,12 @@ async function checkThePanelBesideAScrollBar(setup: TestSetup, crashes: string[]
         const words = document.createRange();
         words.selectNodeContents(about);
         const tops = new Set([...words.getClientRects()].map((box: any) => Math.round(box.top)));
-        return { text: about.textContent, lines: tops.size, spare: about.clientWidth - words.getBoundingClientRect().width };
+        return { text: about.textContent, lines: tops.size, cut: about.scrollWidth > about.clientWidth, spare: about.clientWidth - words.getBoundingClientRect().width };
       });
       return {
         abouts: abouts.length,
-        tall: abouts.filter((about) => about.lines !== 1).map((about) => `"${about.text}" (${about.lines} lines)`),
+        // (A description cannot take a second line any more: where its words are wider than its room it is cut.)
+        tall: abouts.filter((about) => about.lines !== 1 || about.cut).map((about) => `"${about.text}" (${about.lines} lines${about.cut ? ', cut' : ''})`),
         spare: Math.floor(Math.min(...abouts.map((about) => about.spare))),
         bar: panel.offsetWidth - panel.clientWidth - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth),
         inner: panel.clientWidth,
@@ -3558,8 +3686,8 @@ async function checkThePanelBesideAScrollBar(setup: TestSetup, crashes: string[]
   );
   check(
     cityPanel.abouts === UNIT_TYPE_IDS.length && cityPanel.tall.length === 0,
-    `beside the scroll bar the description under every add button is one line, as the table of units promises (${cityPanel.abouts} looked at, the longest with ${cityPanel.spare} pixels to spare; not one line: ${cityPanel.tall.join(', ')}; ` +
-      'the limit of 42 characters was measured with the font Inter, so on a computer whose own font is much wider a line may take a second one, which the page allows)',
+    `beside the scroll bar the description under every add button is one line with all its words, as the table of units promises (${cityPanel.abouts} looked at, the longest with ${cityPanel.spare} pixels to spare; not so: ${cityPanel.tall.join(', ')}; ` +
+      'the limit of 42 characters was measured with the font Inter, so on a computer whose own font is much wider a line may end in "..." there, with every word in the button\'s tooltip)',
   );
   // A panel that does not scroll: one of Ada's units.
   await page.keyboard.press('Escape');
@@ -4256,6 +4384,14 @@ interface AddButtonLook {
   height: number;
   /** On how many lines the words of its name, its middle line and its description stand. */
   lines: number[];
+  /**
+   * Is its name, its middle line, its description cut (ending in "...")?
+   * Each is one line whatever the font, and is cut where its words are
+   * wider than its room (scrollWidth against clientWidth).
+   */
+  cut: boolean[];
+  /** The button's tooltip. */
+  title: string | null;
 }
 
 /** Reads every add button that is on the page of the open city panel, top to bottom. */
@@ -4267,10 +4403,13 @@ async function addButtonLooks(page: any): Promise<AddButtonLook[]> {
         .map((button: any) => {
           const box = button.getBoundingClientRect();
           const lines: number[] = [];
+          const cut: boolean[] = [];
           for (const part of ['.build-name', '.build-detail', '.build-about']) {
+            const line = button.querySelector(part);
             const words = document.createRange();
-            words.selectNodeContents(button.querySelector(part));
-            lines.push(new Set([...words.getClientRects()].map((line: any) => Math.round(line.top))).size);
+            words.selectNodeContents(line);
+            lines.push(new Set([...words.getClientRects()].map((row: any) => Math.round(row.top))).size);
+            cut.push(line.scrollWidth > line.clientWidth);
           }
           return {
             unitType: button.getAttribute('data-testid').slice(prefix.length),
@@ -4280,20 +4419,38 @@ async function addButtonLooks(page: any): Promise<AddButtonLook[]> {
             top: box.top,
             height: box.height,
             lines,
+            cut,
+            title: button.getAttribute('title'),
           };
         }),
     [byTestId(TEST_IDS.cityPanel), TEST_IDS.buildOption],
   );
 }
 
-/** "Warrior 61.6 (1/1/1), ...": the heights of the add buttons and the lines of their three parts, for a message. */
+/**
+ * "Warrior 61.6 (1/1/1), ...": the heights of the add buttons and the lines
+ * of their three parts, for a message. A part that is cut is marked: "(1/1
+ * cut/1)".
+ */
 function addButtonSizes(looks: AddButtonLook[]): string {
-  return looks.map((look) => `${look.name} ${Math.round(look.height * 10) / 10} (${look.lines.join('/')})`).join(', ');
+  return looks
+    .map((look) => `${look.name} ${Math.round(look.height * 10) / 10} (${look.lines.map((count, part) => `${count}${look.cut[part] ? ' cut' : ''}`).join('/')})`)
+    .join(', ');
 }
 
-/** Is every add button as tall as an add button is (62 pixels: 60 to 64), with each of its three lines on one line? */
+/** Does each of the three lines of an add button stand on one line, with all its words (none cut)? */
+function wholeOnOneLine(look: AddButtonLook): boolean {
+  return look.lines.every((count) => count === 1) && look.cut.every((cut) => !cut);
+}
+
+/**
+ * Is every add button as tall as an add button is (62 pixels: 60 to 64),
+ * with each of its three lines on one line, and none of them cut? (The
+ * lines cannot wrap any more, whatever the font; in the font of the
+ * machine this test runs on they must also be there in full.)
+ */
 function addButtonsKeepTheirSize(looks: AddButtonLook[]): boolean {
-  return looks.every((look) => look.height >= 60 && look.height <= 64 && look.lines.every((count) => count === 1));
+  return looks.every((look) => look.height >= 60 && look.height <= 64 && wholeOnOneLine(look));
 }
 
 /**
@@ -4651,8 +4808,8 @@ async function aWaitingSettlerKeepsItsButton(page: any, capital: CityView, who: 
   const waiting = reason;
   const settlerButton = waiting.after.find((look) => look.unitType === 'settler');
   check(
-    settlerButton !== undefined && settlerButton.detail === waiting.line && !waiting.line.includes('population') && settlerButton.height >= 60 && settlerButton.height <= 64 && settlerButton.lines.every((count) => count === 1),
-    `with a reason in brackets ("${waiting.line}") the Settler's add button is still 62 pixels tall, and each of its lines is one line (it says "${settlerButton?.detail}"; ${addButtonSizes(waiting.after)})`,
+    settlerButton !== undefined && settlerButton.detail === waiting.line && !waiting.line.includes('citizen') && settlerButton.height >= 60 && settlerButton.height <= 64 && wholeOnOneLine(settlerButton),
+    `with a reason in brackets ("${waiting.line}") the Settler's add button is still 62 pixels tall, and each of its lines is one line, with all its words (it says "${settlerButton?.detail}"; ${addButtonSizes(waiting.after)})`,
   );
   check(addButtonsKeepTheirSize(waiting.after), `and so is every other add button (${addButtonSizes(waiting.after)})`);
   check(under.length === 3, `three add buttons stand under the Settler's (${under.join(', ')})`);
@@ -4673,6 +4830,60 @@ async function aWaitingSettlerKeepsItsButton(page: any, capital: CityView, who: 
   }
   await page.mouse.move(LAPTOP.width / 2, 200); // the hand leaves the panel
   await emptyTheQueue(page, capital.id, false);
+}
+
+/**
+ * A look of step 36: letters wider than any the page was measured with.
+ * The three lines of an add button are one line each WHATEVER the font, so
+ * no add button can grow by a line and move the buttons under it; a line
+ * that does not fit is cut with "...", and the button's tooltip has every
+ * word. The test cannot change the computer's font, so it sets the letters
+ * of the add buttons two pixels apart for the length of this look, which
+ * makes every line wider than the widest font would.
+ *
+ * @param page  a laptop page (the narrowest panel) with the panel of `city`
+ *              open; left as it was found
+ */
+async function addButtonsKeepTheirHeightInWiderLetters(page: any, city: CityView): Promise<void> {
+  const where = 'at 1280 x 800, with the letters of the add buttons two pixels apart';
+  const menu = ownCity(await viewOf(page), city.id).buildOptions;
+  const usual = await addButtonLooks(page);
+  check(usual.length === UNIT_TYPE_IDS.length && addButtonsKeepTheirSize(usual), `before the letters are set apart, the six add buttons are as ever (${addButtonSizes(usual)})`);
+  await page.evaluate(() => {
+    const wide = document.createElement('style');
+    wide.id = 'e2e-wide-letters';
+    wide.textContent = '.build-button * { letter-spacing: 2px; }';
+    document.head.append(wide);
+  });
+  await settled(page);
+  const wide = await addButtonLooks(page);
+  const overflow: string[] = await page.evaluate(
+    (selector: string) => [...document.querySelectorAll(`${selector} .build-detail, ${selector} .build-about, ${selector} .build-name`)].map((line: any) => window.getComputedStyle(line).textOverflow),
+    byTestId(TEST_IDS.cityPanel),
+  );
+  await page.evaluate(() => document.getElementById('e2e-wide-letters')?.remove());
+  await settled(page);
+  const settler = wide.find((look) => look.unitType === 'settler');
+  const option = menu.find((candidate) => candidate.item.unitType === 'settler');
+  check(
+    wide.length === usual.length && wide.every((look, index) => look.lines.every((count) => count === 1) && Math.abs(look.height - usual[index].height) < 0.5 && Math.abs(look.top - usual[index].top) < 0.5),
+    `${where}: every line of every add button is still ONE line, and no button has grown or moved (then: ${addButtonSizes(usual)}; now: ${addButtonSizes(wide)}; ` +
+      `tops then ${usual.map((look) => Math.round(look.top)).join(', ')}, now ${wide.map((look) => Math.round(look.top)).join(', ')})`,
+  );
+  check(
+    settler !== undefined && settler.cut[1] && wide.some((look) => look.cut[2]),
+    `${where}: and that was a trial: the Settler's middle line and a description no longer fit their room (${addButtonSizes(wide)}; if not, this look checks nothing: set the letters further apart)`,
+  );
+  check(
+    overflow.length === UNIT_TYPE_IDS.length * 3 && overflow.every((value) => value === 'ellipsis'),
+    `${where}: a line that does not fit ends in "..." (the page's text-overflow of the ${overflow.length} lines: ${[...new Set(overflow)].join(', ')})`,
+  );
+  check(
+    settler !== undefined && option !== undefined && settler.title === addButtonTitleText(option) && settler.title.includes(buildOptionText(option)) && settler.title.includes(UNITS.settler.description),
+    `${where}: the Settler's tooltip has every word of its three lines (it says "${settler?.title}"; the function: "${option === undefined ? 'no such option' : addButtonTitleText(option)}")`,
+  );
+  const again = await addButtonLooks(page);
+  check(addButtonsKeepTheirSize(again), `with the letters as they were, no line is cut again (${addButtonSizes(again)})`);
 }
 
 /**
@@ -4862,7 +5073,8 @@ async function planTheWalks(round: ThirdRound): Promise<void> {
 
 /**
  * Step 36: six things to build, in every city, at every size; the add
- * buttons keep their size whatever their middle line says; an idle city on
+ * buttons keep their size whatever their middle line says and however wide
+ * the letters are, and no line of theirs is cut; an idle city on
  * a small phone; what the start promises both players; and a city without
  * water, on the demo page.
  *
@@ -4923,13 +5135,16 @@ async function checkSixThingsToBuild(round: ThirdRound): Promise<void> {
     const looks = await addButtonLooks(page);
     check(
       looks.length === UNIT_TYPE_IDS.length && addButtonsKeepTheirSize(looks),
-      `${where}: all six add buttons are 62 pixels tall (60 to 64), and each of their three lines is one line (name, height, lines of name/middle/description: ${addButtonSizes(looks)}; ` +
-        'the longest middle line, the Settler\'s "costs 30, ready in N turns, uses 1 population", fits the narrowest panel by a pixel in the font Inter: on a computer whose own font is wider it takes a second line there)',
+      `${where}: all six add buttons are 62 pixels tall (60 to 64), and each of their three lines is one line and is not cut (name, height, lines of name/middle/description: ${addButtonSizes(looks)}; ` +
+        'the lines were measured in the fonts Inter and DejaVu Sans, in which the Settler\'s "costs 30 + 1 citizen, ready in N turns" leaves a tenth of the narrowest panel\'s line free and every other line fits: ' +
+        'on a computer whose own font is wider still a line may end in "..." there, and this look then fails though the page is right)',
     );
     await emptyTheQueue(page, city.id, finger);
     await page.waitForTimeout(GUARD_PAUSE_MS);
   }
   await resizeTo(ada, LAPTOP);
+  // And whatever the font: with wider letters no add button grows by a line.
+  await addButtonsKeepTheirHeightInWiderLetters(ada, city);
 
   // What the start promises, for both players. Ben founds his capital for it.
   await theStartKeepsItsPromises(ada, city, 'Ada');
@@ -4992,8 +5207,8 @@ async function checkSixThingsToBuild(round: ThirdRound): Promise<void> {
         `${where}: the ${UNITS[unitType].name}'s add button is greyed out, and its middle line says "needs water inside this city's borders" (it says "${look?.detail}")`,
       );
       check(
-        line !== null && line.inView && line.box.height > 10 && (await isInSight(demo, id)) && look !== undefined && look.height >= 60 && look.height <= 64 && look.lines.every((count) => count === 1),
-        `${where}: that reason is in view with its button, on one line, and the button is as tall as every add button (the line reaches from ${line?.box.top} to ${line?.box.bottom}; the button is ${look?.height} pixels tall)`,
+        line !== null && line.inView && line.box.height > 10 && (await isInSight(demo, id)) && look !== undefined && look.height >= 60 && look.height <= 64 && wholeOnOneLine(look),
+        `${where}: that reason is in view with its button, on one line with all its words, and the button is as tall as every add button (the line reaches from ${line?.box.top} to ${line?.box.bottom}; the button is ${look?.height} pixels tall)`,
       );
     }
   }
@@ -5809,6 +6024,14 @@ async function checkStopWorkAsksOnce(round: ThirdRound, boat: UnitView, site: Ti
   // No turn worked yet: nothing would be lost, so one press stops. The boat, then the Worker.
   await tapTileUntil(ada, site, TEST_IDS.unitName, UNITS.fishingBoat.name);
   await ada.waitForTimeout(GUARD_PAUSE_MS); // the panel has only just opened, and "Stop work" does nothing for 0.6 s after the job began
+  // The small print and the tooltip say the same of a job with no turn worked. (The tooltip was one fixed
+  // sentence, "the turns worked are lost", beside "Stopping now loses nothing.")
+  const justBegun = (await unitPanelPrintsItsButtons(ada, boat.id, 'the Fishing Boat, its net just begun')).jobs?.stop;
+  const newJob = unitOf(await viewOf(ada), boat.id).own?.job ?? null;
+  check(
+    newJob !== null && newJob.turnsWorked === 0 && justBegun?.warning === 'Stopping now loses nothing.' && justBegun.title === 'Stop this work (nothing is lost yet)' && justBegun.title === stopTitleText(newJob),
+    `with no turn worked the small print says "Stopping now loses nothing." and the button's tooltip "Stop this work (nothing is lost yet)" (they say "${justBegun?.warning}" and "${justBegun?.title}"; turns worked: ${newJob?.turnsWorked})`,
+  );
   const atOnce = framesOf(ada).sent.length;
   await ada.click(stop);
   await waitForView(ada, 'the Fishing Boat to have stopped its work', (now) => unitOf(now, boat.id).own?.job === null);
@@ -5855,6 +6078,10 @@ async function checkStopWorkAsksOnce(round: ThirdRound, boat: UnitView, site: Ti
   const where = 'the Fishing Boat, with a mouse at 1280 x 800';
   const turnWorked = await unitPanelPrintsItsButtons(ada, boat.id, 'the Fishing Boat after a turn of work');
   check(turnWorked.jobs?.stop?.warning === 'Stopping loses 1 turn of work.', `after a turn of work the small print says "Stopping loses 1 turn of work." (it says "${turnWorked.jobs?.stop?.warning}")`);
+  check(
+    turnWorked.jobs?.stop?.title === 'Stop this work (1 turn of work is lost)',
+    `and the button's tooltip names the same turn: "Stop this work (1 turn of work is lost)" (it says "${turnWorked.jobs?.stop?.title}")`,
+  );
   const jobBefore = await jobOf(ada, boat.id);
   const { stopAt, askedAt, mark } = await stopWorkAsks(ada, false, boat.id, where);
   await unitPanelPrintsItsButtons(ada, boat.id, 'the Fishing Boat, "Stop work" pressed once');

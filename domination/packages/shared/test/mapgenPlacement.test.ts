@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { improvementFits } from '../src/data/improvements';
 import { RULES } from '../src/data/rules';
+import type { MapSizeId } from '../src/data/rules';
 import { tileIsWater, tileMoveCost } from '../src/data/terrain';
 import { distance, neighbors, ring, tilesInRange } from '../src/hex';
 import { attemptStreams, generateForSize } from '../src/mapgen/attempts';
@@ -956,6 +957,48 @@ describe('attempts: trying again when a map has no room', () => {
     for (const seed of ['hopeless-1', 'hopeless-2', 'hopeless-3']) {
       expect(() => generateForSize(seed, HOPELESS, 2)).toThrow(Error);
     }
+  });
+
+  it('MAPGEN.startCoastTiles can be raised as far as its comment says, to 6 and no further: with 6 every map size still gives a map, the crowded games included, and every start has its six coast tiles; with 7 a small map has no room for eight players, and the error names the number and its file', () => {
+    // The number is set here as an owner would set it in tuning.ts, and put back whatever happens.
+    const knob = MAPGEN as { startCoastTiles: number };
+    const shipped = knob.startCoastTiles;
+    // One game that is not crowded and the five mixes that needed the most attempts when the
+    // range was measured (with 6 a small map for eight players took 10 on average; one of
+    // these seeds takes 29).
+    const mixes: [MapSizeId, number][] = [['small', 3], ['small', 6], ['small', 8], ['medium', 5], ['medium', 8], ['large', 8]];
+    let message = '';
+    try {
+      knob.startCoastTiles = 6;
+      for (const [size, players] of mixes) {
+        for (let n = 0; n < 5; n++) {
+          const seed = `coast-six-${size}-${players}-${n}`;
+          const made = generateMap(seed, size, players);
+          expect(made.starts, seed).toHaveLength(players);
+          // Rule H6 with the 6, counted here: six coast tiles of the sea in the land each start is sure of.
+          const grid = gridFor(made.map);
+          const isSeaCoast = seaCoast(grid, made.map);
+          for (const start of made.starts) {
+            expect(sureLand(grid, made.starts, start).filter((tile) => isSeaCoast[tile]).length, seed).toBeGreaterThanOrEqual(6);
+          }
+        }
+      }
+      knob.startCoastTiles = 7;
+      try {
+        generateMap('coast-seven', 'small', 8);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+    } finally {
+      knob.startCoastTiles = shipped;
+    }
+    expect(MAPGEN.startCoastTiles).toBe(3);
+    // What the owner finds in the server's log when "Start game" has failed: which game it was,
+    // and where to look. Not only "a bug in the map generator": a number may ask for too much.
+    expect(message).toContain('no valid start positions after 100 attempts');
+    expect(message).toContain("seed 'coast-seven', 32 x 20 tiles, 8 players");
+    expect(message).toContain('mapgen/tuning.ts');
+    expect(message).toContain('startCoastTiles');
   });
 
   describe('the generator checks what the placement step hands it', () => {

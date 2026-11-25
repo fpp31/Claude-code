@@ -39,6 +39,7 @@ import type {
   UnitView,
   Yields,
 } from '@domination/shared';
+import { cityNotGrowing } from './selectors';
 
 /** How well the viewer knows a tile: never seen; seen before but out of sight now; in sight now. */
 export type TileKnowledge = 'unexplored' | 'remembered' | 'visible';
@@ -173,7 +174,7 @@ function readTile(view: PlayerView, tile: TileIndex): TileReading {
     // the box of a city nobody touched stays as it was.
     if (city.own !== null && city.own.focus === 'build') {
       const name = CITY_FOCUS.build.name;
-      add('focus', city.own.foodPerTurn <= 0 ? `Set to ${name}: not growing` : `Set to ${name}`);
+      add('focus', cityNotGrowing(city.own) ? `Set to ${name}: not growing` : `Set to ${name}`);
     }
   }
 

@@ -97,6 +97,12 @@ export const PALETTE = {
   reachInner: '#22223a40',
   reachWash: '#ffffff38',
   hoverLine: '#ffffff99',
-  tokenLight: '#fff4a8',
-  tokenShade: '#c08818',
+  /**
+   * The token of a tile that citizens gather from (sprites/art/markers.ts)
+   * is a rim of `gold` around this white face, the lower right of the rim
+   * in `tokenShade`, a deeper gold. The white face is what no hill has: a
+   * mound of hills on plains is an oval in nearly the token's own gold.
+   */
+  tokenFace: '#ffffff',
+  tokenShade: '#f8a800',
 } as const;

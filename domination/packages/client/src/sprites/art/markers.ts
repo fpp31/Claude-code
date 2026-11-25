@@ -60,8 +60,9 @@ const hover: SpriteSource = {
 };
 
 /**
- * A tile worked by a citizen: a small gold token in the top point of the
- * tile's hexagon (x 9 to 17, y 0 to 5), drawn after the units.
+ * A tile a citizen gathers from: a small gold token with a white face in
+ * the top point of the tile's hexagon (x 9 to 17, y 0 to 5), drawn after
+ * the units.
  *
  * Why there. The token used to lie in the middle of the tile, under
  * whatever stood on it, and the worked tiles are where the Workers stand:
@@ -75,21 +76,34 @@ const hover: SpriteSource = {
  * ends on that line. One thing it does cover: the feather on a Scout's
  * cap, which is the only part of a unit that reaches higher.
  *
+ * Why a white face. The token was a plain gold oval with a dark line, lit
+ * at the upper left: one mound of hills on plains drawn a little smaller,
+ * in nearly the same three colours. "Build first" puts the citizens on
+ * hills, and such a tile then showed three gold lumps of which the top one
+ * was the token. Now the gold is a rim (deeper at the lower right, as
+ * everything is shaded) around a face of pure white, four pixels by two. No
+ * hill, on any ground, has a white pixel, and at the smallest zoom the
+ * token is a pale dot with a gold edge over yellow, green or sand-coloured
+ * mounds. It was looked at beside hills on plains, grassland and desert at
+ * every zoom, on the sprite gallery and in a game, before it was kept; a
+ * white rim around a gold middle was tried too and read as white, not as
+ * gold. The dark line, the shadow and the place are as they were.
+ *
  * On a fished tile the token lies right over the top float of the net, a
- * smaller disc of nearly the same colours. sprites/art/improvements.ts
- * says how the two were looked at and what to do if they are ever mixed up.
+ * smaller orange disc. sprites/art/improvements.ts says how the two were
+ * looked at and what to do if they are ever mixed up.
  */
 const worked: SpriteSource = {
   width: 10,
   height: 6,
   offsetX: 9,
   offsetY: 0,
-  colors: { l: PALETTE.tokenLight, g: PALETTE.gold, d: PALETTE.tokenShade },
+  colors: { w: PALETTE.tokenFace, g: PALETTE.gold, d: PALETTE.tokenShade },
   rows: [
     '..####....',
-    '.#lggg#...',
-    '#lggggd#..',
-    '#ggggdd#::',
+    '.#gggg#...',
+    '#gwwwwg#..',
+    '#gwwwwd#::',
     '.#dddd#:::',
     '..####::..',
   ],

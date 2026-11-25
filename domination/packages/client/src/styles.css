@@ -1062,6 +1062,23 @@ select.field:disabled {
   text-align: left;
 }
 
+/*
+ * Each of the three lines of an add button is ONE line, in every font and
+ * in every panel, so that no add button ever changes its height. (A middle
+ * line that took a second line made its button a line taller at an answer;
+ * the buttons under it moved, and a quick second press landed on another
+ * unit.) The words are short enough for the fonts they were measured in
+ * (ADD_LINE_MAX in ui/texts.ts has the numbers); where a font is wider
+ * still, the line is cut with "..." and the button's tooltip has every word.
+ */
+.build-name,
+.build-detail,
+.build-about {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .build-name {
   grid-area: name;
 }
@@ -1071,18 +1088,14 @@ select.field:disabled {
   font-family: var(--font-ui);
   font-size: 12px;
   font-weight: 400;
-  /* Where the line has to break, it breaks into two parts of a like length, not into a line and one lost word. */
-  text-wrap: balance;
 }
 
-/* One line where there is room; in a narrow panel, or with a wide font, it takes a second line and is never cut. */
 .build-about {
   grid-area: about;
   font-family: var(--font-ui);
   font-size: 12px;
   font-weight: 400;
   color: var(--paper-dim);
-  text-wrap: balance;
 }
 
 .build-button:disabled .build-about {

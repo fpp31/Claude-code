@@ -187,6 +187,21 @@ describe('checkInvariants (WP2)', () => {
       d.map.tiles[openTile].feature = 'mountains';
       placeUnit(d, 'p2', 'scoutBoat', openTile);
     }, 'which a sea unit cannot enter', 'fog'],
+    // round 3: stacking is about boats too. The rule two land units follow, on a water tile:
+    // not two of one class, not two players. (The healthy pair, a Fishing Boat and a Scout
+    // Boat of one player on one tile, is in the round 3 test further down.)
+    ['two Fishing Boats on one water tile', (d) => {
+      placeUnit(d, 'p1', 'fishingBoat', seaTile);
+      placeUnit(d, 'p1', 'fishingBoat', seaTile);
+    }, 'holds two civilian units', 'fog'],
+    ['two Scout Boats on one water tile', (d) => {
+      placeUnit(d, 'p1', 'scoutBoat', seaTile);
+      placeUnit(d, 'p1', 'scoutBoat', seaTile);
+    }, 'holds two military units', 'fog'],
+    ['a Fishing Boat and another player\'s Scout Boat on one water tile', (d) => {
+      placeUnit(d, 'p1', 'fishingBoat', seaTile);
+      placeUnit(d, 'p2', 'scoutBoat', seaTile);
+    }, 'holds units of two players', 'fog'],
     // round 3: who builds what
     ['a Fishing Boat with a job for a farm', (d) => {
       placeUnit(d, 'p1', 'fishingBoat', seaTile).job = { improvement: 'farm', turnsWorked: 0 };
