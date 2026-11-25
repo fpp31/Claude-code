@@ -4,18 +4,18 @@
  * which order, and the buttons that change that.
  */
 
-import { UNITS, UNIT_TYPE_IDS } from '@domination/shared';
-import type { CityId, UnitTypeId } from '@domination/shared';
+import { CITY_FOCUS_IDS, UNITS, UNIT_TYPE_IDS } from '@domination/shared';
+import type { CityFocusId, CityId, UnitTypeId } from '@domination/shared';
 import type { Controller } from '../game/controller';
 import { myPlayer, ordersClosed, selectedCity } from '../game/selectors';
 import type { AppState, Store } from '../state/store';
 import { setCivColors } from './civColors';
-import { h, setBar, setClass, setDisabled, setHidden, setText } from './dom';
+import { h, setAttribute, setBar, setClass, setDisabled, setHidden, setText } from './dom';
 import type { Unmount } from './dom';
 import { cityPanelButtons } from './panelButtons';
 import { createKeyedPressGuard } from './pressGuard';
 import {
-  CLEAR_ASKS_FOR_MS,
+  ASKS_FOR_MS,
   QUEUE_ROW_GUARD_MS,
   createAskOnce,
   createChangeWatch,
@@ -26,6 +26,8 @@ import {
 import type { KeptPart } from './queuePresses';
 import { TEST_IDS } from './testIds';
 import {
+  CITY_TILES_HINT,
+  FOCUS_GROUP_LABEL,
   REMOVE_HINT,
   buildOptionText,
   foodText,
@@ -56,6 +58,13 @@ interface BuildButton {
   detail: HTMLElement;
 }
 
+/** The parts of one of the two buttons "Grow first" / "Build first". */
+interface FocusParts {
+  button: HTMLButtonElement;
+  name: HTMLElement;
+  about: HTMLElement;
+}
+
 /** A box on the screen, in CSS pixels. */
 interface ScreenBox {
   left: number;
@@ -75,13 +84,21 @@ interface ScreenBox {
  *    the sentence that says why (queueNote): no connection, turn ended,
  *    queue full. It stands in the head so that it is on the screen
  *    whenever a greyed button is, however far the panel is scrolled;
+ *  - what the city's citizens put first (cityFocus, round 3): two buttons
+ *    side by side, "Grow first" and "Build first" (`focus-grow`,
+ *    `focus-build`), each with its name and one small line inside. The
+ *    city's choice is the sunk one (aria-pressed). The block stands above
+ *    the two lines it changes, and its words never change, so it never
+ *    changes its size. Click: controller.setCityFocus(focus);
  *  - food (cityFood): "Food 4/16 (+2 per turn)" with a progress bar;
  *  - the current build (cityProduction): the first entry of the queue,
  *    "Warrior 6/18 (+3 per turn, 4 turns)" with a progress bar, or "Nothing
- *    to build." (productionText). What follows it stands in the same
+ *    to build:" (productionText). What follows it stands in the same
  *    element (productionNoteText): that an empty queue loses the
- *    production, or why a paid-for entry is held ("Waiting: the city must
- *    grow first");
+ *    production ("production is lost."), or why a paid-for entry is held
+ *    ("Waiting: the city must grow first"). While the queue is empty the
+ *    bar is not shown: it could only be empty, and without it the heading
+ *    of the add list is in view on a small phone;
  *  - the queue (cityQueue): one row per entry (`queue-row-N`) with its
  *    place, its name and when it will be ready (queueRowText), and three
  *    buttons: up (`queue-up-N`), down (`queue-down-N`) and, a little apart,
@@ -137,7 +154,15 @@ interface ScreenBox {
  *    is scrolled, one of them has moved to where the pressed button was.
  *    Nothing else starts that time, so two quick taps on "Warrior" are two
  *    Warriors. (On a slow link the second tap waits for the first one's
- *    answer: Controller.addToQueue.)
+ *    answer: Controller.addToQueue.) "Grow first" and "Build first" keep
+ *    quiet for the same 0.6 s: they stand above the rows, and a floating
+ *    panel that lets go of its height after "Empty the queue" brings its
+ *    top down to where a row's button was.
+ *  - "Grow first" / "Build first": nothing is shown at the press; the two
+ *    buttons swap their looks when the server's view comes back. A press
+ *    on the chosen one does nothing, so a double-click cannot undo itself,
+ *    and a press while an answer is on its way is dropped and shows at
+ *    once: the button did not sink (Controller.setCityFocus).
  *  - "Empty the queue" asks once (createAskOnce): the first press only
  *    turns it into "Tap again to empty the queue". It goes back to asking
  *    after four seconds, when the queue changes, and when the panel shows
@@ -157,9 +182,12 @@ interface ScreenBox {
  *    queue" and every add button is disabled while the player cannot give
  *    orders for a lasting reason (ordersClosed: no connection, turn ended;
  *    queueNote says which), an add button also while its option's addError
- *    says so (a full queue). Nothing is disabled for the blink of a round
- *    trip (`busy`): a press in that blink is ignored by the controller. The
- *    close button and the scrolling are never disabled.
+ *    says so (a full queue; for a boat, a city that owns no water, and the
+ *    button's own middle line then says so). The two buttons "Grow first" /
+ *    "Build first" are disabled exactly while orders are closed; the chosen
+ *    one keeps its sunk face then. Nothing is disabled for the blink of a
+ *    round trip (`busy`): a press in that blink is ignored by the
+ *    controller. The close button and the scrolling are never disabled.
  *  - THE ADD LIST KEEPS ITS PLACE ON SCREEN WHEN THE QUEUE GROWS. A row
  *    that appears above the add list in a panel that cannot grow any more
  *    would push the add buttons down, away from under the finger. The panel
@@ -167,13 +195,17 @@ interface ScreenBox {
  *    "Warrior" lands on "Warrior". It looks once more a frame later, when
  *    every other part of the screen has taken the new view in: the End Turn
  *    button's hint can change the room the panel has. (When the queue gets
- *    shorter the add list is NOT kept in place: see the rows, above.)
+ *    shorter the add list is NOT kept in place: see the rows, above.) The
+ *    production bar that comes back with the first entry stands above the
+ *    add list's title and is taken up by the same arithmetic.
  *
  * Built once; updated in place. When the panel shows another city than at
  * its last update, or was hidden before, it starts at its top again.
  *
- * The tiles the city works are not listed in the panel: they are marked on
- * the map while the city is selected (overlayFor fills MapOverlay.workedTiles).
+ * The tiles the city's citizens gather from are not listed in the panel:
+ * gold tokens mark them on the map while the city is selected (overlayFor
+ * fills MapOverlay.workedTiles), and the panel's last line says so
+ * (CITY_TILES_HINT; left out on phones and in low windows).
  */
 export function mountCityPanel(parent: HTMLElement, store: Store, controller: Controller): Unmount {
   const swatch = h('span', { className: 'swatch' });
@@ -196,6 +228,8 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
   const productionNote = h('span', { className: 'blocked' });
   const production = h('div', { className: 'panel-stat', testId: TEST_IDS.cityProduction }, productionMain, productionNote);
   const productionFill = h('div', { className: 'bar-fill production' });
+  /** Shown exactly while the queue holds an entry (CityPanelButtons.hasQueue). */
+  const productionBar = h('div', { className: 'bar' }, productionFill);
 
   // ---- The queue ----
   const queueTitle = h('h3', { className: 'build-title', text: 'Build queue' });
@@ -229,6 +263,38 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
     sentRemoval = { cityId: city.id, queueLength: city.own.buildQueue.length };
     afterRemoval.start();
     return true;
+  }
+
+  // ---- "Grow first" / "Build first" ----
+  // The words inside the two buttons come from cityPanelButtons at every
+  // update, like everything else the panel prints. The small line is a
+  // .focus-about and nothing else: the city panel hides its hints
+  // (.panel-hint) on phones, and these two lines must be read there.
+  const focusButtons = new Map<CityFocusId, FocusParts>();
+  const focusRow = h('div', {
+    className: 'focus-row',
+    testId: TEST_IDS.cityFocus,
+    attributes: { role: 'group', 'aria-label': FOCUS_GROUP_LABEL },
+  });
+  for (const focus of CITY_FOCUS_IDS) {
+    const focusName = h('span', { className: 'focus-name' });
+    const about = h('span', { className: 'focus-about' });
+    const button = h(
+      'button',
+      {
+        className: 'button focus-button',
+        testId: TEST_IDS.focusButton + focus,
+        attributes: { 'aria-pressed': 'false' },
+        onClick: () => {
+          if (afterRemoval.running()) return; // the panel's top may have come down to where a removed row's button was
+          controller.setCityFocus(focus);
+        },
+      },
+      focusName,
+      about,
+    );
+    focusButtons.set(focus, { button, name: focusName, about });
+    focusRow.append(button);
   }
 
   function makeRow(index: number): QueueRow {
@@ -290,8 +356,8 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
         clearTimer = setTimeout(() => {
           clearTimer = null;
           update(store.get());
-        }, CLEAR_ASKS_FOR_MS);
-      } else if (press === 'empty' && removalWentOut(controller.clearQueue())) {
+        }, ASKS_FOR_MS);
+      } else if (press === 'go' && removalWentOut(controller.clearQueue())) {
         stopAskingToClear();
       }
       update(store.get());
@@ -359,10 +425,11 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
       h('div', { className: 'panel-facts' }, population, queueCount),
       queueNote,
     ),
+    focusRow,
     food,
     h('div', { className: 'bar' }, foodFill),
     production,
-    h('div', { className: 'bar' }, productionFill),
+    productionBar,
     queueTitle,
     queueHint,
     queueList,
@@ -370,7 +437,7 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
     clearButton,
     addTitle,
     buildMenu,
-    h('p', { className: 'panel-hint', text: 'The marked tiles on the map are the ones this city works.' }),
+    h('p', { className: 'panel-hint', text: CITY_TILES_HINT }),
   );
   panel.hidden = true;
   parent.append(panel);
@@ -582,6 +649,18 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
     setText(population, populationText(city.population));
     setText(queueCount, queueCountText(own));
 
+    // ---- "Grow first" / "Build first" ----
+    for (const [focus, parts] of focusButtons) {
+      const choice = buttons.focus.find((candidate) => candidate.focus === focus);
+      setHidden(parts.button, choice === undefined);
+      if (choice === undefined) continue;
+      setText(parts.name, choice.label);
+      setText(parts.about, choice.summary);
+      setAttribute(parts.button, 'title', choice.title);
+      setAttribute(parts.button, 'aria-pressed', choice.chosen ? 'true' : 'false');
+      setDisabled(parts.button, choice.disabled);
+    }
+
     setText(food, foodText(own));
     setBar(foodFill, progressFraction(own.foodStored, own.foodToGrow));
 
@@ -590,6 +669,8 @@ export function mountCityPanel(parent: HTMLElement, store: Store, controller: Co
     setText(productionNote, note === null ? '' : ` ${note}`);
     setClass(production, 'attention', idle);
     setBar(productionFill, progressFraction(own.productionStored, own.buildQueue[0]?.cost ?? null));
+    // Under "Nothing to build: production is lost." the bar could only be empty.
+    setHidden(productionBar, !buttons.hasQueue);
 
     // ---- The queue ----
     setText(queueNote, buttons.note ?? '');

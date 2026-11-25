@@ -1,8 +1,8 @@
 /**
  * The part of the map that only changes when the view does
  * (work package WP5): ground, territory borders, features and improvements
- * (farms, mines), painted onto an offscreen canvas at one canvas pixel per
- * art pixel.
+ * (farms, mines, fishing nets), painted onto an offscreen canvas at one
+ * canvas pixel per art pixel.
  *
  * Why: panning and zooming then cost one image copy per frame, however
  * large the map is, instead of thousands of small ones. And because the
@@ -92,8 +92,9 @@ export function createTerrainLayer(sheet: SpriteSheet): TerrainLayer {
    * The third pass paints a tile's feature first and its improvement on top
    * of it. So, back to front, a farm tile is: bare ground, the border
    * strip, the farm; a mine tile is: bare ground, the border strip, the
-   * hills, the mine. On a tile out of sight each of these is its fogged
-   * twin.
+   * hills, the mine; a fished coast tile is: bare coast (no wave dashes),
+   * the border strip, the net. On a tile out of sight each of these is its
+   * fogged twin.
    */
   function paintTiles(view: PlayerView, civs: Map<PlayerId, CivId>, tiles: Iterable<TileIndex>): void {
     const list = [...tiles];

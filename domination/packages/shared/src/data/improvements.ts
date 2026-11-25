@@ -1,26 +1,37 @@
 /**
- * Tile improvements: what a Worker can build on a tile. One table; tune the
+ * Tile improvements: what a Worker or a Fishing Boat can build on a tile
+ * (UNITS[type].improvements says who builds what). One table; tune the
  * numbers here.
  *
  * A tile carries at most one improvement. Its yields are ADDED to whatever
  * the tile yields (unlike a feature, whose numbers replace the ground's):
- * see tileYields in terrain.ts. Building one takes a unit that can improve
- * (UNITS[type].canImprove) several turns on the tile: see rules/improvements.ts.
+ * see tileYields in terrain.ts. Building one takes a unit whose type lists
+ * it (UNITS[type].improvements) several turns on the tile: see
+ * rules/improvements.ts.
  *
- * Whether a citizen works an improved tile is decided by cityEconomy
- * (rules/city.ts), which never lets a city stop growing over one. So these
- * numbers can be tuned, with one limit that two table tests hold: a mined
- * hill must give more food + production than every unimproved tile AND than
- * every farmed tile. Citizens take the tiles with the highest sum first and
- * a mine gives no food, so it loses every tie. At +1 production (level with
- * open grassland and plains) a mine was the last tile a city took and stood
+ * Whether a citizen gathers from an improved tile is decided by cityEconomy
+ * (rules/city.ts), which under "Grow first" never lets a city stop growing
+ * over one. So these numbers can be tuned, with one limit that two table
+ * tests hold: a mined hill must give more food + production than every
+ * unimproved tile AND than every tile with any other improvement. Citizens
+ * take the tiles with the highest sum first and a mine gives no food, so it
+ * loses every tie. At +1 production (level with open grassland and plains)
+ * a mine was the last tile a city took and stood
  * unused for a whole game. At +2 (level with a farmed grassland or plains
  * tile) every farm after the first pushed the mine one citizen back, and a
  * mine that was worked fell out of use while the Worker went on farming.
  * At +3 a mined hill is the tile with the most to give and is taken first.
- * It still needs the food of a farm on grassland (the one tile that feeds
- * more than the citizen who works it): a city without one cannot spare a
- * citizen for a tile without food for as long as it can still grow.
+ * It still needs the food of a farm on grassland or of a fishing net (the
+ * tiles that feed more than the citizen who works them): a city without one
+ * cannot spare a citizen for a tile without food for as long as it can
+ * still grow.
+ *
+ * The Fishing Net (round 3) is held by the same limit: a fished coast tile
+ * (4 + 0) must stay below a mined hill (0 + 5): at +3 food it would stand
+ * level with the mine and win the tie on food. At +1 food a net was worked
+ * in two thirds of the turns in a farmed city; at +2 it is taken from the
+ * first citizen on. Coast only: a fished ocean tile would be worked too and
+ * cost production.
  *
  * Never remove or rename an id that saved games may contain without writing
  * a save migration (see data/rules.ts).
@@ -28,7 +39,7 @@
 
 import type { FeatureId, Ground, TerrainId, Yields } from './terrain';
 
-export type ImprovementId = 'farm' | 'mine';
+export type ImprovementId = 'farm' | 'mine' | 'fishingNet';
 
 export interface ImprovementDef {
   /** Name shown to players. */
@@ -60,8 +71,8 @@ export interface ImprovementDef {
   turns: number;
 }
 
-/** All improvement ids, in the order the unit panel lists them. */
-export const IMPROVEMENT_IDS: readonly ImprovementId[] = ['farm', 'mine'];
+/** All improvement ids, in the order a unit panel lists them. */
+export const IMPROVEMENT_IDS: readonly ImprovementId[] = ['farm', 'mine', 'fishingNet'];
 
 export const IMPROVEMENTS: Record<ImprovementId, ImprovementDef> = {
   farm: {
@@ -75,6 +86,12 @@ export const IMPROVEMENTS: Record<ImprovementId, ImprovementDef> = {
     needs: 'hills',
     terrains: ['grassland', 'plains', 'desert'], features: ['hills'],
     yields: { food: 0, production: 3 }, turns: 5,
+  },
+  fishingNet: {
+    name: 'Fishing Net', description: 'Nets along the coast for more food.',
+    needs: 'coast',
+    terrains: ['coast'], features: [null],
+    yields: { food: 2, production: 0 }, turns: 4,
   },
 };
 

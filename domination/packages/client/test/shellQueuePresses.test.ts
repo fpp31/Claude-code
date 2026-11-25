@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  CLEAR_ASKS_FOR_MS,
+  ASKS_FOR_MS,
   QUEUE_ROW_GUARD_MS,
   ROW_HOLD_MS,
   createAskOnce,
@@ -24,7 +24,7 @@ function clockAt(start = 20_000) {
   return { clock, now: () => clock.now };
 }
 
-describe('"Empty the queue" asks once (createAskOnce)', () => {
+describe('a button that asks once (createAskOnce): "Empty the queue"', () => {
   const ROME = 'c1_rome:warrior,scout';
 
   it('the first press only asks; a press after the double-click time empties', () => {
@@ -36,8 +36,8 @@ describe('"Empty the queue" asks once (createAskOnce)', () => {
     expect(ask.asking(ROME)).toBe(true);
 
     clock.now += QUEUE_ROW_GUARD_MS;
-    expect(ask.press(ROME)).toBe('empty');
-    // "empty" is the panel's cue to send; the question stays open until the panel says the message went out.
+    expect(ask.press(ROME)).toBe('go');
+    // "go" is the panel's cue to send; the question stays open until the panel says the message went out.
     expect(ask.asking(ROME)).toBe(true);
     ask.reset();
     expect(ask.asking(ROME)).toBe(false);
@@ -54,22 +54,22 @@ describe('"Empty the queue" asks once (createAskOnce)', () => {
     expect(ask.press(ROME)).toBe('ignore'); // one millisecond before the time is over
     expect(ask.asking(ROME)).toBe(true); // an ignored press neither answers nor takes the question back
     clock.now += 1;
-    expect(ask.press(ROME)).toBe('empty');
+    expect(ask.press(ROME)).toBe('go');
   });
 
   it('it goes back to asking after four seconds', () => {
     const { clock, now } = clockAt();
     const ask = createAskOnce(now);
-    expect(CLEAR_ASKS_FOR_MS).toBe(4000);
+    expect(ASKS_FOR_MS).toBe(4000);
     ask.press(ROME);
-    clock.now += CLEAR_ASKS_FOR_MS - 1;
+    clock.now += ASKS_FOR_MS - 1;
     expect(ask.asking(ROME)).toBe(true);
     clock.now += 1;
     expect(ask.asking(ROME)).toBe(false);
     // The press after the time-out asks again; it does not empty.
     expect(ask.press(ROME)).toBe('ask');
-    clock.now += CLEAR_ASKS_FOR_MS - 1;
-    expect(ask.press(ROME)).toBe('empty');
+    clock.now += ASKS_FOR_MS - 1;
+    expect(ask.press(ROME)).toBe('go');
   });
 
   it('it goes back to asking when the queue has changed, and for another city', () => {
@@ -85,7 +85,7 @@ describe('"Empty the queue" asks once (createAskOnce)', () => {
     expect(ask.asking('c1_ostia:scout')).toBe(false);
     expect(ask.press('c1_ostia:scout')).toBe('ask');
     clock.now += 1000;
-    expect(ask.press('c1_ostia:scout')).toBe('empty');
+    expect(ask.press('c1_ostia:scout')).toBe('go');
   });
 
   it('looking at the button for the same queue is not pressing it', () => {
@@ -95,7 +95,7 @@ describe('"Empty the queue" asks once (createAskOnce)', () => {
     expect(ask.press(ROME)).toBe('ask');
     clock.now += 700;
     for (let look = 0; look < 3; look++) expect(ask.asking(ROME)).toBe(true);
-    expect(ask.press(ROME)).toBe('empty');
+    expect(ask.press(ROME)).toBe('go');
   });
 
   it('a queue that changes and changes back is not asked about any more: the question is gone for good', () => {
@@ -107,6 +107,77 @@ describe('"Empty the queue" asks once (createAskOnce)', () => {
     clock.now += 700;
     expect(ask.asking(ROME)).toBe(false); // and the arrow back: the same entries as when it asked
     expect(ask.press(ROME)).toBe('ask');
+  });
+});
+
+describe('a button that asks once (createAskOnce): "Stop work", whose subject is the unit, its job and the turns worked', () => {
+  /** The subject the controller hands over: `<unit id>:<improvement>:<turnsWorked>`. */
+  const stop = (unitId: string, improvement: string, turnsWorked: number): string => `${unitId}:${improvement}:${turnsWorked}`;
+  const WORKER = stop('u1_m4wq7e', 'farm', 1);
+
+  it('ask, ignore, go: the first press asks, a second within 0.6 s is the end of a double-click, a later one goes ahead', () => {
+    const { clock, now } = clockAt();
+    const ask = createAskOnce(now);
+    expect(ask.asking(WORKER)).toBe(false);
+    expect(ask.press(WORKER)).toBe('ask');
+    expect(ask.asking(WORKER)).toBe(true);
+    clock.now += QUEUE_ROW_GUARD_MS - 1;
+    expect(ask.press(WORKER)).toBe('ignore');
+    clock.now += 1;
+    expect(ask.press(WORKER)).toBe('go');
+    // A 'go' whose message could not go out leaves the question standing: the next press is 'go' again.
+    expect(ask.asking(WORKER)).toBe(true);
+    expect(ask.press(WORKER)).toBe('go');
+    ask.reset(); // the message went out
+    expect(ask.asking(WORKER)).toBe(false);
+  });
+
+  it('back to asking after ASKS_FOR_MS: a press four seconds after the question asks again, it does not stop the work', () => {
+    const { clock, now } = clockAt();
+    const ask = createAskOnce(now);
+    expect(ASKS_FOR_MS).toBe(4000);
+    expect(ask.press(WORKER)).toBe('ask');
+    clock.now += ASKS_FOR_MS - 1;
+    expect(ask.asking(WORKER)).toBe(true);
+    clock.now += 1;
+    expect(ask.asking(WORKER)).toBe(false);
+    expect(ask.press(WORKER)).toBe('ask');
+    clock.now += QUEUE_ROW_GUARD_MS;
+    expect(ask.press(WORKER)).toBe('go');
+  });
+
+  it('another count of turns is another question, and so are another job and another unit', () => {
+    const { clock, now } = clockAt();
+    const ask = createAskOnce(now);
+    expect(ask.press(WORKER)).toBe('ask');
+    clock.now += 1000;
+    // The turn resolved meanwhile: two turns would be lost now, which nobody has agreed to.
+    const aTurnLater = stop('u1_m4wq7e', 'farm', 2);
+    expect(ask.asking(aTurnLater)).toBe(false);
+    expect(ask.press(aTurnLater)).toBe('ask');
+    clock.now += 1000;
+    expect(ask.press(aTurnLater)).toBe('go');
+    ask.reset();
+
+    // The same unit on another job with the same count, and another unit on the same job.
+    expect(ask.press(stop('u1_m4wq7e', 'mine', 2))).toBe('ask');
+    clock.now += 1000;
+    expect(ask.press(stop('u1_f1sher', 'fishingNet', 2))).toBe('ask');
+    clock.now += 1000;
+    expect(ask.asking(stop('u1_m4wq7e', 'mine', 2))).toBe(false);
+    expect(ask.asking(stop('u1_f1sher', 'fishingNet', 2))).toBe(false); // that look at another subject ended the question for good
+  });
+
+  it('the two buttons do not share a question: each user makes its own', () => {
+    const { clock, now } = clockAt();
+    const emptyTheQueue = createAskOnce(now);
+    const stopWork = createAskOnce(now);
+    expect(emptyTheQueue.press('c1_rome:warrior,scout')).toBe('ask');
+    expect(stopWork.asking(WORKER)).toBe(false);
+    expect(stopWork.press(WORKER)).toBe('ask');
+    clock.now += 1000;
+    expect(emptyTheQueue.press('c1_rome:warrior,scout')).toBe('go');
+    expect(stopWork.press(WORKER)).toBe('go');
   });
 });
 

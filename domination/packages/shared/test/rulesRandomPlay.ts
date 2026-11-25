@@ -4,11 +4,15 @@
  *
  * Four parts:
  *  - `sensibleAction`: what a well-behaved client might send, chosen from
- *    the player's own VIEW only (never from the hidden state): moves, new
- *    cities, edits of build queues, jobs for Workers;
+ *    the player's own VIEW only (never from the hidden state): moves on
+ *    land and by sea, new cities, edits of build queues with what the
+ *    city's menu offers, jobs for Workers and Fishing Boats, and now and
+ *    then the other way of placing a city's citizens;
  *  - `nextStepOfThePlan`: the same kind of action without dice, for tests
  *    in which a player must get an improvement built;
- *  - `wildAttempt`: what a broken or malicious client might send;
+ *  - `wildAttempt`: what a broken or malicious client might send (boats
+ *    for cities without water, nets from Workers and a focus that is none
+ *    among it);
  *  - `playRandomGame`: the loop that mixes the two for several players over
  *    many turns and reports every step to the test.
  *
@@ -20,6 +24,7 @@
  */
 
 import {
+  CITY_FOCUS_IDS,
   IMPROVEMENTS,
   IMPROVEMENT_IDS,
   RULES,
@@ -55,6 +60,7 @@ import type {
   RuleErrorCode,
   TileIndex,
   TileView,
+  UnitTypeId,
   UnitView,
 } from '../src/index';
 import { deepFreeze } from './rulesKit';
@@ -132,10 +138,12 @@ function movingUnit(unit: UnitView): { owner: PlayerId; type: UnitView['type']; 
  * has ended the turn and stays put. Built from the view alone.
  *
  * Roughly, of 100 actions: up to 30 found a city (when a Settler can), up to
- * 25 more set a Worker to work (when one stands where it can build), about
- * 40 move a unit that is free to move, 16 edit a build queue, and the rest
- * end the turn. A unit at work is never moved; about once in 200 actions a
- * job is given up.
+ * 25 more set a Worker or a Fishing Boat to work (when one stands where it
+ * can build), about 40 move a unit that is free to move (a boat over
+ * water: the tiles come from the same reach function the page lights them
+ * with), 14 edit a build queue, 2 press the other of a city's two "Grow
+ * first / Build first" buttons, and the rest end the turn. A unit at work
+ * is never moved; about once in 200 actions a job is given up.
  */
 export function sensibleAction(rng: RngState, view: PlayerView): Action | null {
   const me = view.players.find((player) => player.id === view.you);
@@ -150,8 +158,8 @@ export function sensibleAction(rng: RngState, view: PlayerView): Action | null {
   const founders = myUnits.filter((unit) => unit.own !== null && unit.own.foundCityError === null);
   if (founders.length > 0 && roll < 30) return { type: 'foundCity', unitId: pick(rng, founders).id };
 
-  // Put Workers to work where they stand, as a client does: with a job its
-  // own view offers (an option without an error).
+  // Put Workers and Fishing Boats to work where they stand, as a client
+  // does: with a job the unit's own view offers (an option without an error).
   const idleBuilders = myUnits.filter((unit) => unit.own !== null && unit.own.jobOptions.some((option) => option.error === null));
   if (idleBuilders.length > 0 && roll < 55) {
     const unit = pick(rng, idleBuilders);
@@ -173,7 +181,15 @@ export function sensibleAction(rng: RngState, view: PlayerView): Action | null {
     }
   }
 
-  if (roll < 88 && myCities.length > 0) return queueEdit(rng, pick(rng, myCities));
+  if (roll < 86 && myCities.length > 0) return queueEdit(rng, pick(rng, myCities));
+
+  // Now and then a city is told to place its citizens the other way: a
+  // press on the button that is not sunk.
+  if (roll < 88 && myCities.length > 0) {
+    const city = pick(rng, myCities);
+    const other = city.own !== null && city.own.focus === 'grow' ? 'build' : 'grow';
+    return { type: 'setCityFocus', cityId: city.id, focus: other };
+  }
 
   // Now and then somebody changes their mind about a job.
   const atWork = myUnits.filter((unit) => unit.own !== null && unit.own.job !== null);
@@ -189,6 +205,10 @@ export function sensibleAction(rng: RngState, view: PlayerView): Action | null {
  * queue; so queues fill up and cities keep building. An empty queue always
  * gets an item, a full one never does, and a queue of one entry, which has
  * nothing to swap, gets a second one instead.
+ *
+ * An item that is added is one of those the city's own menu OFFERS (an
+ * option whose addError is null): the add buttons that are not greyed. So a
+ * city without water never asks for a boat, as no page would.
  */
 function queueEdit(rng: RngState, city: CityView): Action {
   const current: BuildItem[] =
@@ -198,7 +218,9 @@ function queueEdit(rng: RngState, city: CityView): Action {
 
   let queue: BuildItem[];
   if (current.length === 0 || (roll < 70 && !full) || (roll < 85 && current.length === 1)) {
-    queue = [...current, { kind: 'unit', unitType: pick(rng, UNIT_TYPE_IDS) }];
+    const offered = city.own === null ? [] : city.own.buildOptions.filter((option) => option.addError === null);
+    // Nothing on offer cannot happen here (the queue is not full, and a land unit can always be added); the queue then stays as it is.
+    queue = offered.length === 0 ? current : [...current, { kind: 'unit', unitType: pick(rng, offered).item.unitType }];
   } else if (roll < 85) {
     const upper = nextInt(rng, current.length - 1);
     queue = [...current];
@@ -215,39 +237,43 @@ function queueEdit(rng: RngState, city: CityView): Action {
 
 /**
  * The next thing a player with a plan would do to get an improvement built,
- * or null if there is nothing to do right now: keep a Worker first in the
- * first city's queue until there is a Worker; then walk the Worker to a tile
- * of the player's own land where it can build; then set it to work. Chosen
- * from the player's own view alone, as a client would.
+ * or null if there is nothing to do right now: keep a builder (a Worker, or
+ * with `builder` 'fishingBoat' a Fishing Boat) first in the queue of the
+ * first city that can build one until there is such a unit; then bring it
+ * to a tile of the player's own land where it can build; then set it to
+ * work. Chosen from the player's own view alone, as a client would.
  *
  * Tests call it on top of random play, or instead of it, where "this player
  * gets an improvement built" must not hang on the dice (the twin worlds,
- * the game that goes on from a phase 1 save).
+ * the games that go on from an older save).
  */
-export function nextStepOfThePlan(view: PlayerView): Action | null {
-  const workers = view.units.filter((unit) => unit.own !== null && unit.type === 'worker');
-  if (workers.length === 0) {
-    const city = view.cities.find((candidate) => candidate.own !== null);
+export function nextStepOfThePlan(view: PlayerView, builder: UnitTypeId = 'worker'): Action | null {
+  const builders = view.units.filter((unit) => unit.own !== null && unit.type === builder);
+  if (builders.length === 0) {
+    // The first city whose menu does not rule the builder out for good (a boat needs water in the city's land).
+    const city = view.cities.find(
+      (candidate) => candidate.own !== null && candidate.own.buildOptions.some((option) => option.item.unitType === builder && option.addError !== 'noWaterForBoat'),
+    );
     if (city === undefined || city.own === null) return null;
     const current = city.own.buildQueue.map((row): BuildItem => ({ kind: 'unit', unitType: row.item.unitType }));
-    if (current.length > 0 && current[0].unitType === 'worker') return null;
-    const worker: BuildItem = { kind: 'unit', unitType: 'worker' };
-    return { type: 'setBuildQueue', cityId: city.id, queue: [worker, ...current].slice(0, RULES.maxQueueLength) };
+    if (current.length > 0 && current[0].unitType === builder) return null;
+    const first: BuildItem = { kind: 'unit', unitType: builder };
+    return { type: 'setBuildQueue', cityId: city.id, queue: [first, ...current].slice(0, RULES.maxQueueLength) };
   }
 
-  const worker = workers[0];
-  if (worker.own === null || worker.own.job !== null) return null;
-  const offered = worker.own.jobOptions.find((option) => option.error === null);
-  if (offered !== undefined) return { type: 'startJob', unitId: worker.id, improvement: offered.improvement };
+  const unit = builders[0];
+  if (unit.own === null || unit.own.job !== null) return null;
+  const offered = unit.own.jobOptions.find((option) => option.error === null);
+  if (offered !== undefined) return { type: 'startJob', unitId: unit.id, improvement: offered.improvement };
 
-  // Nothing to build where it stands: the nearest tile (lowest index) it can reach this turn where something can be built.
-  const reach = reachableTiles(boardFromView(view), { owner: worker.owner, type: worker.type, tile: worker.tile, movesLeft: worker.own.movesLeft });
+  // Nothing to build where it stands: the nearest tile (lowest index) it can reach this turn where it can build something.
+  const reach = reachableTiles(boardFromView(view), { owner: unit.owner, type: unit.type, tile: unit.tile, movesLeft: unit.own.movesLeft });
   const sites = [...reach.keys()]
-    .filter((tile) => IMPROVEMENT_IDS.some((improvement) => improvementSiteError(siteInView(view, tile), improvement) === null))
+    .filter((tile) => UNITS[builder].improvements.some((improvement) => improvementSiteError(siteInView(view, tile), improvement) === null))
     .sort((a, b) => a - b);
   if (sites.length === 0) return null;
   const path = pathTo(reach, sites[0]);
-  return path === null ? null : { type: 'moveUnit', unitId: worker.id, path };
+  return path === null ? null : { type: 'moveUnit', unitId: unit.id, path };
 }
 
 /** A step-by-step walk over neighboring tiles, whatever they are: valid as geometry, often not as a move. */
@@ -264,11 +290,14 @@ function blindWalk(rng: RngState, state: GameState, from: TileIndex, length: num
 /**
  * Something a well-behaved client would not send: wrong turn numbers,
  * strangers, nonsense, other players' things, impossible paths, blind walks
- * into the unknown, queues that are too long or hold things no city can
- * build, jobs for units that cannot work and improvements that do not
- * exist, marching orders for a unit at work. Some of them happen to be
- * legal; most are not. Chosen with knowledge of the whole state (as a
- * cheater with a memory dump would).
+ * into the unknown (a land unit into the sea, a boat up the beach), queues
+ * that are too long or hold things no city can build, boats for cities
+ * that own no water, jobs for units that cannot work, nets from Workers and
+ * farms from Fishing Boats, improvements that do not exist, marching orders
+ * for a unit at work, a way of placing citizens that is none and somebody
+ * else's city told how to place its own. Some of them happen to be legal;
+ * most are not. Chosen with knowledge of the whole state (as a cheater with
+ * a memory dump would).
  */
 export function wildAttempt(rng: RngState, state: GameState, playerId: PlayerId): Attempt {
   const units = Object.values(state.units);
@@ -296,7 +325,9 @@ export function wildAttempt(rng: RngState, state: GameState, playerId: PlayerId)
   const improvementNames: unknown[] = [...IMPROVEMENT_IDS, 'dragon', 'constructor', '__proto__', '', 5, null];
   const atWork = own.filter((unit) => unit.job !== null);
 
-  switch (nextInt(rng, 28)) {
+  const boats = UNIT_TYPE_IDS.filter((type) => UNITS[type].domain === 'sea');
+
+  switch (nextInt(rng, 32)) {
     case 0:
       return attempt({ type: 'endTurn' }, state.turn + (nextInt(rng, 2) === 0 ? -1 : 1));
     case 1: {
@@ -323,6 +354,11 @@ export function wildAttempt(rng: RngState, state: GameState, playerId: PlayerId)
           { type: 'startJob', improvement: 'farm' },
           { type: 'stopJob' },
           { type: 'stopJob', unitId: 7 },
+          { type: 'setCityFocus', cityId: anyOwnCityId },
+          { type: 'setCityFocus', focus: 'build' },
+          { type: 'setCityFocus', cityId: anyOwnCityId, focus: 5 },
+          { type: 'setCityFocus', cityId: anyOwnCityId, focus: null },
+          { type: 'setCityFocus', cityId: 7, focus: 'grow' },
         ]),
       );
     case 4: {
@@ -414,8 +450,9 @@ export function wildAttempt(rng: RngState, state: GameState, playerId: PlayerId)
       });
     case 18: {
       // A unit that can build, wherever it happens to stand: in a city, on
-      // foreign land, in a forest, on a finished farm, at work already.
-      const builders = own.filter((unit) => UNITS[unit.type].canImprove);
+      // foreign land, in a forest, on a finished farm, at work already. And
+      // whatever it is asked for: a Worker for a net, a Fishing Boat for a farm.
+      const builders = own.filter((unit) => UNITS[unit.type].improvements.length > 0);
       const unitId = builders.length > 0 ? pick(rng, builders).id : anyOwnUnitId;
       return attempt({ type: 'startJob', unitId, improvement: pick(rng, IMPROVEMENT_IDS) });
     }
@@ -434,6 +471,29 @@ export function wildAttempt(rng: RngState, state: GameState, playerId: PlayerId)
       const path = nextInt(rng, 4) === 0 ? [] : blindWalk(rng, state, unit.tile, 1 + nextInt(rng, 2));
       return attempt({ type: 'moveUnit', unitId: unit.id, path });
     }
+    case 27: {
+      // A boat for one's own city, whether it owns water or not: alone, or among land units.
+      const boat = item(pick(rng, boats));
+      const others = Array.from({ length: nextInt(rng, 3) }, () => item(pick(rng, UNIT_TYPE_IDS)));
+      return attempt({ type: 'setBuildQueue', cityId: anyOwnCityId, queue: nextInt(rng, 2) === 0 ? [boat, ...others] : [...others, boat] });
+    }
+    case 28:
+      // A way of placing citizens that is none, for one's own city.
+      return attempt({
+        type: 'setCityFocus',
+        cityId: anyOwnCityId,
+        focus: pick(rng, ['', 'Build', 'GROW', 'fast', 'constructor', '__proto__', 'toString', 'grow ']),
+      });
+    case 29:
+      // Somebody else's city, or none at all, told how to place its citizens.
+      return attempt({
+        type: 'setCityFocus',
+        cityId: nextInt(rng, 2) === 0 ? anyForeignCityId : pick(rng, madeUpIds),
+        focus: pick(rng, [...CITY_FOCUS_IDS, 'fast']),
+      });
+    case 30:
+      // One's own city and a real choice, also the one it has already: mostly legal.
+      return attempt({ type: 'setCityFocus', cityId: anyOwnCityId, focus: pick(rng, CITY_FOCUS_IDS) });
     default: {
       // Any list of real items for one's own city: mostly legal.
       const queue = Array.from({ length: nextInt(rng, RULES.maxQueueLength + 1) }, () => item(pick(rng, UNIT_TYPE_IDS)));
@@ -572,13 +632,27 @@ export function refereeFromView(view: PlayerView | null, turn: number, action: u
     if (city === undefined) return 'noSuchCity';
     const queue = action.queue as unknown[];
     if (queue.length > RULES.maxQueueLength) return 'queueFull';
+    const wanted: UnitTypeId[] = [];
     for (const entry of queue) {
       if (typeof entry !== 'object' || entry === null) return 'cannotBuild';
       const item = entry as { kind?: unknown; unitType?: unknown };
-      const known = (UNIT_TYPE_IDS as readonly unknown[]).includes(item.unitType);
-      if (item.kind !== 'unit' || !known) return 'cannotBuild';
+      const known = UNIT_TYPE_IDS.find((id) => id === item.unitType);
+      if (item.kind !== 'unit' || known === undefined) return 'cannotBuild';
+      wanted.push(known);
+    }
+    // Only when every entry is an item: the first one this city can never build.
+    for (const unitType of wanted) {
+      if (UNITS[unitType].domain === 'sea' && !cityHasWaterInView(view, city)) return 'noWaterForBoat';
     }
     return null; // the same queue again is accepted too (as a no-op)
+  }
+
+  if (action.type === 'setCityFocus') {
+    const city = view.cities.find((candidate) => candidate.id === action.cityId && candidate.own !== null);
+    if (city === undefined) return 'noSuchCity';
+    const wanted: unknown = action.focus;
+    if (wanted !== 'grow' && wanted !== 'build') return 'badAction';
+    return null; // the focus the city has already is accepted too (as a no-op)
   }
 
   if (action.type === 'startJob') {
@@ -587,7 +661,8 @@ export function refereeFromView(view: PlayerView | null, turn: number, action: u
     const wanted: unknown = action.improvement;
     if (unit.own.job !== null && unit.own.job.improvement === wanted) return null; // the job it is doing: a no-op
     const improvement = IMPROVEMENT_IDS.find((id) => id === wanted);
-    if (!UNITS[unit.type].canImprove || improvement === undefined) return 'cannotImprove';
+    // Read from the unit table, not from the options the view carries for the unit: the referee is there to check those.
+    if (improvement === undefined || !UNITS[unit.type].improvements.includes(improvement)) return 'cannotImprove';
     if (unit.own.job !== null) return 'unitBusy';
     return buildingFromView(view, unit.tile, improvement);
   }
@@ -624,6 +699,37 @@ function buildingFromView(view: PlayerView, tile: TileIndex, improvement: Improv
   return null;
 }
 
+/**
+ * Does this city of the viewer own a tile a boat can enter, as far as the
+ * view says? A view tells whose a tile is, not which CITY's, so the
+ * referee cannot always count a city's water itself. It reads the tiles
+ * where they leave no doubt, and the city's own menu otherwise:
+ *  - no water tile of the viewer's within the claim radius of the city:
+ *    the city owns none;
+ *  - a water tile of the viewer's within the claim radius of this city and
+ *    of no other city of theirs: it is this city's (a city only ever claims
+ *    tiles within that radius);
+ *  - otherwise (water that two of the viewer's cities could both have
+ *    claimed): what the city's menu says about a boat, the ready-made
+ *    answer of the view (BuildOption.addError). The whole-game tests hold
+ *    that answer against the true land of every city.
+ * Everything it reads is the viewer's own land, which is always in sight.
+ */
+function cityHasWaterInView(view: PlayerView, city: CityView): boolean {
+  const others = view.cities.filter((candidate) => candidate.own !== null && candidate.id !== city.id);
+  let waterNearby = false;
+  for (let tile = 0; tile < view.tiles.length; tile++) {
+    const ground = view.tiles[tile];
+    if (ground === null || ground.owner !== view.you || tileMoveCost(ground, 'sea') === null) continue;
+    if (distance(city.tile, tile, view) > RULES.cityClaimRadius) continue;
+    waterNearby = true;
+    if (others.every((other) => distance(other.tile, tile, view) > RULES.cityClaimRadius)) return true;
+  }
+  if (!waterNearby) return false;
+  const boat = city.own === null ? undefined : city.own.buildOptions.find((option) => UNITS[option.item.unitType].domain === 'sea');
+  return boat !== undefined && boat.addError !== 'noWaterForBoat';
+}
+
 /** The referee's own reading of "is this an action at all". */
 function looksLikeAnAction(action: unknown): action is Action {
   if (typeof action !== 'object' || action === null) return false;
@@ -632,6 +738,7 @@ function looksLikeAnAction(action: unknown): action is Action {
   if (fields.type === 'foundCity') return typeof fields.unitId === 'string';
   if (fields.type === 'moveUnit') return typeof fields.unitId === 'string' && Array.isArray(fields.path);
   if (fields.type === 'setBuildQueue') return typeof fields.cityId === 'string' && Array.isArray(fields.queue);
+  if (fields.type === 'setCityFocus') return typeof fields.cityId === 'string' && typeof fields.focus === 'string';
   if (fields.type === 'startJob') return typeof fields.unitId === 'string' && typeof fields.improvement === 'string';
   if (fields.type === 'stopJob') return typeof fields.unitId === 'string';
   return false;
@@ -640,7 +747,8 @@ function looksLikeAnAction(action: unknown): action is Action {
 /** May the unit take a first step onto `tile`, as far as its owner can see? */
 function firstStepFromView(view: PlayerView, unit: UnitView, tile: TileIndex): RuleErrorCode | null {
   const ground = view.tiles[tile];
-  if (ground === null || tileMoveCost(ground) === null) return 'impassable';
+  // The ground the unit's own domain cannot enter: water for a land unit, land for a boat, mountains and the unknown for both.
+  if (ground === null || tileMoveCost(ground, UNITS[unit.type].domain) === null) return 'impassable';
   for (const city of view.cities) {
     if (city.tile === tile && city.owner !== view.you) return 'blocked';
   }

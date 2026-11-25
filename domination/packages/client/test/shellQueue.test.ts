@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { RULES, cloneJson } from '@domination/shared';
 import type { BuildItem } from '@domination/shared';
-import { queueWithAdded, queueWithMoved, queueWithout } from '../src/game/queueEdits';
+import { queueUnchanged, queueWithAdded, queueWithMoved, queueWithout } from '../src/game/queueEdits';
 
 /**
  * The lists the city panel's buttons ask for (game/queueEdits.ts): what is
@@ -59,6 +59,27 @@ describe('queue edits (game/queueEdits.ts)', () => {
     expect(added?.map((item) => Object.keys(item).sort())).toEqual([['kind', 'unitType'], ['kind', 'unitType']]);
     expect(queueWithout([dressedUp, WARRIOR], 1)?.map((item) => Object.keys(item).sort())).toEqual([['kind', 'unitType']]);
     expect(queueWithMoved([dressedUp, WARRIOR], 0, 1)?.map((item) => Object.keys(item).sort())).toEqual([['kind', 'unitType'], ['kind', 'unitType']]);
+  });
+
+  it('queueUnchanged is the same list as fresh objects: the same items in the same order, each with its two fields and nothing else', () => {
+    // What the controller notes when "Grow first" / "Build first" is pressed: the queue as it stands.
+    const dressedUp = { kind: 'unit', unitType: 'scout', cost: 12, turns: 3 } as BuildItem;
+    const queue = [WARRIOR, dressedUp, SETTLER, WARRIOR];
+    const same = queueUnchanged(queue);
+    expect(names(same)).toEqual(['warrior', 'scout', 'settler', 'warrior']);
+    expect(same).toEqual([WARRIOR, SCOUT, SETTLER, WARRIOR]);
+    expect(same).not.toBe(queue);
+    same.forEach((item, index) => {
+      expect(item).not.toBe(queue[index]); // nothing of the view travels, not even by reference
+      expect(Object.keys(item).sort()).toEqual(['kind', 'unitType']);
+    });
+    // An empty queue stays empty; a full one stays full (this is no edit, so no limit applies).
+    expect(queueUnchanged([])).toEqual([]);
+    expect(queueUnchanged(warriors(RULES.maxQueueLength))).toHaveLength(RULES.maxQueueLength);
+    // The list it is given is not touched.
+    const fixed = frozen([{ ...WARRIOR }, { ...SCOUT }]);
+    expect(names(queueUnchanged(fixed))).toEqual(['warrior', 'scout']);
+    expect(fixed).toEqual([WARRIOR, SCOUT]);
   });
 
   it('queueWithout leaves out one entry and gives null for a row that does not exist', () => {

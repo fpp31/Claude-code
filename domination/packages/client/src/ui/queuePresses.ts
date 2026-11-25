@@ -2,7 +2,9 @@
  * The timing rules of the build queue's buttons, beside the press guards of
  * ui/pressGuard.ts. Each is a small object with a clock handed in; nothing
  * in here touches the page, so all of it is tested in plain Node. The city
- * panel (ui/cityPanel.ts) only calls them and prints what they say.
+ * panel (ui/cityPanel.ts) only calls them and prints what they say. One of
+ * them, the button that asks once, also serves "Stop work" of the unit
+ * panel (round 3), where the controller calls it (game/controller.ts).
  *
  * Why there are rules at all: a button of the queue changes what lies under
  * the pointer. A row goes away and another slides into its place; the last
@@ -19,12 +21,17 @@
  * the change shows on the screen (createChangeWatch). A press on another row's
  * button, or on another button of the same row, counts at once. The same
  * time is the quiet time of the add buttons after a removal, and the time
- * "Empty the queue" takes a second press for the end of a double-click.
+ * a button that asks once ("Empty the queue", "Stop work") takes a second
+ * press for the end of a double-click.
  */
 export const QUEUE_ROW_GUARD_MS = 600;
 
-/** How long "Empty the queue" waits for its second press before it goes back to asking. */
-export const CLEAR_ASKS_FOR_MS = 4000;
+/**
+ * How long a button that asks once waits for its second press before it
+ * goes back to asking. (Round 2 named it after "Empty the queue", which
+ * was the only such button then.)
+ */
+export const ASKS_FOR_MS = 4000;
 
 /**
  * The longest the rows of the queue keep their place after a removal when
@@ -36,59 +43,65 @@ export const CLEAR_ASKS_FOR_MS = 4000;
 export const ROW_HOLD_MS = 8000;
 
 // ---------------------------------------------------------------------------
-// "Empty the queue" asks once
+// A button that asks once: "Empty the queue" and "Stop work"
 // ---------------------------------------------------------------------------
 
-/** What a press of "Empty the queue" does: ask first, ignore the end of a double-click, or empty the queue. */
-export type ClearPress = 'ask' | 'ignore' | 'empty';
+/**
+ * What a press of a button that asks once does: ask first, ignore the end
+ * of a double-click, or go ahead. (Round 2 named the type after "Empty the
+ * queue" and said 'empty' where this says 'go'.)
+ */
+export type AskPress = 'ask' | 'ignore' | 'go';
 
 /**
- * "Empty the queue" asks once: the first press only turns the button into
- * "Tap again to empty the queue". A queue is named by a string (the city
- * and its entries); a question is only ever about the queue it was asked
- * for.
+ * A button that asks once: the first press only changes its words ("Tap
+ * again to empty the queue", "Tap again to stop"). The thing asked about is
+ * named by a string; a question is only ever about the subject it was asked
+ * for. Two users: "Empty the queue" (the subject is the city and its
+ * entries; ui/cityPanel.ts) and "Stop work" (the unit, its job and the
+ * turns worked; game/controller.ts).
  */
 export interface AskOnce {
   /**
-   * A press of the button while it stands for this queue.
-   *  - 'ask': it was not waiting for an answer about this queue (never
-   *    asked, asked more than CLEAR_ASKS_FOR_MS ago, or asked about another
-   *    queue or another city): it is now.
+   * A press of the button while it stands for this subject.
+   *  - 'ask': it was not waiting for an answer about this subject (never
+   *    asked, asked more than ASKS_FOR_MS ago, or asked about another
+   *    subject): it is now.
    *  - 'ignore': it asked less than QUEUE_ROW_GUARD_MS ago. The second
    *    click of a double-click comes too soon to count as an answer.
-   *  - 'empty': the answer. The panel sends the empty queue, and calls
-   *    reset() if the message went out (if not, the button goes on waiting).
+   *  - 'go': the answer. The caller sends its order, and calls reset() if
+   *    the message went out (if not, the button goes on waiting).
    */
-  press(queue: string): ClearPress;
+  press(subject: string): AskPress;
   /**
-   * Is the button waiting for its second press about this queue right now?
-   * The panel asks this whenever it prints the button. A question that is
-   * over (out of time, or the button now stands for another queue) is
-   * forgotten for good by this look: a queue that changes and changes back
-   * is not asked about any more.
+   * Is the button waiting for its second press about this subject right
+   * now? The caller asks this whenever the button is printed. A question
+   * that is over (out of time, or the button now stands for another
+   * subject) is forgotten for good by this look: a queue that changes and
+   * changes back is not asked about any more.
    */
-  asking(queue: string): boolean;
-  /** Takes the question back: the queue was emptied, the panel is hidden, or no order can be given any more. */
+  asking(subject: string): boolean;
+  /** Takes the question back: the order went out, the panel is hidden, or no order can be given any more. */
   reset(): void;
 }
 
 /** @param now  the clock in milliseconds; only tests pass one */
 export function createAskOnce(now: () => number = Date.now): AskOnce {
-  let asked: { queue: string; at: number } | null = null;
+  let asked: { subject: string; at: number } | null = null;
 
-  function asking(queue: string): boolean {
-    if (asked !== null && (asked.queue !== queue || now() - asked.at >= CLEAR_ASKS_FOR_MS)) asked = null;
+  function asking(subject: string): boolean {
+    if (asked !== null && (asked.subject !== subject || now() - asked.at >= ASKS_FOR_MS)) asked = null;
     return asked !== null;
   }
 
   return {
-    press(queue) {
+    press(subject) {
       const time = now();
-      if (!asking(queue) || asked === null) {
-        asked = { queue, at: time };
+      if (!asking(subject) || asked === null) {
+        asked = { subject, at: time };
         return 'ask';
       }
-      return time - asked.at < QUEUE_ROW_GUARD_MS ? 'ignore' : 'empty';
+      return time - asked.at < QUEUE_ROW_GUARD_MS ? 'ignore' : 'go';
     },
     asking,
     reset() {

@@ -11,7 +11,10 @@
  *  - an improvement has one picture per ground, named after the terrain,
  *    like a feature;
  *  - a unit has its picture ('') and the same picture with a pale line
- *    around the figure ('rim'), for standing among trees (rim.ts).
+ *    around the figure ('rim'), for standing among trees (rim.ts). Every
+ *    unit type has both, the two boats too, so that the sheet needs no
+ *    list of exceptions; a boat's 'rim' picture is never drawn, because
+ *    there is no forest on water.
  * Everything else has the single version ''.
  */
 
@@ -22,11 +25,11 @@ import { FEATURE_SPRITES } from './art/features';
 import { BARE_GROUND_SPRITES, GROUND_SPRITES } from './art/ground';
 import { IMPROVEMENT_SPRITES } from './art/improvements';
 import { MARKER_IDS, MARKER_SPRITES } from './art/markers';
-import { scout, settler, warrior, worker } from './art/units';
+import { fishingBoat, scout, scoutBoat, settler, warrior, worker } from './art/units';
 import type { SpriteSource } from './format';
 import type { SpriteId } from './spriteSheet';
 
-const UNIT_SPRITES: Record<UnitTypeId, SpriteSource> = { warrior, scout, settler, worker };
+const UNIT_SPRITES: Record<UnitTypeId, SpriteSource> = { warrior, scout, settler, worker, fishingBoat, scoutBoat };
 
 export interface CatalogEntry {
   id: SpriteId;

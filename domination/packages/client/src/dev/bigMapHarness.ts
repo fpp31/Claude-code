@@ -6,8 +6,9 @@
  * It shows a made-up game on the largest map size (syntheticView.ts) through
  * the real renderer, with the same simple input as the map test page (drag
  * to pan, wheel to zoom, click an own unit or city: a city shows the tiles
- * it works, a unit where it could go, a Worker at work nothing), and it
- * measures how long the renderer takes to draw a frame. The read-out in the
+ * it works, a unit where it could go (a land unit on land, a boat on
+ * water), a Worker or a Fishing Boat at work nothing), and it measures how
+ * long the renderer takes to draw a frame. The read-out in the
  * corner shows the last frame and the slowest of the last 120. Press P for
  * a pan test: the map is dragged about for a few seconds by itself and the
  * read-out then shows the average and the slowest frame and the frames per
@@ -27,7 +28,7 @@
  * not include it.
  */
 
-import { MAP_SIZES, tilesInRange } from '@domination/shared';
+import { MAP_SIZES, UNITS, tileMoveCost, tilesInRange } from '@domination/shared';
 import type { MapSizeId, PlayerView, TileIndex } from '@domination/shared';
 import '../styles.css';
 import { EMPTY_OVERLAY } from '../render/api';
@@ -151,11 +152,13 @@ function select(tile: TileIndex): void {
   const unit = view.units.find((candidate) => candidate.tile === tile && candidate.owner === view.you);
   const city = view.cities.find((candidate) => candidate.tile === tile && candidate.owner === view.you);
   if (unit !== undefined) {
-    // Not the real movement rules: simply the explored land within two steps. A unit at work goes nowhere.
+    // Not the real movement rules: simply the explored tiles within two steps that a unit of its kind can
+    // enter at all (land for a land unit, water for a boat). A unit at work goes nowhere.
     const atWork = unit.own !== null && unit.own.job !== null;
+    const domain = UNITS[unit.type].domain;
     const reachable = atWork ? [] : tilesInRange(tile, 2, view).filter((near) => {
       const seen = view.tiles[near];
-      return near !== tile && seen !== null && seen.terrain !== 'ocean' && seen.terrain !== 'coast' && seen.feature !== 'mountains';
+      return near !== tile && seen !== null && tileMoveCost(seen, domain) !== null;
     });
     setOverlay({ selectedTile: tile, selectedUnitId: unit.id, reachable, path: [], workedTiles: [] });
   } else if (city !== undefined) {

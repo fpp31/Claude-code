@@ -18,6 +18,13 @@ export const MAPGEN = {
    * before it gives up. Fixed by the doc comment of generateMap.
    */
   maxAttempts: 100,
+  /**
+   * Rule H6 (startNeeds.ts): a start has at least this many coast tiles of
+   * the sea inside the land its capital is sure to own. With 1 a quarter of
+   * the capitals had a single tile to fish (495 of 1800 on 360 maps); with 3
+   * every capital has three or more and the starts are as fair as before.
+   */
+  startCoastTiles: 3,
 
   // --- Land and sea -------------------------------------------------------
 

@@ -40,6 +40,43 @@ export function borderScene(): BorderScene {
   return { state, rome: cityOn(state, at(state.map, 3, 5)), thebes: cityOn(state, at(state.map, 12, 5)), scoutId };
 }
 
+/**
+ * The meadow with a shore: land in the north (rows 1 to 4), two rows of
+ * coast (5 and 6), the open sea south of them. 16 x 11, like the meadow.
+ */
+export const SHORELINE: readonly string[] = [
+  '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+  ' ~ g g g g g g g g g g g g g g ~',
+  '~ g g g g g g g g g g g g g g ~',
+  ' ~ g g g g g g g g g g g g g g ~',
+  '~ g g g g g g g g g g g g g g ~',
+  ' ~ , , , , , , , , , , , , , , ~',
+  '~ , , , , , , , , , , , , , , ~',
+  ' ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+  '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+  ' ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+  '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+];
+
+/**
+ * The border scene on a shore, for the fog tests about boats and nets:
+ *  - p1 has founded Rome at (3,4), p2 Thebes at (12,4), both in the last
+ *    row of land, so both own coast; their Warriors stand in the cities;
+ *  - p1 has a scout at (8,4). Of Thebes' water it sees exactly one tile,
+ *    the coast tile (10,5); the Theban coast east of it, (11,5) to (13,5)
+ *    and (12,6), (13,6), p1 has never seen.
+ */
+export function shoreScene(): BorderScene {
+  const start = newGame(SHORELINE, [[3, 4], [12, 4]]);
+  let state = act(start, 'p1', { type: 'foundCity', unitId: unitOf(start, 'p1', 'settler').id });
+  state = act(state, 'p2', { type: 'foundCity', unitId: unitOf(state, 'p2', 'settler').id });
+  let scoutId = '';
+  state = arrange(state, (draft) => {
+    scoutId = placeUnit(draft, 'p1', 'scout', at(draft.map, 8, 4)).id;
+  });
+  return { state, rome: cityOn(state, at(state.map, 3, 4)), thebes: cityOn(state, at(state.map, 12, 4)), scoutId };
+}
+
 /** Walks p1's scout `steps` tiles in a direction, one move action per tile. */
 export function scoutSteps(state: GameState, scoutId: string, direction: number, steps: number): GameState {
   let current = state;

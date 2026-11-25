@@ -1,6 +1,7 @@
 /**
- * The loop around the six steps: build a map, place the starts, check the
- * promises; if that fails, try again with fresh random streams.
+ * The loop around the six steps: build a map, place the starts, give every
+ * start a hill if it has none, check the promises; if that fails, try
+ * again with fresh random streams.
  *
  * An attempt fails when the land it happened to make has no room for the
  * starts the rules demand. With the map sizes of the game that is very
@@ -13,6 +14,7 @@ import { buildMap } from './buildMap';
 import type { MapStreams } from './buildMap';
 import type { GeneratedMap } from './generateMap';
 import { gridFor } from './grid';
+import { raiseStartHills, seaCoast, sitesBySea, startNeedsHold } from './startNeeds';
 import { hardRulesHold, standardRulesHold } from './startRules';
 import { placeStarts } from './starts';
 import { MAPGEN } from './tuning';
@@ -51,7 +53,9 @@ export type StartPlacer = typeof placeStarts;
  *
  * @param place  for tests only: stands in for placeStarts, so a test can
  *               hand in starts that break a promise and see that the map
- *               is thrown away
+ *               is thrown away. What it hands in goes through the same
+ *               lines as the real step's answer: the hill of rule H7 and
+ *               every check
  */
 export function generateForSize(
   seed: string,
@@ -66,12 +70,21 @@ export function generateForSize(
     const streams = attemptStreams(seed, attempt);
     const map = buildMap(grid, streams);
     const startRng = streams('starts');
-    const starts = place(grid, map, playerCount, crowded, startRng);
+    // Rule H6 is kept by choosing the sites: only tiles with the sea in reach are offered.
+    const starts = place(grid, map, playerCount, crowded, startRng, sitesBySea(grid, seaCoast(grid, map)));
     if (starts === null) continue;
     // placeStarts is built to keep the rules; they are checked all the same
-    // (see startRules.ts), and a map that fails is thrown away.
-    if (starts.length !== playerCount || !hardRulesHold(grid, map, starts)) continue;
-    if (!crowded && !standardRulesHold(grid, map, starts)) continue;
+    // (see startRules.ts and startNeeds.ts), and a map that fails is thrown away.
+    if (starts.length !== playerCount || !hardRulesHold(grid, map, starts)) continue; // H1 to H5
+    // Rule H7: a hill for every start that has no tile for a Mine it can
+    // walk to. It comes before the last two checks, because a hill changes
+    // a start's score: S3 is checked on the map WITH its new hills.
+    // (-1 means that a start has no tile that could carry a hill. A start
+    // that keeps H1 to H5 always has one, a neighbour it can walk to, so
+    // this is a second lock and no test can tell it from the first.)
+    if (raiseStartHills(grid, map, starts) === -1) continue;
+    if (!startNeedsHold(grid, map, starts)) continue; // H6, H7
+    if (!crowded && !standardRulesHold(grid, map, starts)) continue; // S1 to S3
     // Shuffled, so that seat 1 does not always get the site that was picked first.
     return { map, starts: shuffle(startRng, starts) };
   }

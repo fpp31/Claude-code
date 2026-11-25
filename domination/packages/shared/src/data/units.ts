@@ -1,10 +1,16 @@
 /**
- * Unit type table. Three land units in phase 1, a fourth (the Worker)
- * since round 2; no combat yet.
+ * Unit type table. Four land units and, since round 3, two boats (the
+ * Fishing Boat and the Scout Boat); no combat yet.
  * Phase 2 adds columns (strength, range...) and rows here.
+ *
+ * Never remove or rename an id that saved games may contain without writing
+ * a save migration (see data/rules.ts).
  */
 
-export type UnitTypeId = 'warrior' | 'scout' | 'settler' | 'worker';
+import type { ImprovementId } from './improvements';
+import type { UnitDomain } from './terrain';
+
+export type UnitTypeId = 'warrior' | 'scout' | 'settler' | 'worker' | 'fishingBoat' | 'scoutBoat';
 
 /** Stacking rule: a tile holds at most one military unit and one civilian unit. */
 export type UnitClass = 'military' | 'civilian';
@@ -32,6 +38,13 @@ export interface UnitDef {
    */
   description: string;
   unitClass: UnitClass;
+  /**
+   * Where the unit moves: a land unit on land tiles only, a sea unit (a
+   * boat) on water tiles only (coast and ocean). It decides which column of
+   * the terrain table the unit pays (tileMoveCost), and where a city puts
+   * the finished unit (findSpawnTile). No unit ever changes its domain.
+   */
+  domain: UnitDomain;
   /** Movement points at the start of every turn. */
   moves: number;
   /** Sight radius in tiles (plain distance, nothing blocks sight in phase 1). Must be at least 1. */
@@ -43,30 +56,64 @@ export interface UnitDef {
   /** Can this unit found a city (and be consumed doing so)? */
   canFoundCity: boolean;
   /**
-   * Can this unit build tile improvements (data/improvements.ts) on the tile
-   * it stands on? Such a unit can have a job; see Unit.job in types.ts.
+   * The tile improvements (data/improvements.ts) this unit can build on the
+   * tile it stands on, in IMPROVEMENT_IDS order; empty for a unit that
+   * builds none. A unit with at least one can have a job (Unit.job in
+   * types.ts), and its panel shows one button per entry. Every entry must
+   * fit some tile the unit's domain can enter (a table test holds that).
    */
-  canImprove: boolean;
+  improvements: readonly ImprovementId[];
 }
 
-/** All unit type ids, in the order they are listed in a city's build menu. */
-export const UNIT_TYPE_IDS: readonly UnitTypeId[] = ['warrior', 'scout', 'settler', 'worker'];
+/** Can a unit of this type build tile improvements at all? */
+export function unitCanImprove(type: UnitTypeId): boolean {
+  return UNITS[type].improvements.length > 0;
+}
+
+/**
+ * The unit type that builds this improvement: the first in UNIT_TYPE_IDS
+ * order whose list holds it. Every improvement has exactly one today (a
+ * table test). The page names it: "A Fishing Boat can build a Fishing Net
+ * here".
+ *
+ * Throws for an improvement no unit type builds: that is a hole in the
+ * table, which the table test finds first.
+ */
+export function improvementBuilder(improvement: ImprovementId): UnitTypeId {
+  const builder = UNIT_TYPE_IDS.find((type) => UNITS[type].improvements.includes(improvement));
+  if (builder === undefined) throw new Error(`No unit type builds the improvement '${improvement}'.`);
+  return builder;
+}
+
+/**
+ * All unit type ids, in the order a city's build menu lists them. Land
+ * first, the boats last: the four older buttons stay where they were.
+ */
+export const UNIT_TYPE_IDS: readonly UnitTypeId[] = ['warrior', 'scout', 'settler', 'worker', 'fishingBoat', 'scoutBoat'];
 
 export const UNITS: Record<UnitTypeId, UnitDef> = {
   warrior: {
     name: 'Warrior', description: 'A soldier who guards and blocks the way.',
-    unitClass: 'military', moves: 2, sight: 2, cost: 18, populationCost: 0, canFoundCity: false, canImprove: false,
+    unitClass: 'military', domain: 'land', moves: 2, sight: 2, cost: 18, populationCost: 0, canFoundCity: false, improvements: [],
   },
   scout: {
     name: 'Scout', description: 'A fast explorer who sees far.',
-    unitClass: 'military', moves: 3, sight: 3, cost: 12, populationCost: 0, canFoundCity: false, canImprove: false,
+    unitClass: 'military', domain: 'land', moves: 3, sight: 3, cost: 12, populationCost: 0, canFoundCity: false, improvements: [],
   },
   settler: {
     name: 'Settler', description: 'Founds a new city. Takes one citizen.',
-    unitClass: 'civilian', moves: 2, sight: 3, cost: 30, populationCost: 1, canFoundCity: true, canImprove: false,
+    unitClass: 'civilian', domain: 'land', moves: 2, sight: 3, cost: 30, populationCost: 1, canFoundCity: true, improvements: [],
   },
   worker: {
     name: 'Worker', description: 'Builds farms and mines inside the borders.',
-    unitClass: 'civilian', moves: 2, sight: 2, cost: 20, populationCost: 0, canFoundCity: false, canImprove: true,
+    unitClass: 'civilian', domain: 'land', moves: 2, sight: 2, cost: 20, populationCost: 0, canFoundCity: false, improvements: ['farm', 'mine'],
+  },
+  fishingBoat: {
+    name: 'Fishing Boat', description: 'Builds fishing nets inside the borders.',
+    unitClass: 'civilian', domain: 'sea', moves: 2, sight: 2, cost: 20, populationCost: 0, canFoundCity: false, improvements: ['fishingNet'],
+  },
+  scoutBoat: {
+    name: 'Scout Boat', description: 'A fast boat that explores the sea.',
+    unitClass: 'military', domain: 'sea', moves: 4, sight: 4, cost: 24, populationCost: 0, canFoundCity: false, improvements: [],
   },
 };

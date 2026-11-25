@@ -70,7 +70,10 @@ const OLD_EXPLORED_CENTER: TileIndex = 3 * 14 + 9;
 /**
  * A plausible view for player 'p1' (Rome) in turn 7:
  *  - the city of Rome (population 2) with its territory; its build queue
- *    holds a Warrior (being built) and a Scout;
+ *    holds a Warrior (being built) and a Scout. Rome is on "Grow first",
+ *    and it owns no water (its 19 tiles are all land): its menu offers the
+ *    four land units and carries the two boats as things this city can
+ *    never build (`addError: 'noWaterForBoat'`), which the page greys;
  *  - an own Warrior and an own Settler (the Settler may found a city);
  *  - an own Worker at work: it is building a farm on plains south of Rome
  *    and has three turns to go;
@@ -166,7 +169,10 @@ export function sampleView(): PlayerView {
           { item: { kind: 'unit', unitType: 'scout' }, cost: 12, turns: 10, wait: null, addError: null },
           { item: { kind: 'unit', unitType: 'settler' }, cost: 30, turns: 14, wait: null, addError: null },
           { item: { kind: 'unit', unitType: 'worker' }, cost: 20, turns: 12, wait: null, addError: null },
+          { item: { kind: 'unit', unitType: 'fishingBoat' }, cost: 20, turns: null, wait: 'noRoom', addError: 'noWaterForBoat' },
+          { item: { kind: 'unit', unitType: 'scoutBoat' }, cost: 24, turns: null, wait: 'noRoom', addError: 'noWaterForBoat' },
         ],
+        focus: 'grow',
       },
     },
     { id: 'c2_h5yd7m', owner: 'p2', name: 'Thebes', tile: THEBES_TILE, population: 1, visible: false, own: null },

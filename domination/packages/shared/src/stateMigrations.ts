@@ -18,6 +18,7 @@ type SavedState = { schema: number } & Record<string, unknown>;
 /** Keyed by the layout a step starts FROM (the pattern of ROOM_FILE_MIGRATIONS in server/src/storage.ts). */
 const STATE_MIGRATIONS: Record<number, (older: SavedState) => SavedState> = {
   1: fromLayout1,
+  2: fromLayout2,
 };
 
 /**
@@ -52,6 +53,38 @@ function fromLayout1(state: SavedState): SavedState {
   addWorkerFields(state); // tiles, units, remembered tiles
   state.schema = 2;
   return state;
+}
+
+/** Layout 2 (round 2) -> layout 3: every city gains its "Grow first / Build first" choice. */
+function fromLayout2(state: SavedState): SavedState {
+  addCityFocus(state);
+  state.schema = 3;
+  return state;
+}
+
+/**
+ * Every city gets `focus: 'grow'`: growing first was the one way cities
+ * placed their citizens until round 3, so a converted game goes on exactly
+ * as it was played. The city is rebuilt field by field, so nothing but the
+ * known fields of layout 3 is carried over (a `focus` that a hand-edited
+ * save already had is not looked at).
+ */
+function addCityFocus(state: SavedState): void {
+  const cities = recordOf(state.cities, 'cities');
+  for (const [id, value] of Object.entries(cities)) {
+    const city = recordOf(value, `city ${id}`);
+    cities[id] = {
+      id: city.id,
+      owner: city.owner,
+      name: city.name,
+      tile: city.tile,
+      population: city.population,
+      foodStored: city.foodStored,
+      buildQueue: city.buildQueue,
+      productionStored: city.productionStored,
+      focus: 'grow',
+    };
+  }
 }
 
 /**

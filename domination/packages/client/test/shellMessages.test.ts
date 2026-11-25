@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { cloneJson, IMPROVEMENT_IDS, IMPROVEMENTS, RULE_ERROR_MESSAGES, SERVER_ERROR_MESSAGE } from '@domination/shared';
-import type { ClientMessage, GameEvent, ServerMessage } from '@domination/shared';
+import type { ClientMessage, GameEvent, PlayerView, ServerMessage } from '@domination/shared';
 import { sampleLobby, sampleView } from '@domination/shared/testing';
 import {
   NO_LONGER_IN_GAME_MESSAGE,
@@ -696,9 +696,56 @@ describe('handleServerMessage (WP4)', () => {
     it('improvementsFinishedText: the count, the plural of the name, and the city; every name in the table takes a plain "s"', () => {
       expect(improvementsFinishedText(2, 'farm', 'Rome')).toBe('2 Farms were finished near Rome.');
       expect(improvementsFinishedText(12, 'mine', '')).toBe('12 Mines were finished.');
+      expect(improvementsFinishedText(2, 'fishingNet', 'Rome')).toBe('2 Fishing Nets were finished near Rome.');
       // The plural is the name with an "s". A name that needs another plural (a Quarry) must bring its own word along.
+      // (That is why the net is the "Fishing Net": "Fishing nets" would give "Fishing netss" here.)
+      expect(IMPROVEMENT_IDS).toEqual(['farm', 'mine', 'fishingNet']);
       for (const id of IMPROVEMENT_IDS) expect(IMPROVEMENTS[id].name, id).toMatch(/[a-rt-wA-Z]$/);
       for (const id of IMPROVEMENT_IDS) expect(IMPROVEMENTS[id].name, id).not.toMatch(/(ch|sh|[^aeiou]y)$/);
+      for (const id of IMPROVEMENT_IDS) expect(improvementsFinishedText(3, id, 'Rome'), id).toBe(`3 ${IMPROVEMENTS[id].name}s were finished near Rome.`);
+    });
+
+    it('the news of boats and nets (round 3): "Fishing Boat completed in Rome.", "Scout Boat completed in Rome. Rome has nothing left to build.", "Your Fishing Boat finished a Fishing Net near Rome.", "2 Fishing Nets were finished near Rome.", "Your Scout Boat stopped early: something is in the way."', () => {
+      /** The sample view with the player's two boats in it, so that the news can name them. */
+      const withBoats = (): PlayerView => {
+        const view = sampleView();
+        view.units.push({ id: 'u1_f1sher', type: 'fishingBoat', owner: 'p1', tile: 56, own: { movesLeft: 2, foundCityError: 'cannotFoundCity', job: null, jobOptions: [] } });
+        view.units.push({ id: 'u1_sc0ut1', type: 'scoutBoat', owner: 'p1', tile: 42, own: { movesLeft: 4, foundCityError: 'cannotFoundCity', job: null, jobOptions: [] } });
+        return view;
+      };
+      const boatBuilt = (unitType: 'fishingBoat' | 'scoutBoat', queueEmpty: boolean): GameEvent => ({
+        type: 'unitBuilt', playerId: 'p1', cityId: SAMPLE.romeId, cityName: 'Rome', unitId: 'u1_new', unitType, queueEmpty,
+      });
+      const net = (unitId: string, tile: number, cityName = 'Rome'): GameEvent => ({ type: 'improvementBuilt', playerId: 'p1', unitId, improvement: 'fishingNet', tile, cityName });
+      const view = withBoats();
+
+      // A boat is completed: the sentence every unit gets.
+      expect(describeEvent(boatBuilt('fishingBoat', false), view)).toBe('Fishing Boat completed in Rome.');
+      expect(describeEvent(boatBuilt('scoutBoat', false), view)).toBe('Scout Boat completed in Rome.');
+      expect(describeEvent(boatBuilt('scoutBoat', true), view)).toBe('Scout Boat completed in Rome. Rome has nothing left to build.');
+      expect(describeEvent(boatBuilt('fishingBoat', true), view)).toBe('Fishing Boat completed in Rome. Rome has nothing left to build.');
+
+      // A net is finished: the boat is named, as the Worker is for a farm; away from every city "near ..." is left out.
+      expect(describeEvent(net('u1_f1sher', 56), view)).toBe('Your Fishing Boat finished a Fishing Net near Rome.');
+      expect(describeEvent(net('u1_f1sher', 56, ''), view)).toBe('Your Fishing Boat finished a Fishing Net.');
+
+      // Several in one turn near one city are counted; a net and a farm are counted apart.
+      const store = storeInGame({}, withBoats());
+      deliver(store, { type: 'gameUpdate', seq: 6, patch: { turn: 12 }, events: [net('u1_f1sher', 56), net('u1_f1sher', 70), { type: 'turnStarted', turn: 12 }] });
+      expect(store.get().toasts.map((toast) => toast.text)).toEqual(['2 Fishing Nets were finished near Rome.', 'Turn 12 has begun.']);
+      const mixed = storeInGame({}, withBoats());
+      const farm: GameEvent = { type: 'improvementBuilt', playerId: 'p1', unitId: SAMPLE.workerId, improvement: 'farm', tile: 10, cityName: 'Rome' };
+      deliver(mixed, { type: 'gameUpdate', seq: 6, patch: { turn: 12 }, events: [net('u1_f1sher', 56), farm, boatBuilt('fishingBoat', false)] });
+      expect(mixed.get().toasts.map((toast) => toast.text)).toEqual([
+        'Your Fishing Boat finished a Fishing Net near Rome.',
+        'Your Worker finished a Farm near Rome.',
+        'Fishing Boat completed in Rome.',
+      ]);
+
+      // A boat that stops early: another player's boat was in the way.
+      const stopped = (unitId: string): GameEvent => ({ type: 'unitMoved', playerId: 'p1', unitId, from: 42, path: [56], stoppedEarly: true });
+      expect(describeEvent(stopped('u1_sc0ut1'), view)).toBe('Your Scout Boat stopped early: something is in the way.');
+      expect(describeEvent(stopped('u1_f1sher'), view)).toBe('Your Fishing Boat stopped early: something is in the way.');
     });
 
     it('the same sentence a turn later still takes the place of the one on screen (only ONE message is counted)', () => {

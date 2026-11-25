@@ -10,8 +10,9 @@ import {
   cloneJson,
   createGame,
   reachableTiles,
+  tileIsWater,
 } from '../src/index';
-import type { Action, GameState, PlayerId, RuleErrorCode } from '../src/index';
+import type { Action, City, GameState, PlayerId, RuleErrorCode } from '../src/index';
 import {
   EAST,
   MEADOW,
@@ -53,12 +54,20 @@ interface GameLog {
   events: Map<string, number>;
   /** How often each type of action was accepted and changed something. */
   kinds: Map<string, number>;
+  /** How many boats cities completed, and how many Fishing Nets were finished. */
+  boatsBuilt: number;
+  netsBuilt: number;
   /** One line per attempt: who, what, and the complete answer. Two games are the same game if these match. */
   record: string[];
 }
 
 function newLog(): GameLog {
-  return { steps: 0, accepted: 0, rejected: 0, codes: new Map(), events: new Map(), kinds: new Map(), record: [] };
+  return { steps: 0, accepted: 0, rejected: 0, codes: new Map(), events: new Map(), kinds: new Map(), boatsBuilt: 0, netsBuilt: 0, record: [] };
+}
+
+/** Does the city own a water tile, on the true map? Counted here with tileIsWater, apart from the engine's own question. */
+function ownsWater(state: GameState, city: City): boolean {
+  return state.map.tiles.some((tile) => tile.cityId === city.id && tileIsWater(tile));
 }
 
 function count<K>(counts: Map<K, number>, key: K): void {
@@ -71,7 +80,11 @@ function logStep(log: GameLog, step: Step): void {
   if (step.result.ok) {
     log.accepted += 1;
     if (step.result.changed) count(log.kinds, step.action.type);
-    for (const addressed of step.result.events) count(log.events, addressed.event.type);
+    for (const addressed of step.result.events) {
+      count(log.events, addressed.event.type);
+      if (addressed.event.type === 'unitBuilt' && UNITS[addressed.event.unitType].domain === 'sea') log.boatsBuilt += 1;
+      if (addressed.event.type === 'improvementBuilt' && addressed.event.improvement === 'fishingNet') log.netsBuilt += 1;
+    }
   } else {
     log.rejected += 1;
     count(log.codes, step.result.error.code);
@@ -85,7 +98,9 @@ function logStep(log: GameLog, step: Step): void {
  *  - a rejected action changed nothing, an accepted no-op handed back the same object;
  *  - the new state is healthy;
  *  - the answer is the one a referee predicts who sees only the player's own view;
- *  - a finished improvement is news for its owner only, and names one of the owner's own cities.
+ *  - the menu of every city in that view greys the boats exactly where the city owns no water;
+ *  - a finished improvement is news for its owner only, and names one of the owner's own cities;
+ *  - no boat stands on land and no land unit on water, and no stored queue holds a boat in a city without water.
  */
 function checkStep(step: Step, jsonBefore: string): string {
   expect(JSON.stringify(step.before), `step ${step.index}: the input state was modified`).toBe(jsonBefore);
@@ -94,6 +109,16 @@ function checkStep(step: Step, jsonBefore: string): string {
   const view = isPlayer ? buildPlayerView(step.before, step.playerId) : null;
   const predicted = refereeFromView(view, step.turn, step.action);
   expect(codeOf(step.result), `step ${step.index}: ${JSON.stringify(step.action)} by ${step.playerId}`).toBe(predicted);
+  // The referee reads "this city can never build a boat" from the city's menu where the tiles
+  // of a view leave it open. Here that answer is held against the city's true land.
+  for (const city of view === null ? [] : view.cities) {
+    if (city.own === null) continue;
+    const dry = !ownsWater(step.before, step.before.cities[city.id]);
+    for (const option of city.own.buildOptions) {
+      const boat = UNITS[option.item.unitType].domain === 'sea';
+      expect(option.addError === 'noWaterForBoat', `step ${step.index}: ${city.id}, ${option.item.unitType}`).toBe(boat && dry);
+    }
+  }
 
   if (!step.result.ok) {
     expect(step.after).toBe(step.before);
@@ -114,6 +139,16 @@ function checkStep(step: Step, jsonBefore: string): string {
     const ownCityNames = Object.values(step.after.cities).filter((city) => city.owner === playerId).map((city) => city.name);
     expect(ownCityNames, `step ${step.index}: "${cityName}"`).toContain(cityName);
     expect(step.after.map.tiles[tile].improvement, `step ${step.index}`).toBe(improvement);
+  }
+  // Every unit on its own kind of tile: a boat on water, everybody else on land.
+  for (const unit of Object.values(step.after.units)) {
+    const afloat = tileIsWater(step.after.map.tiles[unit.tile]);
+    expect(afloat, `step ${step.index}: the ${unit.type} ${unit.id} on tile ${unit.tile}`).toBe(UNITS[unit.type].domain === 'sea');
+  }
+  // No queue holds a boat for a city that can never build one (rule B2 keeps it out).
+  for (const city of Object.values(step.after.cities)) {
+    if (!city.buildQueue.some((entry) => UNITS[entry.unitType].domain === 'sea')) continue;
+    expect(ownsWater(step.after, city), `step ${step.index}: ${city.id} has a boat in its queue`).toBe(true);
   }
   return JSON.stringify(step.after);
 }
@@ -192,9 +227,13 @@ describe('whole-game properties (WP2)', () => {
     expect(log.kinds.get('startJob') ?? 0).toBeGreaterThan(3);
     expect(log.events.get('improvementBuilt') ?? 0).toBeGreaterThan(3);
     expect(end.map.tiles.filter((tile) => tile.improvement !== null).length).toBeGreaterThan(3);
+    // Cities were told to place their citizens the other way, and back; the cities that own water built boats.
+    expect(log.kinds.get('setCityFocus') ?? 0).toBeGreaterThan(5);
+    expect(log.boatsBuilt).toBeGreaterThan(0);
   });
 
   it('random legal and illegal play for 40 turns: every answer is the one the player\'s own view predicts, and the state stays healthy', LONG_TEST, () => {
+    let dryBoatsRefused = 0;
     for (const seed of ['wild-one', 'wild-two']) {
       const start = wildsGame(seed);
       const log = newLog();
@@ -230,7 +269,13 @@ describe('whole-game properties (WP2)', () => {
       ] as const) {
         expect(log.codes.get(code) ?? 0, `${seed}: ${code}`).toBeGreaterThan(0);
       }
+      // Boats were built and sailed, and the focus was set, also with nonsense (badAction, counted above).
+      expect(log.boatsBuilt, seed).toBeGreaterThan(2);
+      expect(log.kinds.get('setCityFocus') ?? 0, seed).toBeGreaterThan(5);
+      dryBoatsRefused += log.codes.get('noWaterForBoat') ?? 0;
     }
+    // Boats were asked of cities without water (in the game whose players founded such cities).
+    expect(dryBoatsRefused).toBeGreaterThan(0);
   });
 
   it('the same seed and the same actions give byte-identical JSON twice', LONG_TEST, () => {
@@ -369,6 +414,8 @@ describe('whole-game properties (WP2)', () => {
       ['cityOnTile', state, 'p1', { type: 'startJob', unitId: cityWorkerId, improvement: 'farm' }],
       ['badImprovementTile', state, 'p1', { type: 'startJob', unitId: farmWorkerId, improvement: 'mine' }],
       ['alreadyImproved', state, 'p1', { type: 'startJob', unitId: farmWorkerId, improvement: 'farm' }],
+      // Rome stands in the middle of the meadow and owns no water.
+      ['noWaterForBoat', state, 'p1', { type: 'setBuildQueue', cityId: rome.id, queue: queueOf('warrior', 'fishingBoat') }],
     ];
 
     for (const [code, situation, playerId, action, turn] of attempts) {
@@ -383,6 +430,19 @@ describe('whole-game properties (WP2)', () => {
 
     // That was every code there is.
     expect(attempts.map(([code]) => code).sort()).toEqual(Object.keys(RULE_ERROR_MESSAGES).sort());
+
+    // The refusals of round 3's action, which has no code of its own, leave the state alone too.
+    const focusAttempts: [RuleErrorCode, GameState, PlayerId, Action][] = [
+      ['noSuchCity', state, 'p2', { type: 'setCityFocus', cityId: rome.id, focus: 'build' }],
+      ['badAction', state, 'p1', { type: 'setCityFocus', cityId: rome.id, focus: 'fast' } as unknown as Action],
+      ['turnAlreadyEnded', ended, 'p1', { type: 'setCityFocus', cityId: rome.id, focus: 'build' }],
+    ];
+    for (const [code, situation, playerId, action] of focusAttempts) {
+      const untouched = JSON.stringify(situation);
+      const result = send(situation, playerId, action);
+      expect(result).toEqual({ ok: false, error: { code, message: RULE_ERROR_MESSAGES[code] } });
+      expect(JSON.stringify(situation)).toBe(untouched);
+    }
   });
 });
 
@@ -411,5 +471,53 @@ describe('whole game on a generated map (WP1 + WP2)', () => {
     });
     expect(end.turn).toBe(16);
     expect(checkInvariants(end)).toEqual([]);
+  });
+
+  it('random legal and illegal play for 40 turns with boats and focus flips on generated maps: every answer is the one the player\'s view predicts; no boat ever stands on land and no land unit on water; no stored queue holds a boat in a city without water', LONG_TEST, () => {
+    let dryBoatsRefused = 0;
+    for (const seed of ['boats-one', 'boats-two']) {
+      const start = createGame(setupFor(4, seed));
+      // Every capital of a generated map can build boats from its first turn (rule H6 of the generator).
+      let founded = start;
+      for (const player of start.players) founded = act(founded, player.id, { type: 'foundCity', unitId: unitOf(founded, player.id, 'settler').id });
+      for (const city of Object.values(founded.cities)) expect(ownsWater(founded, city), `${seed}: ${city.name}`).toBe(true);
+
+      const log = newLog();
+      let json = JSON.stringify(start);
+      let boatMoves = 0;
+      const end = playRandomGame({
+        start,
+        seed: `${seed}-actions`,
+        turns: 40,
+        wildShare: 40,
+        onStep: (step) => {
+          logStep(log, step);
+          if (step.sensible) checkSensibleStep(step);
+          // checkStep holds the three sentences of this test's name after every action.
+          json = checkStep(step, json);
+          checkEarlyStop(step);
+          if (step.result.ok && step.action.type === 'moveUnit' && UNITS[step.before.units[step.action.unitId].type].domain === 'sea') boatMoves += 1;
+        },
+      });
+
+      expect(end.turn).toBe(41);
+      expect(checkInvariants(end)).toEqual([]);
+      // The round's new things all happened: boats were built and sailed, nets were finished,
+      // and cities were set to Build and back.
+      expect(log.boatsBuilt, seed).toBeGreaterThan(4);
+      expect(boatMoves, seed).toBeGreaterThan(20);
+      expect(log.netsBuilt, seed).toBeGreaterThan(1);
+      expect(end.map.tiles.filter((tile) => tile.improvement === 'fishingNet').length, seed).toBe(log.netsBuilt);
+      expect(log.kinds.get('setCityFocus') ?? 0, seed).toBeGreaterThan(10);
+      expect(Object.values(end.units).some((unit) => unit.type === 'fishingBoat'), seed).toBe(true);
+      expect(Object.values(end.units).some((unit) => unit.type === 'scoutBoat'), seed).toBe(true);
+      // The wild half met the refusals of this round among the others.
+      for (const code of ['cannotImprove', 'badAction', 'noSuchCity', 'impassable', 'queueFull', 'cannotBuild'] as const) {
+        expect(log.codes.get(code) ?? 0, `${seed}: ${code}`).toBeGreaterThan(0);
+      }
+      dryBoatsRefused += log.codes.get('noWaterForBoat') ?? 0;
+    }
+    // Later cities were founded inland, and boats were asked of them.
+    expect(dryBoatsRefused).toBeGreaterThan(0);
   });
 });

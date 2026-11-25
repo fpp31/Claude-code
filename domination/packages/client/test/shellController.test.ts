@@ -3,17 +3,20 @@ import { RULES, cloneJson } from '@domination/shared';
 import type { BuildItem, PlayerView, ReachStep, TileIndex } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import { END_TURN_GUARD_MS, JOB_GUARD_MS, MAP_MOVE_GUARD_MS, SELECTION_GUARD_MS, createController } from '../src/game/controller';
-import type { Controller } from '../src/game/controller';
+import type { Controller, StopPress } from '../src/game/controller';
+import { overlayFor, reachableFor } from '../src/game/selectors';
 import type { ReachFunction } from '../src/game/selectors';
 import { handleServerMessage } from '../src/state/serverMessages';
 import type { AppState, Store } from '../src/state/store';
-import { SAMPLE, cityIn, fakeConnection, ownOf, romeOf, sentActions, setView, storeInGame, unitIn, viewOf } from './shellKit';
+import { ASKS_FOR_MS, QUEUE_ROW_GUARD_MS } from '../src/ui/queuePresses';
+import { SAMPLE, SHORE, addOwnUnit, cityIn, fakeConnection, ownOf, putToWork, romeOf, seenTile, sentActions, setView, shoreView, storeInGame, unitIn, viewOf } from './shellKit';
 import type { FakeConnection } from './shellKit';
 
 /**
  * The controller, with a hand-made "which tiles can this unit reach" (so
  * no rules engine is needed) and a clock the test moves by hand (for the
- * End Turn guard, the job guard and the selection guard).
+ * End Turn guard, the job guard, the selection guard and the question of
+ * "Stop work").
  *
  * The selection guard: for SELECTION_GUARD_MS after the selection changed
  * to another unit or city, the panels' order buttons do nothing. A test
@@ -80,6 +83,16 @@ function viewWith(change: (view: PlayerView) => void): PlayerView {
 /** The sample view with the Worker idle on its plains tile: a farm can be started there, a mine cannot. */
 function viewWithIdleWorker(): PlayerView {
   return viewWith((view) => takeJob(view, SAMPLE.workerId));
+}
+
+/**
+ * The sample view with the Worker's farm begun this turn: no turn worked
+ * yet, so "Stop work" stops at once and asks nothing. (The sample Worker
+ * itself has one turn worked: its "Stop work" asks first. The tests of the
+ * other guards use this view, so that one press is one order.)
+ */
+function viewWithFreshJob(): PlayerView {
+  return viewWith((view) => giveJob(view, SAMPLE.workerId));
 }
 
 /** What the server's view says once a unit's job has started: the job, and every option busy. */
@@ -381,9 +394,12 @@ describe('controller (WP4)', () => {
       controller.removeFromQueue(0);
       controller.moveInQueue(0, 1);
       controller.clearQueue();
+      expect(controller.setCityFocus('build')).toBe(false);
       store.set({ selection: SELECT_WORKER });
       wait(SELECTION_GUARD_MS);
       controller.stopJob();
+      wait(QUEUE_ROW_GUARD_MS);
+      controller.stopJob(); // (the sample Worker has a turn worked: were the first press a question, this one would send)
       controller.toggleEndTurn();
 
       expect(connection.sent).toEqual([]);
@@ -659,33 +675,33 @@ describe('controller (WP4)', () => {
     expect(sentActions(tired.connection)).toEqual([{ type: 'startJob', unitId: SAMPLE.workerId, improvement: 'farm' }]);
   });
 
-  it('stopJob sends only for a unit with a job', () => {
-    const { store, controller, connection, wait } = setup();
+  it('stopJob sends only for a unit with a job, and says what the press did', () => {
+    const { store, controller, connection, wait } = setup({}, viewWithFreshJob());
 
-    controller.stopJob(); // nothing selected
+    expect(controller.stopJob()).toBe('ignored'); // nothing selected
     store.set({ selection: SELECT_WARRIOR });
-    controller.stopJob(); // a unit without a job
+    expect(controller.stopJob()).toBe('ignored'); // a unit without a job
     store.set({ selection: SELECT_ROME });
-    controller.stopJob(); // a city
+    expect(controller.stopJob()).toBe('ignored'); // a city
     expect(connection.sent).toEqual([]);
 
-    store.set({ selection: SELECT_WORKER }); // the sample Worker is building a farm
+    store.set({ selection: SELECT_WORKER }); // the Worker began a farm this turn: nothing would be lost
     wait(SELECTION_GUARD_MS);
-    controller.stopJob();
+    expect(controller.stopJob()).toBe('sent');
     expect(connection.sent).toEqual([
       { type: 'action', requestId: expect.any(Number), turn: viewOf(store).turn, action: { type: 'stopJob', unitId: SAMPLE.workerId } },
     ]);
     expect(store.get().busy).toBe(true);
 
     // While busy, and without a connection: nothing.
-    controller.stopJob();
+    expect(controller.stopJob()).toBe('ignored');
     store.set({ busy: false, connection: 'connecting' });
-    controller.stopJob();
+    expect(controller.stopJob()).toBe('ignored');
     expect(connection.sent).toHaveLength(1);
 
     // A Worker that has no job.
     const idle = setup({ selection: SELECT_WORKER }, viewWithIdleWorker());
-    idle.controller.stopJob();
+    expect(idle.controller.stopJob()).toBe('ignored');
     expect(idle.connection.sent).toEqual([]);
   });
 
@@ -728,8 +744,9 @@ describe('controller (WP4)', () => {
     controller.startJob('farm');
     expect(connection.sent).toHaveLength(3);
 
-    // Selecting another unit does not start it. Two Workers: the sample one at work, a second one idle.
+    // Selecting another unit does not start it. Two Workers: the sample one at work (on a farm begun this turn), a second one idle.
     const twoWorkers = viewWith((view) => {
+      giveJob(view, SAMPLE.workerId);
       const second = cloneJson(unitIn(view, SAMPLE.workerId));
       second.id = 'u1_second';
       second.tile = SAMPLE.emptyTile;
@@ -821,7 +838,7 @@ describe('controller (WP4)', () => {
     expect(sentActions(settler.connection)).toEqual([{ type: 'foundCity', unitId: SAMPLE.settlerId }]);
 
     // A Worker at work: "Stop work" comes up where it stood.
-    const atWork = setup();
+    const atWork = setup({}, viewWithFreshJob());
     atWork.controller.onTileTap(SAMPLE.workerTile);
     atWork.wait(300);
     atWork.controller.stopJob();
@@ -1362,6 +1379,750 @@ describe('controller (WP4)', () => {
     expect(sentKinds(last.connection)).toEqual(['endTurn']);
   });
 
+  // ---- "Grow first" / "Build first" ----
+
+  /** The newest action that went out, if it is a setCityFocus; throws otherwise. */
+  function sentFocus(connection: FakeConnection): { type: string; cityId: string; focus: 'grow' | 'build' } {
+    const sent = sentActions(connection).pop() as { type: string; cityId: string; focus: 'grow' | 'build' };
+    if (sent === undefined || sent.type !== 'setCityFocus') throw new Error('expected the newest action to be a setCityFocus');
+    return sent;
+  }
+
+  /**
+   * Plays the server accepting the setCityFocus that is on its way: the view
+   * shows the new focus with other numbers and other worked tiles, and the
+   * SAME queue (a focus changes no queue), then the acknowledgement.
+   */
+  function serverTakesFocus(store: Store, connection: FakeConnection): void {
+    const sent = sentFocus(connection);
+    setView(store, (view) => {
+      const own = cityIn(view, sent.cityId).own;
+      if (own === null) throw new Error('unexpected view');
+      own.focus = sent.focus;
+      own.foodPerTurn = sent.focus === 'build' ? -1 : 3;
+      own.productionPerTurn = sent.focus === 'build' ? 5 : 3;
+      own.worked = sent.focus === 'build' ? [SAMPLE.workerTile, SAMPLE.emptyTile] : [SAMPLE.farmTile, SAMPLE.emptyTile - 14];
+    });
+    store.set({ busy: false });
+  }
+
+  it('setCityFocus sends once: one setCityFocus for the selected own city, nothing on the page changes at the press, and a press on the button that is already chosen sends nothing', () => {
+    const { store, controller, connection } = setup({ selection: SELECT_ROME });
+    expect(romeOf(viewOf(store)).focus).toBe('grow');
+
+    // The chosen button: nothing, however often.
+    expect(controller.setCityFocus('grow')).toBe(false);
+    expect(controller.setCityFocus('grow')).toBe(false);
+    expect(connection.sent).toEqual([]);
+    expect(store.get().busy).toBe(false);
+
+    expect(controller.setCityFocus('build')).toBe(true);
+    expect(connection.sent).toEqual([
+      { type: 'action', requestId: expect.any(Number), turn: viewOf(store).turn, action: { type: 'setCityFocus', cityId: SAMPLE.romeId, focus: 'build' } },
+    ]);
+    expect(store.get().busy).toBe(true);
+    // The view is untouched: the buttons swap their looks when the server's view comes back.
+    expect(romeOf(viewOf(store)).focus).toBe('grow');
+
+    // A double tap on "Build first" is Build, never Build and back: the second press is dropped while the
+    // answer is on its way, and when the answer is in the button is the chosen one.
+    expect(controller.setCityFocus('build')).toBe(false);
+    serverTakesFocus(store, connection);
+    expect(controller.setCityFocus('build')).toBe(false);
+    expect(connection.sent).toHaveLength(1);
+    expect(store.get().busy).toBe(false);
+
+    // The other button is a new order. The player may press back and forth before End Turn.
+    expect(controller.setCityFocus('grow')).toBe(true);
+    serverTakesFocus(store, connection);
+    expect(controller.setCityFocus('build')).toBe(true);
+    expect(sentActions(connection)).toEqual([
+      { type: 'setCityFocus', cityId: SAMPLE.romeId, focus: 'build' },
+      { type: 'setCityFocus', cityId: SAMPLE.romeId, focus: 'grow' },
+      { type: 'setCityFocus', cityId: SAMPLE.romeId, focus: 'build' },
+    ]);
+  });
+
+  it('setCityFocus sends nothing without a selected own city, while busy, offline, after End Turn, or within the selection guard; and such a press is not kept for later', () => {
+    // Nothing selected, a unit, another player's city (the view tells nothing of its focus).
+    const none = setup();
+    expect(none.controller.setCityFocus('build')).toBe(false);
+    none.store.set({ selection: SELECT_WARRIOR });
+    none.wait(SELECTION_GUARD_MS);
+    expect(none.controller.setCityFocus('build')).toBe(false);
+    none.store.set({ selection: { kind: 'city', cityId: SAMPLE.thebesId } });
+    none.wait(SELECTION_GUARD_MS);
+    expect(none.controller.setCityFocus('build')).toBe(false);
+    expect(none.connection.sent).toEqual([]);
+
+    // Busy with anything, no connection, the turn ended.
+    const ended = viewWith((view) => {
+      view.players[0].endedTurn = true;
+    });
+    const closed: [Partial<AppState>, PlayerView][] = [
+      [{ busy: true }, sampleView()],
+      [{ connection: 'reconnecting' }, sampleView()],
+      [{ connection: 'connecting' }, sampleView()],
+      [{}, ended],
+    ];
+    for (const [changes, view] of closed) {
+      const shut = setup({ selection: SELECT_ROME, ...changes }, view);
+      expect(shut.controller.setCityFocus('build')).toBe(false);
+      expect(shut.connection.sent).toEqual([]);
+      // Orders open again: nothing was kept, nothing goes out by itself.
+      setView(shut.store, (changed) => {
+        changed.players[0].endedTurn = false;
+      });
+      shut.store.set({ busy: false, connection: 'online' });
+      shut.wait(5000);
+      shut.store.set({ hoverTile: 3 });
+      expect(shut.connection.sent).toEqual([]);
+      expect(shut.store.get().busy).toBe(false);
+    }
+
+    // A socket that has just dropped: nothing went out, so nothing is "on its way".
+    const dropped = setup({ selection: SELECT_ROME });
+    dropped.connection.accepts = false;
+    expect(dropped.controller.setCityFocus('build')).toBe(false);
+    expect(dropped.store.get().busy).toBe(false);
+    dropped.connection.accepts = true;
+    expect(dropped.controller.addToQueue(SETTLER)).toBe(true); // an add after it is an ordinary add: it goes out at once
+    expect(sentKinds(dropped.connection)).toEqual(['setBuildQueue']);
+
+    // The selection guard: the block lies right under the panel's head, where the tapped city itself stood on a phone.
+    const opened = setup();
+    opened.controller.onTileTap(SAMPLE.romeTile);
+    expect(opened.store.get().selection).toEqual(SELECT_ROME);
+    opened.wait(SELECTION_GUARD_MS - 1);
+    expect(opened.controller.setCityFocus('build')).toBe(false);
+    expect(opened.connection.sent).toEqual([]);
+    expect(opened.store.get().toasts).toEqual([]);
+    opened.wait(1);
+    expect(opened.controller.setCityFocus('build')).toBe(true);
+    expect(sentActions(opened.connection)).toEqual([{ type: 'setCityFocus', cityId: SAMPLE.romeId, focus: 'build' }]);
+  });
+
+  it('a Grow / Build press while ANY answer is on its way is dropped and not sent later: behind an add, behind adds that wait, behind a move, behind End Turn', () => {
+    // Behind an add of the same city (the one press that IS kept there is another add).
+    const add = setup({ selection: SELECT_ROME });
+    add.controller.addToQueue(SETTLER);
+    expect(add.controller.setCityFocus('build')).toBe(false);
+    serverTakesQueue(add.store, add.connection);
+    expect(sentKinds(add.connection)).toEqual(['setBuildQueue']);
+    expect(add.store.get().busy).toBe(false);
+    expect(romeOf(viewOf(add.store)).focus).toBe('grow');
+    // Nothing comes later either.
+    add.wait(5000);
+    add.store.set({ hoverTile: 3 });
+    expect(sentKinds(add.connection)).toEqual(['setBuildQueue']);
+    // The player sees that the button did not sink, and presses again: now it counts.
+    expect(add.controller.setCityFocus('build')).toBe(true);
+
+    // Behind adds that wait: dropped in each of the two round trips, and the adds are not disturbed.
+    const adds = setup({ selection: SELECT_ROME });
+    adds.controller.addToQueue(SETTLER);
+    adds.controller.addToQueue(WORKER);
+    expect(adds.controller.setCityFocus('build')).toBe(false);
+    serverTakesQueue(adds.store, adds.connection);
+    expect(adds.controller.setCityFocus('build')).toBe(false); // the add that waited is on its way now
+    serverTakesQueue(adds.store, adds.connection);
+    expect(sentKinds(adds.connection)).toEqual(['setBuildQueue', 'setBuildQueue']);
+    expect(sentQueues(adds.connection)[1]).toEqual(['warrior', 'scout', 'settler', 'worker']);
+
+    // Behind a move, and behind End Turn.
+    const move = setup({ selection: SELECT_WARRIOR });
+    move.controller.onTileTap(SAMPLE.warriorTile + 1);
+    move.store.set({ selection: SELECT_ROME });
+    move.wait(SELECTION_GUARD_MS);
+    expect(move.controller.setCityFocus('build')).toBe(false);
+    move.store.set({ busy: false });
+    expect(sentKinds(move.connection)).toEqual(['moveUnit']);
+
+    const end = setup({ selection: SELECT_ROME });
+    end.controller.toggleEndTurn();
+    expect(end.controller.setCityFocus('build')).toBe(false);
+    serverSetsEnded(end.store, true);
+    expect(sentKinds(end.connection)).toEqual(['endTurn']);
+  });
+
+  it('an add pressed while the answer to a Grow / Build press of the same city is on its way is kept: addToQueue answers true, and it is sent as ONE setBuildQueue when the answer is in; two such adds go out together', () => {
+    const one = setup({ selection: SELECT_ROME });
+    expect(one.controller.setCityFocus('build')).toBe(true);
+    expect(one.controller.addToQueue(SETTLER)).toBe(true); // kept: the city panel says "Added to the queue" for it
+    expect(sentKinds(one.connection)).toEqual(['setCityFocus']); // nothing more has gone out yet
+    serverTakesFocus(one.store, one.connection);
+    // In the very moment the answer is taken in, the kept add goes out on top of the queue as it stands.
+    expect(sentKinds(one.connection)).toEqual(['setCityFocus', 'setBuildQueue']);
+    expect(sentQueues(one.connection)).toEqual([['warrior', 'scout', 'settler']]);
+    expect(one.store.get().busy).toBe(true);
+    serverTakesQueue(one.store, one.connection);
+    expect(one.connection.sent).toHaveLength(2);
+    expect(one.store.get().busy).toBe(false);
+    expect(romeOf(viewOf(one.store)).focus).toBe('build');
+    expect(romeOf(viewOf(one.store)).buildQueue.map((entry) => entry.item.unitType)).toEqual(['warrior', 'scout', 'settler']);
+
+    // Two adds behind one focus press: ONE message with both, in the order they were pressed. (The items
+    // of this view carry a field more than an item has, to see that nothing of the view travels.)
+    const two = setup({ selection: SELECT_ROME }, viewWith((view) => {
+      for (const entry of romeOf(view).buildQueue) Object.assign(entry.item, { seenAt: 7 });
+    }));
+    two.controller.setCityFocus('build');
+    expect(two.controller.addToQueue(WORKER)).toBe(true);
+    expect(two.controller.addToQueue(WARRIOR)).toBe(true);
+    expect(two.connection.sent).toHaveLength(1);
+    serverTakesFocus(two.store, two.connection);
+    expect(sentKinds(two.connection)).toEqual(['setCityFocus', 'setBuildQueue']);
+    expect(sentQueues(two.connection)).toEqual([['warrior', 'scout', 'worker', 'warrior']]);
+    // What is sent is made of fresh items with an item's two fields, the entries the view listed among them.
+    expect(romeOf(viewOf(two.store)).buildQueue.map((entry) => Object.keys(entry.item).sort())).toEqual([['kind', 'seenAt', 'unitType'], ['kind', 'seenAt', 'unitType']]);
+    const last = sentActions(two.connection).pop() as { queue: BuildItem[] };
+    expect(last.queue).toHaveLength(4);
+    for (const item of last.queue) expect(Object.keys(item).sort()).toEqual(['kind', 'unitType']);
+    // A press during THAT round trip waits behind it, as behind any queue edit.
+    expect(two.controller.addToQueue(SCOUT)).toBe(true);
+    serverTakesQueue(two.store, two.connection);
+    expect(sentQueues(two.connection)[1]).toEqual(['warrior', 'scout', 'worker', 'warrior', 'scout']);
+    serverTakesQueue(two.store, two.connection);
+    expect(two.connection.sent).toHaveLength(3);
+
+    // No add waited: the answer to the focus press brings nothing with it.
+    const none = setup({ selection: SELECT_ROME });
+    none.controller.setCityFocus('build');
+    serverTakesFocus(none.store, none.connection);
+    expect(sentKinds(none.connection)).toEqual(['setCityFocus']);
+    // ...and the next add is an ordinary one, on top of the queue on the screen.
+    expect(none.controller.addToQueue(SETTLER)).toBe(true);
+    expect(sentQueues(none.connection)).toEqual([['warrior', 'scout', 'settler']]);
+
+    // With an empty queue the kept add is the whole list.
+    const idle = setup({ selection: SELECT_ROME }, viewWith((view) => {
+      romeOf(view).buildQueue = [];
+    }));
+    idle.controller.setCityFocus('build');
+    expect(idle.controller.addToQueue(WARRIOR)).toBe(true);
+    serverTakesFocus(idle.store, idle.connection);
+    expect(sentQueues(idle.connection)).toEqual([['warrior']]);
+  });
+
+  it('adds kept behind a Grow / Build press obey the rules of adds that wait: the limit of eight, no row button meanwhile, and End Turn goes last', () => {
+    // The limit counts the queue as it stands and what waits.
+    const full = setup({ selection: SELECT_ROME });
+    setView(full.store, (view) => {
+      romeOf(view).buildQueue = Array.from({ length: RULES.maxQueueLength - 1 }, () => ({ item: { ...WARRIOR }, cost: 18, turns: null, wait: 'earlier' as const }));
+    });
+    full.controller.setCityFocus('build');
+    expect(full.controller.addToQueue(SCOUT)).toBe(true); // the eighth, kept
+    expect(full.controller.addToQueue(SCOUT)).toBe(false); // a ninth is ignored
+    serverTakesFocus(full.store, full.connection);
+    expect(sentQueues(full.connection)).toHaveLength(1);
+    expect(sentQueues(full.connection)[0]).toHaveLength(RULES.maxQueueLength);
+
+    // A row button pressed meanwhile is ignored, as while any answer is on its way.
+    const rows = setup({ selection: SELECT_ROME });
+    rows.controller.setCityFocus('build');
+    expect(rows.controller.removeFromQueue(0)).toBe(false);
+    expect(rows.controller.moveInQueue(0, 1)).toBe(false);
+    expect(rows.controller.clearQueue()).toBe(false);
+    serverTakesFocus(rows.store, rows.connection);
+    expect(sentKinds(rows.connection)).toEqual(['setCityFocus']);
+    expect(rows.controller.removeFromQueue(0)).toBe(true); // every answer is in: a row press counts again
+
+    // End Turn pressed behind the focus press and an add: the add goes out first, then the turn ends.
+    const end = setup({ selection: SELECT_ROME });
+    end.controller.setCityFocus('build');
+    end.controller.addToQueue(SETTLER);
+    end.controller.toggleEndTurn();
+    expect(sentKinds(end.connection)).toEqual(['setCityFocus']);
+    serverTakesFocus(end.store, end.connection);
+    expect(sentKinds(end.connection)).toEqual(['setCityFocus', 'setBuildQueue']);
+    serverTakesQueue(end.store, end.connection);
+    expect(sentKinds(end.connection)).toEqual(['setCityFocus', 'setBuildQueue', 'endTurn']);
+    // End Turn alone behind a focus press waits like behind any action.
+    const alone = setup({ selection: SELECT_ROME });
+    alone.controller.setCityFocus('build');
+    alone.controller.toggleEndTurn();
+    serverTakesFocus(alone.store, alone.connection);
+    expect(sentKinds(alone.connection)).toEqual(['setCityFocus', 'endTurn']);
+  });
+
+  it('adds kept behind a Grow / Build press are dropped if the player turns to another city meanwhile, closes the panel, loses the connection, or the turn is ended', () => {
+    const twoCities = viewWith((view) => {
+      const ostia = { ...cloneJson(cityIn(view, SAMPLE.romeId)), id: 'c1_ostia', name: 'Ostia', tile: SAMPLE.romeTile - 2 };
+      view.cities.push(ostia);
+    });
+    const moved = setup({ selection: SELECT_ROME }, twoCities);
+    moved.controller.setCityFocus('build');
+    expect(moved.controller.addToQueue(WORKER)).toBe(true);
+    moved.store.set({ selection: { kind: 'city', cityId: 'c1_ostia' } });
+    moved.wait(SELECTION_GUARD_MS);
+    // The answer for Rome is still on its way: an add for Ostia does not ride on it, and neither does a focus press for Ostia.
+    expect(moved.controller.addToQueue(SCOUT)).toBe(false);
+    expect(moved.controller.setCityFocus('build')).toBe(false);
+    serverTakesFocus(moved.store, moved.connection);
+    expect(sentKinds(moved.connection)).toEqual(['setCityFocus']);
+    // Back in Rome nothing is left of the Worker that waited.
+    moved.store.set({ selection: SELECT_ROME });
+    moved.wait(SELECTION_GUARD_MS);
+    moved.controller.addToQueue(SCOUT);
+    expect(sentQueues(moved.connection)).toEqual([['warrior', 'scout', 'scout']]);
+
+    const closed = setup({ selection: SELECT_ROME });
+    closed.controller.setCityFocus('build');
+    closed.controller.addToQueue(WORKER);
+    closed.controller.deselect();
+    serverTakesFocus(closed.store, closed.connection);
+    expect(sentKinds(closed.connection)).toEqual(['setCityFocus']);
+
+    const lost = setup({ selection: SELECT_ROME });
+    lost.controller.setCityFocus('build');
+    lost.controller.addToQueue(WORKER);
+    lost.store.set({ connection: 'reconnecting' });
+    expect(lost.controller.addToQueue(WORKER)).toBe(false);
+    lost.store.set({ connection: 'online', busy: false });
+    expect(sentKinds(lost.connection)).toEqual(['setCityFocus']);
+    expect(lost.store.get().busy).toBe(false);
+
+    // Another tab of the same player ended the turn while the answer was on its way.
+    const ended = setup({ selection: SELECT_ROME });
+    ended.controller.setCityFocus('build');
+    ended.controller.addToQueue(WORKER);
+    setView(ended.store, (view) => {
+      view.players[0].endedTurn = true;
+    });
+    expect(ended.controller.addToQueue(WORKER)).toBe(false);
+    serverTakesFocus(ended.store, ended.connection);
+    expect(sentKinds(ended.connection)).toEqual(['setCityFocus']);
+  });
+
+  it('a Grow / Build press that is refused: the adds kept behind it are orders of their own and go out if the queue is still the one on the screen; if the world changed meanwhile they are dropped', () => {
+    // Refused, nothing else changed: the add is sent on top of the unchanged queue.
+    const refused = setup({ selection: SELECT_ROME });
+    refused.controller.setCityFocus('build');
+    expect(refused.controller.addToQueue(SETTLER)).toBe(true);
+    serverRefuses(refused.store);
+    expect(sentKinds(refused.connection)).toEqual(['setCityFocus', 'setBuildQueue']);
+    expect(sentQueues(refused.connection)).toEqual([['warrior', 'scout', 'settler']]);
+    expect(romeOf(viewOf(refused.store)).focus).toBe('grow');
+
+    // Refused because the turn went on, and the first entry was completed meanwhile: the queue on the screen
+    // is no longer the one the add was pressed on, and what waited is dropped.
+    const changed = setup({ selection: SELECT_ROME });
+    changed.controller.setCityFocus('build');
+    changed.controller.addToQueue(SETTLER);
+    setView(changed.store, (view) => {
+      view.turn += 1;
+      romeOf(view).buildQueue.shift();
+    });
+    serverRefuses(changed.store);
+    expect(sentKinds(changed.connection)).toEqual(['setCityFocus']);
+    expect(changed.store.get().busy).toBe(false);
+
+    // An End Turn that waited behind a refused focus press is dropped, as after any refusal.
+    const end = setup({ selection: SELECT_ROME });
+    end.controller.setCityFocus('build');
+    end.controller.toggleEndTurn();
+    serverRefuses(end.store);
+    expect(sentKinds(end.connection)).toEqual(['setCityFocus']);
+  });
+
+  // ---- "Stop work" asks once ----
+
+  /** The sample view with its Worker's farm at this many turns worked. */
+  function viewWithTurnsWorked(turnsWorked: number): PlayerView {
+    return viewWith((view) => putToWork(unitIn(view, SAMPLE.workerId), turnsWorked));
+  }
+
+  const STOP_WORKER = { type: 'stopJob', unitId: SAMPLE.workerId };
+
+  it('"Stop work" with no turn worked yet sends at once; with turns worked the first press asks, a second within 0.6 s is ignored, a later one sends', () => {
+    // Started this turn: nothing would be lost, nothing is asked.
+    const fresh = setup({ selection: SELECT_WORKER }, viewWithTurnsWorked(0));
+    expect(fresh.controller.askingToStop()).toBe(false);
+    expect(fresh.controller.stopJob()).toBe('sent');
+    expect(sentActions(fresh.connection)).toEqual([STOP_WORKER]);
+    expect(fresh.controller.askingToStop()).toBe(false);
+
+    for (const turnsWorked of [1, 3]) {
+      const { store, controller, connection, wait } = setup({ selection: SELECT_WORKER }, viewWithTurnsWorked(turnsWorked));
+      expect(controller.askingToStop()).toBe(false);
+
+      // The first press only asks: nothing goes out, nothing in the store changes.
+      const before = store.get();
+      const first: StopPress = controller.stopJob();
+      expect(first).toBe('asked');
+      expect(connection.sent).toEqual([]);
+      expect(store.get()).toBe(before);
+      expect(controller.askingToStop()).toBe(true);
+
+      // The second click of a double-click comes too soon to be an answer.
+      wait(120);
+      expect(controller.stopJob()).toBe('ignored');
+      wait(QUEUE_ROW_GUARD_MS - 121);
+      expect(controller.stopJob()).toBe('ignored'); // one millisecond before the time is over
+      expect(connection.sent).toEqual([]);
+      expect(controller.askingToStop()).toBe(true); // an ignored press neither answers nor takes the question back
+
+      // The answer.
+      wait(1);
+      expect(controller.stopJob()).toBe('sent');
+      expect(sentActions(connection)).toEqual([STOP_WORKER]);
+      expect(store.get().busy).toBe(true);
+      expect(controller.askingToStop()).toBe(false); // the question is taken back with the order
+    }
+  });
+
+  it('"Stop work" goes back to asking after four seconds: a press after that asks again and stops nothing', () => {
+    expect(ASKS_FOR_MS).toBe(4000);
+    const { controller, connection, wait } = setup({ selection: SELECT_WORKER });
+    expect(ownOf(sampleView(), SAMPLE.workerId).job?.turnsWorked).toBe(1);
+    expect(controller.stopJob()).toBe('asked');
+    wait(ASKS_FOR_MS - 1);
+    expect(controller.askingToStop()).toBe(true);
+    wait(1);
+    // Time alone ends the question: no store update is needed (the page keeps a timer to print the panel again).
+    expect(controller.askingToStop()).toBe(false);
+    expect(controller.stopJob()).toBe('asked');
+    expect(connection.sent).toEqual([]);
+    expect(controller.askingToStop()).toBe(true);
+    // A press just inside the four seconds is an answer.
+    wait(ASKS_FOR_MS - 1);
+    expect(controller.stopJob()).toBe('sent');
+    expect(sentActions(connection)).toEqual([STOP_WORKER]);
+  });
+
+  it('the question of "Stop work" is about one job at one count of turns: after a turn it asks again, with the new number', () => {
+    const { store, controller, connection, wait } = setup({ selection: SELECT_WORKER });
+    expect(controller.stopJob()).toBe('asked');
+    wait(1000);
+    // The turn resolves: another turn has been worked. Two turns would be lost now, which nobody has agreed to.
+    setView(store, (view) => {
+      view.turn += 1;
+      putToWork(unitIn(view, SAMPLE.workerId), 2);
+    });
+    expect(controller.askingToStop()).toBe(false);
+    expect(controller.stopJob()).toBe('asked');
+    expect(connection.sent).toEqual([]);
+    wait(QUEUE_ROW_GUARD_MS);
+    expect(controller.stopJob()).toBe('sent');
+    expect(connection.sent.map((message) => (message.type === 'action' ? [message.turn, message.action] : null))).toEqual([[8, STOP_WORKER]]);
+
+    // A view that changes nothing about the job leaves the question standing.
+    const calm = setup({ selection: SELECT_WORKER });
+    calm.controller.stopJob();
+    setView(calm.store, (view) => {
+      view.players[1].endedTurn = false;
+      unitIn(view, SAMPLE.foreignWarriorId).tile += 1;
+    });
+    calm.store.set({ hoverTile: 9 });
+    expect(calm.controller.askingToStop()).toBe(true);
+    calm.wait(QUEUE_ROW_GUARD_MS);
+    expect(calm.controller.stopJob()).toBe('sent');
+  });
+
+  it('the question of "Stop work" is about one unit: another unit is not asked for, and a change of selection takes the question back', () => {
+    // Two Workers at work, each with turns worked.
+    const twoWorkers = viewWith((view) => {
+      const second = cloneJson(unitIn(view, SAMPLE.workerId));
+      second.id = 'u1_second';
+      second.tile = SAMPLE.emptyTile;
+      view.units.push(second);
+    });
+    const SELECT_SECOND = { kind: 'unit', unitId: 'u1_second' } as const;
+    const { store, controller, connection, wait } = setup({ selection: SELECT_WORKER }, twoWorkers);
+    expect(controller.stopJob()).toBe('asked');
+
+    // The other Worker's button is not asking, and its first press is a question of its own.
+    store.set({ selection: SELECT_SECOND });
+    wait(SELECTION_GUARD_MS);
+    expect(controller.askingToStop()).toBe(false);
+    expect(controller.stopJob()).toBe('asked');
+    expect(connection.sent).toEqual([]);
+    // Back at the first, well inside the four seconds of its question: that question is gone.
+    store.set({ selection: SELECT_WORKER });
+    wait(SELECTION_GUARD_MS);
+    expect(controller.askingToStop()).toBe(false);
+    expect(controller.stopJob()).toBe('asked');
+    expect(connection.sent).toEqual([]);
+
+    // The panel closes and opens again for the same unit (Escape, then a tap): the question is gone.
+    controller.deselect();
+    store.set({ selection: SELECT_WORKER });
+    wait(SELECTION_GUARD_MS);
+    expect(controller.askingToStop()).toBe(false);
+    expect(controller.stopJob()).toBe('asked');
+    // To a city and back.
+    store.set({ selection: SELECT_ROME });
+    expect(controller.askingToStop()).toBe(false);
+    store.set({ selection: SELECT_WORKER });
+    wait(SELECTION_GUARD_MS);
+    expect(controller.stopJob()).toBe('asked');
+    // A tile card opens (a tap beside the unit): the selection is gone, and with it the question.
+    controller.onTileTap(SAMPLE.settlerTile + 1);
+    expect(store.get().selection).toBeNull();
+    store.set({ selection: SELECT_WORKER, inspectedTile: null });
+    wait(SELECTION_GUARD_MS);
+    expect(controller.stopJob()).toBe('asked');
+    expect(connection.sent).toEqual([]);
+
+    // With the selection left alone the same sequence ends in the order.
+    wait(QUEUE_ROW_GUARD_MS);
+    expect(controller.stopJob()).toBe('sent');
+    expect(sentActions(connection)).toEqual([STOP_WORKER]);
+  });
+
+  it('orders closing takes the question of "Stop work" back: no connection, turn ended; while they are closed a press does nothing and asks nothing', () => {
+    const lost = setup({ selection: SELECT_WORKER });
+    expect(lost.controller.stopJob()).toBe('asked');
+    lost.store.set({ connection: 'reconnecting' });
+    expect(lost.controller.askingToStop()).toBe(false);
+    lost.wait(QUEUE_ROW_GUARD_MS);
+    expect(lost.controller.stopJob()).toBe('ignored'); // the button is grey
+    lost.store.set({ connection: 'online' });
+    // Back within the four seconds: the question does not come back with the connection.
+    expect(lost.controller.askingToStop()).toBe(false);
+    expect(lost.controller.stopJob()).toBe('asked');
+    expect(lost.connection.sent).toEqual([]);
+
+    const ended = setup({ selection: SELECT_WORKER });
+    expect(ended.controller.stopJob()).toBe('asked');
+    setView(ended.store, (view) => {
+      view.players[0].endedTurn = true;
+    });
+    expect(ended.controller.askingToStop()).toBe(false);
+    ended.wait(QUEUE_ROW_GUARD_MS);
+    expect(ended.controller.stopJob()).toBe('ignored');
+    expect(ended.controller.askingToStop()).toBe(false); // a press on the grey button is not a question either
+    setView(ended.store, (view) => {
+      view.players[0].endedTurn = false; // "tap to cancel"
+    });
+    expect(ended.controller.askingToStop()).toBe(false);
+    expect(ended.controller.stopJob()).toBe('asked');
+    expect(ended.connection.sent).toEqual([]);
+
+    // A job with no turn worked is not stopped either while orders are closed.
+    const fresh = setup({ selection: SELECT_WORKER }, viewWith((view) => {
+      giveJob(view, SAMPLE.workerId);
+      view.players[0].endedTurn = true;
+    }));
+    expect(fresh.controller.stopJob()).toBe('ignored');
+    expect(fresh.connection.sent).toEqual([]);
+  });
+
+  it('the selection guard and the job guard come before the question of "Stop work": a press inside them does not count as the question', () => {
+    // A double tap on a Worker at work: the panel comes up under the finger, "Stop work" where the unit stood.
+    const tapped = setup();
+    tapped.controller.onTileTap(SAMPLE.workerTile);
+    tapped.wait(300);
+    expect(tapped.controller.stopJob()).toBe('ignored');
+    expect(tapped.controller.askingToStop()).toBe(false);
+    tapped.wait(SELECTION_GUARD_MS - 300);
+    // Had the press inside the guard been the question, this one, 200 ms after it, would be the end of a double-click.
+    expect(tapped.controller.stopJob()).toBe('asked');
+    expect(tapped.controller.askingToStop()).toBe(true);
+    tapped.wait(QUEUE_ROW_GUARD_MS);
+    expect(tapped.controller.stopJob()).toBe('sent');
+    expect(sentActions(tapped.connection)).toEqual([STOP_WORKER]);
+
+    // The job guard: the job of the selected unit appears (with a turn worked already, as after a
+    // reconnect), and "Stop work" stands where "Build Farm" stood.
+    const appeared = setup({ selection: SELECT_WORKER }, viewWithIdleWorker());
+    setView(appeared.store, (view) => putToWork(unitIn(view, SAMPLE.workerId), 1));
+    appeared.wait(JOB_GUARD_MS - 1);
+    expect(appeared.controller.stopJob()).toBe('ignored');
+    expect(appeared.controller.askingToStop()).toBe(false);
+    appeared.wait(1);
+    expect(appeared.controller.stopJob()).toBe('asked');
+    appeared.wait(QUEUE_ROW_GUARD_MS - 1);
+    expect(appeared.controller.stopJob()).toBe('ignored');
+    appeared.wait(1);
+    expect(appeared.controller.stopJob()).toBe('sent');
+    expect(sentActions(appeared.connection)).toEqual([STOP_WORKER]);
+  });
+
+  it('a second press on "Stop work" whose message cannot go out leaves the question standing: the next press sends', () => {
+    // An answer is on its way (End Turn was pressed while the button asked, and its answer is slow).
+    const { store, controller, connection, wait } = setup({ selection: SELECT_WORKER });
+    expect(controller.stopJob()).toBe('asked');
+    wait(QUEUE_ROW_GUARD_MS);
+    store.set({ busy: true });
+    expect(controller.stopJob()).toBe('ignored');
+    expect(connection.sent).toEqual([]);
+    expect(controller.askingToStop()).toBe(true);
+    store.set({ busy: false });
+    expect(controller.stopJob()).toBe('sent');
+    expect(sentActions(connection)).toEqual([STOP_WORKER]);
+    expect(controller.askingToStop()).toBe(false);
+
+    // The socket has just dropped: the same.
+    const dropped = setup({ selection: SELECT_WORKER });
+    dropped.controller.stopJob();
+    dropped.wait(QUEUE_ROW_GUARD_MS);
+    dropped.connection.accepts = false;
+    expect(dropped.controller.stopJob()).toBe('ignored');
+    expect(dropped.store.get().busy).toBe(false);
+    expect(dropped.controller.askingToStop()).toBe(true);
+    dropped.connection.accepts = true;
+    expect(dropped.controller.stopJob()).toBe('sent');
+
+    // The first press may come while an answer is on its way: asking sends nothing, so nothing holds it back.
+    const busy = setup({ selection: SELECT_WORKER, busy: true });
+    expect(busy.controller.stopJob()).toBe('asked');
+    expect(busy.controller.askingToStop()).toBe(true);
+    busy.wait(QUEUE_ROW_GUARD_MS);
+    busy.store.set({ busy: false });
+    expect(busy.controller.stopJob()).toBe('sent');
+  });
+
+  it('the question of "Stop work" touches nothing else: the F key, the N key, map taps and End Turn work as ever while the button asks; a Fishing Boat is asked like a Worker', () => {
+    const { store, controller, connection, wait } = setup({ selection: SELECT_WORKER });
+    expect(controller.stopJob()).toBe('asked');
+    controller.toggleEndTurn();
+    expect(sentActions(connection)).toEqual([{ type: 'endTurn' }]);
+    store.set({ busy: false });
+    expect(controller.selectNextIdleUnit()).toBe(SAMPLE.settlerTile); // N: on to the next unit, and the question is over
+    controller.foundCity('key');
+    expect(sentActions(connection)[1]).toEqual({ type: 'foundCity', unitId: SAMPLE.settlerId });
+    store.set({ busy: false, selection: SELECT_WORKER });
+    wait(SELECTION_GUARD_MS);
+    expect(controller.askingToStop()).toBe(false);
+
+    // A Fishing Boat building a net, three turns in.
+    const view = shoreView((changed) => putToWork(addOwnUnit(changed, 'u1_f1sher', 'fishingBoat', SHORE.middle), 3));
+    const boat = setup({ selection: { kind: 'unit', unitId: 'u1_f1sher' } }, view);
+    expect(boat.controller.stopJob()).toBe('asked');
+    expect(boat.controller.askingToStop()).toBe(true);
+    boat.wait(QUEUE_ROW_GUARD_MS);
+    expect(boat.controller.stopJob()).toBe('sent');
+    expect(sentActions(boat.connection)).toEqual([{ type: 'stopJob', unitId: 'u1_f1sher' }]);
+  });
+
+  // ---- Boats ----
+
+  it('a selected boat: reachableFor holds water only; a tap on a lit water tile sends it; a tap on a land tile beside it selects or inspects and sends nothing', () => {
+    const isWater = (view: PlayerView, tile: number): boolean => ['coast', 'ocean'].includes(seenTile(view, tile).terrain);
+    const SELECT_BOAT = { kind: 'unit', unitId: 'u1_f1sher' } as const;
+    const view = shoreView((changed) => {
+      addOwnUnit(changed, 'u1_f1sher', 'fishingBoat', SHORE.middle);
+      unitIn(changed, SAMPLE.warriorId).tile = SHORE.beach; // the player's Warrior on the beach beside the boat
+    });
+    // With the real movement rules, as the app runs.
+    const { store, controller, connection } = setup({ selection: SELECT_BOAT }, view, 'rules');
+    const boatUnit = unitIn(viewOf(store), 'u1_f1sher');
+
+    // What lights up: the water within two steps, and no land, although land lies right beside the boat.
+    const reach = reachableFor(viewOf(store), boatUnit);
+    expect([...reach.keys()].sort((a, b) => a - b)).toEqual([SHORE.north, SHORE.south, SHORE.free]);
+    for (const tile of reach.keys()) expect(isWater(viewOf(store), tile), String(tile)).toBe(true);
+    expect(isWater(viewOf(store), SHORE.beach)).toBe(false);
+    expect(overlayFor(store.get()).reachable).toEqual([SHORE.north, SHORE.south, SHORE.free]);
+    expect(controller.isAiming()).toBe(true);
+
+    // A tap on land beside the boat is never an order. Open land of the player's: the tile's card opens...
+    const meadow = SHORE.beach + 14; // own grassland south of the beach, touching the boat's tile, nothing on it
+    expect(seenTile(viewOf(store), meadow)).toMatchObject({ terrain: 'grassland', feature: null, owner: SAMPLE.me });
+    controller.onTileTap(meadow);
+    expect(store.get().selection).toBeNull();
+    expect(store.get().inspectedTile).toBe(meadow);
+    // ...and land with something of the player's on it: that is selected.
+    store.set({ selection: SELECT_BOAT, inspectedTile: null });
+    controller.onTileTap(SHORE.beach);
+    expect(store.get().selection).toEqual(SELECT_WARRIOR);
+    expect(connection.sent).toEqual([]);
+
+    // A tap on a lit water tile sends the boat there, along the water.
+    store.set({ selection: SELECT_BOAT });
+    controller.onTileTap(SHORE.free);
+    expect(sentActions(connection)).toEqual([{ type: 'moveUnit', unitId: 'u1_f1sher', path: [SHORE.south, SHORE.free] }]);
+    expect(store.get().selection).toEqual(SELECT_BOAT);
+    expect(store.get().inspectedTile).toBeNull();
+  });
+
+  it('startJob sends only a job that is among the unit\'s own options: a Fishing Boat the net, never a farm; a Worker never a net; a Scout Boat nothing', () => {
+    const view = shoreView((changed) => {
+      takeJob(changed, SAMPLE.workerId);
+      addOwnUnit(changed, 'u1_f1sher', 'fishingBoat', SHORE.middle);
+      addOwnUnit(changed, 'u1_sc0ut1', 'scoutBoat', SHORE.north);
+    });
+    const { store, controller, connection, wait } = setup({ selection: { kind: 'unit', unitId: 'u1_f1sher' } }, view);
+    controller.startJob('farm');
+    controller.startJob('mine');
+    expect(connection.sent).toEqual([]);
+    controller.startJob('fishingNet');
+    expect(sentActions(connection)).toEqual([{ type: 'startJob', unitId: 'u1_f1sher', improvement: 'fishingNet' }]);
+
+    // The Worker on its plains tile: a farm, and no net whatever is asked.
+    store.set({ busy: false, selection: SELECT_WORKER });
+    wait(SELECTION_GUARD_MS);
+    controller.startJob('fishingNet');
+    expect(connection.sent).toHaveLength(1);
+    controller.startJob('farm');
+    expect(sentActions(connection)[1]).toEqual({ type: 'startJob', unitId: SAMPLE.workerId, improvement: 'farm' });
+
+    // The Scout Boat builds nothing.
+    store.set({ busy: false, selection: { kind: 'unit', unitId: 'u1_sc0ut1' } });
+    wait(SELECTION_GUARD_MS);
+    controller.startJob('fishingNet');
+    expect(connection.sent).toHaveLength(2);
+
+    // A Fishing Boat where its one job is impossible (outside the borders): the option says why, nothing is sent.
+    const outside = shoreView((changed) => {
+      addOwnUnit(changed, 'u1_f1sher', 'fishingBoat', SHORE.free, 'notYourLand');
+    });
+    const far = setup({ selection: { kind: 'unit', unitId: 'u1_f1sher' } }, outside);
+    far.controller.startJob('fishingNet');
+    expect(far.connection.sent).toEqual([]);
+  });
+
+  it('water never lights up for a land unit, and a land unit sent onto the sea opens the water tile\'s card; a Scout Boat reaches further; a boat at work reaches nothing', () => {
+    const isWater = (view: PlayerView, tile: number): boolean => ['coast', 'ocean'].includes(seenTile(view, tile).terrain);
+    const view = shoreView((changed) => {
+      addOwnUnit(changed, 'u1_f1sher', 'fishingBoat', SHORE.middle);
+      addOwnUnit(changed, 'u1_sc0ut1', 'scoutBoat', SHORE.north);
+      unitIn(changed, SAMPLE.warriorId).tile = SHORE.beach;
+    });
+    // The Warrior on the beach: land only, although three coast tiles touch its tile.
+    const warrior = setup({ selection: SELECT_WARRIOR }, view, 'rules');
+    const walk = reachableFor(viewOf(warrior.store), unitIn(viewOf(warrior.store), SAMPLE.warriorId));
+    expect(walk.size).toBeGreaterThan(3);
+    for (const tile of walk.keys()) expect(isWater(viewOf(warrior.store), tile), String(tile)).toBe(false);
+    // Sent onto the sea: nothing moves, the Warrior is deselected and the card of the water tile opens
+    // (which says "Boats only: costs 1 move to enter").
+    warrior.controller.onTileTap(SHORE.south);
+    expect(warrior.connection.sent).toEqual([]);
+    expect(warrior.store.get().selection).toBeNull();
+    expect(warrior.store.get().inspectedTile).toBe(SHORE.south);
+    // A tap on the water tile with the player's own boat on it selects the boat.
+    warrior.store.set({ selection: SELECT_WARRIOR, inspectedTile: null });
+    warrior.controller.onTileTap(SHORE.middle);
+    expect(warrior.store.get().selection).toEqual({ kind: 'unit', unitId: 'u1_f1sher' });
+
+    // The Scout Boat, four moves: every coast tile in sight along the shore, the Fishing Boat's tile too
+    // (the two classes may share a tile), and still no land.
+    const scout = unitIn(view, 'u1_sc0ut1');
+    const sail = reachableFor(view, scout);
+    expect([...sail.keys()].sort((a, b) => a - b)).toEqual([SHORE.middle, SHORE.south, SHORE.free, SHORE.free + 14]);
+    for (const tile of sail.keys()) expect(isWater(view, tile), String(tile)).toBe(true);
+    // The other way round too: the Fishing Boat may sail onto the Scout Boat's tile.
+    expect(reachableFor(view, unitIn(view, 'u1_f1sher')).has(SHORE.north)).toBe(true);
+    // Two Fishing Boats may not: a second one beside the first does not reach its tile.
+    const twoFishers = shoreView((changed) => {
+      addOwnUnit(changed, 'u1_f1sher', 'fishingBoat', SHORE.middle);
+      addOwnUnit(changed, 'u1_f2sher', 'fishingBoat', SHORE.north);
+    });
+    expect(reachableFor(twoFishers, unitIn(twoFishers, 'u1_f2sher')).has(SHORE.middle)).toBe(false);
+
+    // A boat at work lights nothing, and a tap beside it gives no order.
+    const working = shoreView((changed) => putToWork(addOwnUnit(changed, 'u1_f1sher', 'fishingBoat', SHORE.middle), 1));
+    const atWork = setup({ selection: { kind: 'unit', unitId: 'u1_f1sher' } }, working, 'rules');
+    expect(reachableFor(working, unitIn(working, 'u1_f1sher')).size).toBe(0);
+    expect(atWork.controller.isAiming()).toBe(false);
+    atWork.controller.onTileTap(SHORE.south);
+    expect(atWork.connection.sent).toEqual([]);
+    expect(atWork.store.get().inspectedTile).toBe(SHORE.south);
+    // "Show me" and the N key pass it by: it is not a unit that can still move.
+    expect(atWork.controller.selectNextIdleUnit()).not.toBe(SHORE.middle);
+  });
+
   it('toggleEndTurn sends endTurn, or cancelEndTurn when the player has already ended the turn', () => {
     const { store, controller, connection, wait } = setup();
 
@@ -1427,7 +2188,7 @@ describe('controller (WP4)', () => {
   });
 
   it('request ids increase with every action', () => {
-    const { store, controller, connection, wait } = setup({ selection: { kind: 'unit', unitId: SAMPLE.warriorId } });
+    const { store, controller, connection, wait } = setup({ selection: { kind: 'unit', unitId: SAMPLE.warriorId } }, viewWithFreshJob());
 
     controller.onTileTap(SAMPLE.warriorTile + 1);
     store.set({ busy: false, selection: { kind: 'unit', unitId: SAMPLE.settlerId } });
@@ -1703,7 +2464,10 @@ describe('controller (WP4)', () => {
     expect(controller.moveInQueue(0, 1)).toBe(false);
     expect(controller.clearQueue()).toBe(false);
     controller.startJob('farm');
-    controller.stopJob();
+    expect(controller.stopJob()).toBe('ignored');
+    expect(controller.askingToStop()).toBe(false);
+    expect(controller.setCityFocus('build')).toBe(false);
+    expect(controller.setCityFocus('grow')).toBe(false);
     controller.toggleEndTurn();
     controller.deselect();
     expect(controller.isAiming()).toBe(false);

@@ -1,27 +1,43 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  CITY_FOCUS,
+  CITY_FOCUS_IDS,
+  DEFAULT_CITY_FOCUS,
   IMPROVEMENTS,
   IMPROVEMENT_IDS,
+  PROTOCOL_VERSION,
   RULES,
+  RULE_ERROR_MESSAGES,
   STATE_SCHEMA,
   UNITS,
   UNIT_TYPE_IDS,
   applyAction,
+  boardFromState,
+  boardFromView,
+  buildItemError,
   buildPlan,
   buildPlayerView,
+  checkInvariants,
   cityCenterYields,
   cityEconomy,
   cloneJson,
   createGame,
+  distance,
+  findSpawnTile,
   improvementFits,
   improvementSiteError,
   jobOptions,
   jobView,
+  migrateGameState,
+  reachableTiles,
   runCityTurn,
   siteInView,
   siteOfTile,
   startJobError,
   tileIndex,
+  tileIsWater,
+  tileMoveCost,
   tileYields,
   updateKnowledge,
 } from '../src/index';
@@ -50,6 +66,10 @@ import { mapFromAscii } from '../src/testing';
  * arranges its situations by hand and never sends an action for a queue or
  * a job. The same rules are tested through the real actions, and at length,
  * in rulesCity, rulesQueue, rulesJobs and the visibility test files.
+ *
+ * The last block, 'contracts: round 3', is of the same kind for the boats,
+ * the Fishing Net and the "Grow first / Build first" choice: six smoke
+ * tests written together with that code, before any other test knew it.
  */
 
 // ---------------------------------------------------------------------------
@@ -111,7 +131,11 @@ function item(unitType: UnitTypeId): BuildItem {
   return { kind: 'unit', unitType };
 }
 
-/** A meadow of open grassland, 16 x 11, with water all around. */
+/** The unit types by where they move: the menu of a city without water treats the two groups differently. */
+const LAND_UNITS = UNIT_TYPE_IDS.filter((type) => UNITS[type].domain === 'land');
+const BOATS = UNIT_TYPE_IDS.filter((type) => UNITS[type].domain === 'sea');
+
+/** A meadow of open grassland, 16 x 11, with water all around. A city in its middle owns no water. */
 const MEADOW: readonly string[] = [
   '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
   ' ~ g g g g g g g g g g g g g g ~',
@@ -207,6 +231,7 @@ describe('contracts: one turn of a city', () => {
   function city(fields: Partial<City>): City {
     return {
       id: 'c1_test01', owner: 'p1', name: 'Rome', tile: 0, population: 1, foodStored: 0, buildQueue: [], productionStored: 0,
+      focus: 'grow',
       ...fields,
     };
   }
@@ -283,14 +308,23 @@ describe('contracts: the forecast', () => {
       { item: item('settler'), cost: 30, turns: 20, wait: null },
     ]);
     expect(plan.held).toBeNull();
-    // The menu, in the table's order, each as if added behind the queue.
+    // The menu, in the table's order: one option per unit type, always.
     expect(plan.options.map((option) => option.item.unitType)).toEqual([...UNIT_TYPE_IDS]);
-    for (const option of plan.options) {
-      expect(option.cost).toBe(UNITS[option.item.unitType].cost);
+    for (const option of plan.options) expect(option.cost).toBe(UNITS[option.item.unitType].cost);
+    // The four land units, each as if added behind the queue.
+    const landOptions = plan.options.filter((option) => UNITS[option.item.unitType].domain === 'land');
+    expect(landOptions.map((option) => option.item.unitType)).toEqual(LAND_UNITS);
+    for (const option of landOptions) {
       expect(option.addError).toBeNull();
       expect(option.wait).toBeNull();
       expect(option.turns).toBeGreaterThan(20);
       expect(option.turns).toBeLessThanOrEqual(RULES.forecastTurns);
+    }
+    // The two boats: this city owns no water, so it can never build one. No number, and the reason.
+    const boatOptions = plan.options.filter((option) => UNITS[option.item.unitType].domain === 'sea');
+    expect(boatOptions.map((option) => option.item.unitType)).toEqual(BOATS);
+    for (const option of boatOptions) {
+      expect([option.turns, option.wait, option.addError], option.item.unitType).toEqual([null, 'noRoom', 'noWaterForBoat']);
     }
     // The forecast is a look, not a move.
     expect(state).toEqual(before);
@@ -338,14 +372,25 @@ describe('contracts: the forecast', () => {
       [null, 'needsPopulation'],
       [null, 'earlier'],
     ]);
-    for (const option of plan.options) expect([option.turns, option.wait]).toEqual([null, 'earlier']);
+    // Behind a queue that is stuck every land unit waits for the entry before it;
+    // a boat in this city without water has its own, lasting reason.
+    for (const option of plan.options) {
+      const boat = UNITS[option.item.unitType].domain === 'sea';
+      expect([option.turns, option.wait, option.addError], option.item.unitType).toEqual(
+        boat ? [null, 'noRoom', 'noWaterForBoat'] : [null, 'earlier', null],
+      );
+    }
   });
 
-  it('a full queue says so on every option of the menu', () => {
+  it('a full queue says so on every option of the menu the city can build; a boat in a city without water keeps its own reason', () => {
     const state = capitalWithQueue(new Array<UnitTypeId>(RULES.maxQueueLength).fill('scout'));
     const plan = buildPlan(state, cityOf(state, 'p1'));
     expect(plan.queue).toHaveLength(RULES.maxQueueLength);
-    for (const option of plan.options) expect(option.addError).toBe('queueFull');
+    // The lasting reason comes first (BuildOption.addError): the queue will have room again, the city will never have water.
+    expect(plan.options.map((option) => [option.item.unitType, option.addError])).toEqual([
+      ...LAND_UNITS.map((type) => [type, 'queueFull']),
+      ...BOATS.map((type) => [type, 'noWaterForBoat']),
+    ]);
     // A number exactly when there is no reason, for every row and every option.
     for (const entry of [...plan.queue, ...plan.options]) expect(entry.turns === null).toBe(entry.wait !== null);
   });
@@ -432,7 +477,9 @@ describe('contracts: improvement sites', () => {
     const busy = { job: { improvement: 'farm', turnsWorked: 1 } } as const;
     expect(optionsOn(OPEN, busy)).toEqual([{ ...farm, error: 'unitBusy' }, { ...mine, error: 'unitBusy' }]);
     expect(optionsOn(OPEN, { type: 'warrior' })).toEqual([]);
-    expect(optionsOn(OPEN).map((option) => option.improvement)).toEqual([...IMPROVEMENT_IDS]);
+    // One option per improvement the unit's TYPE builds, in the table's order: a Worker has no button for a net.
+    expect(optionsOn(OPEN).map((option) => option.improvement)).toEqual([...UNITS.worker.improvements]);
+    expect(optionsOn(OPEN).map((option) => option.improvement)).toEqual(['farm', 'mine']);
 
     // startJobError, which jobOptions is made of: the unit first, then its job, then the tile.
     expect(startJobError(state, worker(FAR, { type: 'settler' }), 'farm')).toBe('cannotImprove');
@@ -496,11 +543,49 @@ describe('contracts: improvement sites', () => {
     expect(jobView({ improvement: 'mine', turnsWorked: 4 })).toEqual({ improvement: 'mine', turnsWorked: 4, turnsTotal: 5, turnsLeft: 1 });
     expect(jobView({ improvement: 'mine', turnsWorked: 9 })).toEqual({ improvement: 'mine', turnsWorked: 9, turnsTotal: 5, turnsLeft: 1 });
 
-    // The Worker: the fourth entry of the build menu, the one unit that can improve.
-    expect([...UNIT_TYPE_IDS]).toEqual(['warrior', 'scout', 'settler', 'worker']);
-    expect(UNIT_TYPE_IDS.filter((type) => UNITS[type].canImprove)).toEqual(['worker']);
-    expect(UNITS.worker).toMatchObject({ unitClass: 'civilian', moves: 2, sight: 2, cost: 20, populationCost: 0, canFoundCity: false });
+    // The lists this round pinned. The six unit types in the order of the build menu: the Worker fourth, the boats last.
+    expect([...UNIT_TYPE_IDS]).toEqual(['warrior', 'scout', 'settler', 'worker', 'fishingBoat', 'scoutBoat']);
+    // Who builds what: the Worker a farm and a mine, the Fishing Boat a net, the other four nothing.
+    expect(UNIT_TYPE_IDS.map((type) => [...UNITS[type].improvements])).toEqual([[], [], [], ['farm', 'mine'], ['fishingNet'], []]);
+    expect([...IMPROVEMENT_IDS]).toEqual(['farm', 'mine', 'fishingNet']);
+    expect(UNITS.worker).toMatchObject({ unitClass: 'civilian', domain: 'land', moves: 2, sight: 2, cost: 20, populationCost: 0, canFoundCity: false });
+    expect(UNITS.fishingBoat).toMatchObject({ unitClass: 'civilian', domain: 'sea', moves: 2, sight: 2, cost: 20, populationCost: 0, canFoundCity: false });
+    expect(UNITS.scoutBoat).toMatchObject({ unitClass: 'military', domain: 'sea', moves: 4, sight: 4, cost: 24, populationCost: 0, canFoundCity: false });
     expect([RULES.maxQueueLength, RULES.forecastTurns, RULES.minFoodSurplus]).toEqual([8, 50, 1]);
+    // The save layout and the protocol of round 3.
+    expect(STATE_SCHEMA).toBe(3);
+    expect(PROTOCOL_VERSION).toBe(5);
+
+    // The rows round 3 added, whole: the words are on the page's buttons and in the README, and
+    // the buttons were measured with them. (A number that is tuned on purpose is changed here with it.)
+    expect(UNITS.fishingBoat).toEqual({
+      name: 'Fishing Boat', description: 'Builds fishing nets inside the borders.',
+      unitClass: 'civilian', domain: 'sea', moves: 2, sight: 2, cost: 20, populationCost: 0, canFoundCity: false, improvements: ['fishingNet'],
+    });
+    expect(UNITS.scoutBoat).toEqual({
+      name: 'Scout Boat', description: 'A fast boat that explores the sea.',
+      unitClass: 'military', domain: 'sea', moves: 4, sight: 4, cost: 24, populationCost: 0, canFoundCity: false, improvements: [],
+    });
+    expect(IMPROVEMENTS.fishingNet).toEqual({
+      name: 'Fishing Net', description: 'Nets along the coast for more food.',
+      needs: 'coast', terrains: ['coast'], features: [null], yields: { food: 2, production: 0 }, turns: 4,
+    });
+    expect(CITY_FOCUS_IDS).toEqual(['grow', 'build']);
+    expect(DEFAULT_CITY_FOCUS).toBe('grow');
+    expect(CITY_FOCUS).toEqual({
+      grow: {
+        name: 'Grow first', summary: 'growth before production',
+        description: 'Citizens take the best tiles, and food before production whenever the city would stop growing.',
+      },
+      build: {
+        name: 'Build first', summary: 'most production, growth may stop',
+        description: 'Citizens take the tiles with the most production. The city grows slowly or not at all; it never shrinks.',
+      },
+    });
+    // The three sentences a refusal carries to the page that round 3 wrote or reworded.
+    expect(RULE_ERROR_MESSAGES.impassable).toBe('This unit cannot go there.');
+    expect(RULE_ERROR_MESSAGES.notYourLand).toBe('That can only be built inside your own borders.');
+    expect(RULE_ERROR_MESSAGES.noWaterForBoat).toBe('This city has no water inside its borders, so it cannot build boats.');
   });
 });
 
@@ -517,7 +602,7 @@ describe('contracts: views', () => {
       players: PLAYERS.map((player) => ({ ...player })),
     });
     expect(state.schema).toBe(STATE_SCHEMA);
-    expect(STATE_SCHEMA).toBe(2);
+    expect(STATE_SCHEMA).toBe(3);
     for (const tile of state.map.tiles) expect(tile.improvement).toBeNull();
     for (const unit of Object.values(state.units)) expect(unit.job).toBeNull();
 
@@ -538,9 +623,11 @@ describe('contracts: views', () => {
       expect(JSON.parse(JSON.stringify(view))).toEqual(view);
     }
 
-    // A city that has just been founded: an empty queue, a full menu.
+    // A city that has just been founded: an empty queue, a full menu, and on Grow.
+    // (A capital of a generated map owns water, so it can add the boats too: rule H6 of the map generator.)
     state = foundCapital(state, 'p1');
     expect(cityOf(state, 'p1').buildQueue).toEqual([]);
+    expect(cityOf(state, 'p1').focus).toBe('grow');
     for (const player of state.players) {
       const view = buildPlayerView(state, player.id);
       expect(JSON.parse(JSON.stringify(view))).toEqual(view);
@@ -549,7 +636,7 @@ describe('contracts: views', () => {
           expect(city.own).toBeNull();
           continue;
         }
-        expect(city.own).toMatchObject({ buildQueue: [], held: null, productionStored: 0 });
+        expect(city.own).toMatchObject({ buildQueue: [], held: null, productionStored: 0, focus: 'grow' });
         expect(city.own?.buildOptions.map((option) => option.item)).toEqual(UNIT_TYPE_IDS.map(item));
         for (const option of city.own?.buildOptions ?? []) {
           expect(option.addError).toBeNull();
@@ -606,7 +693,318 @@ describe('contracts: views', () => {
       movesLeft: 2,
       foundCityError: 'cannotFoundCity',
       job: { improvement: 'farm', turnsWorked: 3, turnsTotal: IMPROVEMENTS.farm.turns, turnsLeft: Math.max(1, IMPROVEMENTS.farm.turns - 3) },
-      jobOptions: IMPROVEMENT_IDS.map((improvement) => ({ improvement, turns: IMPROVEMENTS[improvement].turns, error: 'unitBusy' })),
+      jobOptions: UNITS.worker.improvements.map((improvement) => ({ improvement, turns: IMPROVEMENTS[improvement].turns, error: 'unitBusy' })),
     });
+    expect(worker?.own?.jobOptions.map((option) => option.improvement)).toEqual(['farm', 'mine']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Round 3: domains, boats, the Fishing Net, Grow or Build, save layout 3
+// ---------------------------------------------------------------------------
+
+describe('contracts: round 3', () => {
+  /**
+   * Land in the north, the sea in the south, 12 x 9. Rome is founded at
+   * (5, 4), in the last row of land. Its land (everything within 2):
+   *
+   *   row 2   (4,2) (5,2) (6,2)              grassland
+   *   row 3   (3,3) (4,3) (5,3) (6,3)        grassland, but (4,3) is plains
+   *   row 4   (3,4) (4,4) ROME (6,4) (7,4)   grassland
+   *   row 5   (3,5) (4,5) (5,5) (6,5)        coast; (4,5) and (5,5) touch the city
+   *   row 6   (4,6) (5,6) (6,6)              coast
+   *
+   * Tile numbers are y * 12 + x: Rome 53, the plains tile 40, the two coast
+   * tiles next to the city 64 and 65.
+   */
+  const SHORE: readonly string[] = [
+    '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+    ' ~ g g g g g g g g g g ~',
+    '~ g g g g g g g g g g ~',
+    ' ~ g g g p g g g g g g ~',
+    '~ g g g g g g g g g g ~',
+    ' ~ , , , , , , , , , , ~',
+    '~ , , , , , , , , , , ~',
+    ' ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+    '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+  ];
+  const SHORE_SIZE = { width: 12, height: 9 };
+  const shoreTile = (x: number, y: number): TileIndex => tileIndex({ x, y }, SHORE_SIZE);
+  const ROME = shoreTile(5, 4);
+  const PLAINS = shoreTile(4, 3);
+  const COAST_WEST = shoreTile(4, 5);
+  const COAST_EAST = shoreTile(5, 5);
+
+  /** One player on the shore, the capital founded: Rome, one citizen, its Warrior on the city tile. */
+  function rome(): GameState {
+    return foundCapital(gameOn(SHORE, [[5, 4]]), 'p1');
+  }
+
+  /** A copy of the state with one more unit of p1, as new as a city would make it. */
+  function withUnit(state: GameState, id: string, type: UnitTypeId, tile: TileIndex): GameState {
+    return arranged(state, (draft) => {
+      draft.units[id] = { id, type, owner: 'p1', tile, movesLeft: UNITS[type].moves, job: null };
+    });
+  }
+
+  /** The only player ends the turn, which resolves it. Hands back the whole answer, for its events. */
+  function endTurn(state: GameState): Extract<ReturnType<typeof applyAction>, { ok: true }> {
+    const result = applyAction(state, 'p1', state.turn, { type: 'endTurn' });
+    if (!result.ok) throw new Error(`endTurn was refused: ${result.error.code}`);
+    return result;
+  }
+
+  it('tileMoveCost has a cost per domain: coast and ocean 1 for a boat and null for a land unit; grassland the other way round; mountains null for both', () => {
+    for (const terrain of ['coast', 'ocean'] as const) {
+      expect(tileMoveCost({ terrain, feature: null }, 'sea'), terrain).toBe(1);
+      expect(tileMoveCost({ terrain, feature: null }, 'land'), terrain).toBeNull();
+    }
+    expect(tileMoveCost({ terrain: 'grassland', feature: null }, 'land')).toBe(1);
+    expect(tileMoveCost({ terrain: 'grassland', feature: null }, 'sea')).toBeNull();
+    for (const terrain of ['grassland', 'plains', 'desert'] as const) {
+      expect(tileMoveCost({ terrain, feature: 'mountains' }, 'land'), terrain).toBeNull();
+      expect(tileMoveCost({ terrain, feature: 'mountains' }, 'sea'), terrain).toBeNull();
+    }
+    // A feature replaces the LAND cost only: hills cost a land unit 2 and still let no boat in.
+    expect(tileMoveCost({ terrain: 'plains', feature: 'hills' }, 'land')).toBe(2);
+    expect(tileMoveCost({ terrain: 'plains', feature: 'hills' }, 'sea')).toBeNull();
+    // The domains come from the unit table: four land units, two boats.
+    expect(UNIT_TYPE_IDS.map((type) => UNITS[type].domain)).toEqual(['land', 'land', 'land', 'land', 'sea', 'sea']);
+  });
+
+  it("on a hand-drawn coast a new Fishing Boat's reachable tiles are water only, and a Warrior's land only", () => {
+    const state = withUnit(rome(), 'u1_boat01', 'fishingBoat', COAST_EAST);
+    const boat = state.units.u1_boat01;
+    const warrior = Object.values(state.units).find((unit) => unit.type === 'warrior');
+    if (warrior === undefined) throw new Error('no Warrior');
+    expect(warrior.tile).toBe(ROME);
+
+    const byBoat = [...reachableTiles(boardFromState(state), boat).keys()].sort((a, b) => a - b);
+    const onFoot = [...reachableTiles(boardFromState(state), warrior).keys()].sort((a, b) => a - b);
+
+    // Two moves over water that costs 1: every water tile within two steps of (5, 5), and no tile of the land.
+    const withinTwo = state.map.tiles.map((_, tile) => tile).filter((tile) => tile !== boat.tile && distance(boat.tile, tile, state.map) <= 2);
+    expect(byBoat).toEqual(withinTwo.filter((tile) => tileIsWater(state.map.tiles[tile])));
+    expect(byBoat.length).toBe(11);
+    for (const tile of byBoat) expect(tileIsWater(state.map.tiles[tile]), `the boat reaches tile ${tile}`).toBe(true);
+
+    // The Warrior, from the city tile next to the boat: every land tile within two steps, and no water.
+    expect(onFoot).toEqual(
+      state.map.tiles.map((_, tile) => tile).filter((tile) => tile !== ROME && distance(ROME, tile, state.map) <= 2 && !tileIsWater(state.map.tiles[tile])),
+    );
+    expect(onFoot.length).toBe(11);
+    for (const tile of onFoot) expect(tileIsWater(state.map.tiles[tile]), `the Warrior reaches tile ${tile}`).toBe(false);
+
+    // The page lights the same tiles from the player's own view.
+    const view = buildPlayerView(state, 'p1');
+    expect([...reachableTiles(boardFromView(view), boat).keys()].sort((a, b) => a - b)).toEqual(byBoat);
+    expect([...reachableTiles(boardFromView(view), warrior).keys()].sort((a, b) => a - b)).toEqual(onFoot);
+
+    // And the server refuses the other ground with the code for it: no carrying, no landing.
+    const ashore = applyAction(state, 'p1', state.turn, { type: 'moveUnit', unitId: boat.id, path: [ROME] });
+    expect(ashore.ok ? null : ashore.error.code).toBe('impassable');
+    const afloat = applyAction(state, 'p1', state.turn, { type: 'moveUnit', unitId: warrior.id, path: [COAST_WEST] });
+    expect(afloat.ok ? null : afloat.error.code).toBe('impassable');
+    // A boat on water is a healthy state; a boat on land is named.
+    expect(checkInvariants(state)).toEqual([]);
+    const stranded = arranged(state, (draft) => {
+      draft.units.u1_boat01.tile = shoreTile(5, 2);
+    });
+    expect(checkInvariants(stranded)).toEqual([`Unit u1_boat01 stands on tile ${shoreTile(5, 2)}, which a sea unit cannot enter.`]);
+  });
+
+  it('a city that owns coast completes a Fishing Boat onto its nearest water tile, the higher tile among equals; a city without water offers the boats with noWaterForBoat and setBuildQueue refuses them', () => {
+    let state = rome();
+    const city = cityOf(state, 'p1');
+    expect(city.tile).toBe(ROME);
+    // What the test stands on: two water tiles touch the city (64 and 65), and the city owns water further out
+    // with higher numbers still, so "the lower tile" and "the highest tile of all" would both be other answers.
+    const water = state.map.tiles
+      .map((tile, index) => ({ tile, index }))
+      .filter(({ tile }) => tile.cityId === city.id && tileIsWater(tile))
+      .map(({ index }) => index);
+    expect(water).toEqual([shoreTile(3, 5), COAST_WEST, COAST_EAST, shoreTile(6, 5), shoreTile(4, 6), shoreTile(5, 6), shoreTile(6, 6)]);
+    expect(water.filter((tile) => distance(ROME, tile, state.map) === 1)).toEqual([COAST_WEST, COAST_EAST]);
+
+    // Both boat types are offered, with a number, and both would appear on the same tile.
+    expect(buildItemError(state, city, item('fishingBoat'))).toBeNull();
+    expect(buildItemError(state, city, item('scoutBoat'))).toBeNull();
+    expect(findSpawnTile(state, city, 'fishingBoat')).toBe(COAST_EAST);
+    expect(findSpawnTile(state, city, 'scoutBoat')).toBe(COAST_EAST);
+    // A land unit still appears on the city tile (the Warrior of the start stands there: a Worker shares it).
+    expect(findSpawnTile(state, city, 'worker')).toBe(ROME);
+    for (const option of buildPlan(state, city).options) {
+      expect(option.addError, option.item.unitType).toBeNull();
+      expect(option.turns, option.item.unitType).not.toBeNull();
+    }
+
+    // The real thing: the boat is queued, paid for, and the turn resolves.
+    state = act(state, 'p1', { type: 'setBuildQueue', cityId: city.id, queue: [item('fishingBoat')] });
+    state = arranged(state, (draft) => {
+      draft.cities[city.id].productionStored = UNITS.fishingBoat.cost;
+    });
+    const resolved = endTurn(state);
+    state = resolved.state;
+    const boats = Object.values(state.units).filter((unit) => unit.type === 'fishingBoat');
+    expect(boats).toHaveLength(1);
+    expect(boats[0]).toMatchObject({ owner: 'p1', tile: COAST_EAST, movesLeft: UNITS.fishingBoat.moves, job: null });
+    expect(resolved.events.filter((entry) => entry.event.type === 'unitBuilt')).toEqual([
+      { to: ['p1'], event: { type: 'unitBuilt', playerId: 'p1', cityId: city.id, cityName: city.name, unitId: boats[0].id, unitType: 'fishingBoat', queueEmpty: true } },
+    ]);
+    expect(cityOf(state, 'p1').buildQueue).toEqual([]);
+    expect(checkInvariants(state)).toEqual([]);
+    // The next Fishing Boat takes the other tile next to the city; a Scout Boat (the other class) shares the first.
+    expect(findSpawnTile(state, cityOf(state, 'p1'), 'fishingBoat')).toBe(COAST_WEST);
+    expect(findSpawnTile(state, cityOf(state, 'p1'), 'scoutBoat')).toBe(COAST_EAST);
+
+    // A city in the middle of the meadow owns no water.
+    const inland = foundCapital(gameOn(MEADOW, [[7, 5]]), 'p1');
+    const dry = cityOf(inland, 'p1');
+    expect(inland.map.tiles.filter((tile) => tile.cityId === dry.id && tileIsWater(tile))).toEqual([]);
+    const boatOptions = { turns: null, wait: 'noRoom', addError: 'noWaterForBoat' };
+    const menu = buildPlayerView(inland, 'p1').cities.find((candidate) => candidate.id === dry.id)?.own?.buildOptions ?? [];
+    expect(menu.map((option) => option.item.unitType)).toEqual(['warrior', 'scout', 'settler', 'worker', 'fishingBoat', 'scoutBoat']);
+    expect(menu[4]).toEqual({ item: item('fishingBoat'), cost: 20, ...boatOptions });
+    expect(menu[5]).toEqual({ item: item('scoutBoat'), cost: 24, ...boatOptions });
+    for (const option of menu.slice(0, 4)) expect(option.addError, option.item.unitType).toBeNull();
+    expect(buildPlan(inland, dry).options).toEqual(menu);
+    expect(buildItemError(inland, dry, item('fishingBoat'))).toBe('noWaterForBoat');
+    expect(buildItemError(inland, dry, item('scoutBoat'))).toBe('noWaterForBoat');
+    expect(buildItemError(inland, dry, item('warrior'))).toBeNull();
+    for (const queue of [[item('fishingBoat')], [item('scoutBoat')], [item('warrior'), item('scoutBoat')]]) {
+      const refused = applyAction(inland, 'p1', inland.turn, { type: 'setBuildQueue', cityId: dry.id, queue });
+      expect(refused.ok ? null : refused.error.code, JSON.stringify(queue)).toBe('noWaterForBoat');
+    }
+    expect(cityOf(inland, 'p1').buildQueue).toEqual([]);
+    // The land units are queued as ever.
+    expect(cityOf(act(inland, 'p1', { type: 'setBuildQueue', cityId: dry.id, queue: [item('warrior')] }), 'p1').buildQueue).toEqual([item('warrior')]);
+  });
+
+  it("a Fishing Boat builds a net in four turns; a Worker's job options are farm and mine, the boat's the net", () => {
+    expect(IMPROVEMENTS.fishingNet.turns).toBe(4);
+    let state = withUnit(withUnit(rome(), 'u1_boat01', 'fishingBoat', COAST_EAST), 'u1_work01', 'worker', shoreTile(5, 3));
+    const warrior = Object.values(state.units).find((unit) => unit.type === 'warrior');
+    if (warrior === undefined) throw new Error('no Warrior');
+
+    // Who builds what: one option per improvement of the unit's type, in the table's order.
+    expect(UNITS.worker.improvements).toEqual(['farm', 'mine']);
+    expect(UNITS.fishingBoat.improvements).toEqual(['fishingNet']);
+    expect(jobOptions(state, state.units.u1_work01).map((option) => option.improvement)).toEqual(['farm', 'mine']);
+    expect(jobOptions(state, state.units.u1_boat01)).toEqual([{ improvement: 'fishingNet', turns: 4, error: null }]);
+    expect(jobOptions(state, warrior)).toEqual([]);
+    const view = buildPlayerView(state, 'p1');
+    expect(view.units.find((unit) => unit.id === 'u1_work01')?.own?.jobOptions.map((option) => option.improvement)).toEqual(['farm', 'mine']);
+    expect(view.units.find((unit) => unit.id === 'u1_boat01')?.own?.jobOptions.map((option) => option.improvement)).toEqual(['fishingNet']);
+    // The other one's work is refused, whatever the tile.
+    expect(startJobError(state, state.units.u1_work01, 'fishingNet')).toBe('cannotImprove');
+    expect(startJobError(state, state.units.u1_boat01, 'farm')).toBe('cannotImprove');
+    const wrong = applyAction(state, 'p1', state.turn, { type: 'startJob', unitId: 'u1_work01', improvement: 'fishingNet' });
+    expect(wrong.ok ? null : wrong.error.code).toBe('cannotImprove');
+
+    // The net: started, three turns of work with nothing on the tile, and there after the fourth.
+    state = act(state, 'p1', { type: 'startJob', unitId: 'u1_boat01', improvement: 'fishingNet' });
+    expect(state.units.u1_boat01.job).toEqual({ improvement: 'fishingNet', turnsWorked: 0 });
+    for (let turn = 1; turn <= 3; turn++) {
+      const resolved = endTurn(state);
+      state = resolved.state;
+      expect(state.units.u1_boat01.job, `after ${turn} turns`).toEqual({ improvement: 'fishingNet', turnsWorked: turn });
+      expect(state.map.tiles[COAST_EAST].improvement, `after ${turn} turns`).toBeNull();
+      expect(resolved.events.some((entry) => entry.event.type === 'improvementBuilt')).toBe(false);
+    }
+    const fourth = endTurn(state);
+    state = fourth.state;
+    expect(state.map.tiles[COAST_EAST].improvement).toBe('fishingNet');
+    expect(state.units.u1_boat01).toMatchObject({ tile: COAST_EAST, job: null });
+    expect(fourth.events.filter((entry) => entry.event.type === 'improvementBuilt')).toEqual([
+      { to: ['p1'], event: { type: 'improvementBuilt', playerId: 'p1', unitId: 'u1_boat01', improvement: 'fishingNet', tile: COAST_EAST, cityName: 'Rome' } },
+    ]);
+    // A fished coast tile: 2 + 2 food, no production. The boat is not used up and finds the tile done.
+    expect(tileYields(state.map.tiles[COAST_EAST])).toEqual({ food: 4, production: 0 });
+    expect(jobOptions(state, state.units.u1_boat01)).toEqual([{ improvement: 'fishingNet', turns: 4, error: 'alreadyImproved' }]);
+    expect(checkInvariants(state)).toEqual([]);
+  });
+
+  it('cityEconomy: the same city works other tiles under build than under grow; setCityFocus changes it; the view carries focus', () => {
+    const grown = rome();
+    const city = cityOf(grown, 'p1');
+    expect(city.focus).toBe('grow');
+    expect(city.population).toBe(1);
+    // Grow: the best tile by food + production. Grassland (2 + 1) and plains (1 + 2) are level, the food decides,
+    // and of the grassland the lowest tile is taken: (4, 2). With the centre (2 and 1): 4 food, 2 production.
+    expect(cityEconomy(grown, city)).toEqual({ worked: [shoreTile(4, 2)], food: 4, production: 2, foodSurplus: 2 });
+    const before = buildPlayerView(grown, 'p1').cities[0].own;
+    expect(before).toMatchObject({ focus: 'grow', worked: [shoreTile(4, 2)], foodPerTurn: 2, productionPerTurn: 2 });
+
+    // Build: the tile with the most production, the plains tile. 3 food, 3 production.
+    const result = applyAction(grown, 'p1', grown.turn, { type: 'setCityFocus', cityId: city.id, focus: 'build' });
+    if (!result.ok) throw new Error(`setCityFocus was refused: ${result.error.code}`);
+    expect(result.changed).toBe(true);
+    expect(result.events).toEqual([]);
+    const built = result.state;
+    expect(grown.cities[city.id].focus).toBe('grow'); // the state handed in is not edited
+    expect(built.cities[city.id]).toEqual({ ...city, focus: 'build' }); // nothing else of the city has changed
+    expect(cityEconomy(built, built.cities[city.id])).toEqual({ worked: [PLAINS], food: 3, production: 3, foodSurplus: 1 });
+    const after = buildPlayerView(built, 'p1').cities[0].own;
+    expect(after).toMatchObject({ focus: 'build', worked: [PLAINS], foodPerTurn: 1, productionPerTurn: 3 });
+    // The forecast is made with the focus too. A Warrior costs 18. Build: 3 a turn, six turns. Grow: 2 a turn for
+    // five turns, then the city has grown (5 x 2 food of the 10 it needs) and a second citizen makes it 3: eight.
+    expect(before?.buildOptions[0]).toMatchObject({ item: item('warrior'), turns: 8 });
+    expect(after?.buildOptions[0]).toMatchObject({ item: item('warrior'), turns: 6 });
+    expect(checkInvariants(built)).toEqual([]);
+
+    // The same choice again changes nothing; back to grow is the first economy again.
+    const again = applyAction(built, 'p1', built.turn, { type: 'setCityFocus', cityId: city.id, focus: 'build' });
+    expect(again).toMatchObject({ ok: true, changed: false });
+    const back = act(built, 'p1', { type: 'setCityFocus', cityId: city.id, focus: 'grow' });
+    expect(cityEconomy(back, back.cities[city.id])).toEqual(cityEconomy(grown, city));
+
+    // What is refused: a city that is not the player's, and a focus that is none.
+    const stranger = applyAction(grown, 'p1', grown.turn, { type: 'setCityFocus', cityId: 'c2_nobody', focus: 'build' });
+    expect(stranger.ok ? null : stranger.error.code).toBe('noSuchCity');
+    for (const focus of ['', 'Build', 'constructor', 'toString']) {
+      const nonsense = applyAction(grown, 'p1', grown.turn, { type: 'setCityFocus', cityId: city.id, focus } as unknown as Action);
+      expect(nonsense.ok ? null : nonsense.error.code, focus).toBe('badAction');
+    }
+
+    // A focus lost by hand is placed as Grow, the view says 'grow', and the health check names the city.
+    const lost = arranged(built, (draft) => {
+      (draft.cities[city.id] as { focus: string }).focus = 'fast';
+    });
+    expect(cityEconomy(lost, lost.cities[city.id])).toEqual(cityEconomy(grown, city));
+    expect(buildPlayerView(lost, 'p1').cities[0].own).toMatchObject({ focus: 'grow', worked: [shoreTile(4, 2)] });
+    expect(checkInvariants(lost)).toEqual([`City ${city.id} has the unknown focus 'fast'.`]);
+  });
+
+  it('the round 2 save converts to layout 3 with every city on grow and passes checkInvariants', () => {
+    const read = (name: string): unknown => JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8'));
+    const saved = read('state-layout-2.json') as { schema: number; turn: number; cities: Record<string, Record<string, unknown>> };
+    const room = read('room-layout-2.json') as { code: string; game: unknown };
+    // The two files hold the same game: the state alone, and inside the room file the round 2 server wrote.
+    expect([saved.schema, saved.turn, Object.keys(saved.cities).length, room.code]).toEqual([2, 41, 6, 'SECND']);
+    expect(room.game).toEqual(saved);
+    for (const city of Object.values(saved.cities)) expect('focus' in city).toBe(false);
+
+    const untouched = cloneJson(saved);
+    const converted = migrateGameState(saved);
+    expect(saved).toEqual(untouched); // the save handed in is not edited
+    if (converted === null) throw new Error('the round 2 save was not converted');
+    expect(STATE_SCHEMA).toBe(3);
+    expect(converted.schema).toBe(3);
+    // Every city: what it was, and on grow. Nothing else of the state has changed.
+    expect(Object.keys(converted.cities)).toEqual(Object.keys(saved.cities));
+    for (const [id, city] of Object.entries(converted.cities)) {
+      expect(city, id).toEqual({ ...saved.cities[id], focus: 'grow' });
+    }
+    expect({ ...converted, schema: 2, cities: saved.cities }).toEqual(saved);
+    expect(checkInvariants(converted)).toEqual([]);
+    expect(migrateGameState(room.game)).toEqual(converted);
+
+    // Every player's view can be built, and every city says 'grow' to its owner and nothing to the others.
+    for (const player of converted.players) {
+      for (const city of buildPlayerView(converted, player.id).cities) {
+        if (city.owner === player.id) expect(city.own?.focus, city.name).toBe('grow');
+        else expect(city.own, city.name).toBeNull();
+      }
+    }
   });
 });

@@ -19,6 +19,17 @@ import {
   phaseOneSaveTextWith,
   putPhaseOneSave,
 } from './phaseOneSave';
+import {
+  ROUND_TWO_CODE,
+  ROUND_TWO_TOKENS,
+  putRoundTwoSave,
+  roundTwoCities,
+  roundTwoCityFacts,
+  roundTwoSave,
+  roundTwoSaveText,
+  roundTwoSaveTextWith,
+} from './roundTwoSave';
+import type { RoundTwoGame } from './roundTwoSave';
 
 /**
  * Saving and loading games on disk, tested on a real temporary folder.
@@ -574,6 +585,38 @@ describe('storage: a game saved by an older version (WP3, the phase 1 save)', ()
     expect(logs[1]).toBe(logs[0]);
   });
 
+  it('the phase 1 room file still loads (two steps): every city has its queue and grows first, and the line says from which layout to which', () => {
+    const { storage, logs, path, text } = storageWithPhaseOneSave();
+    const before = phaseOneSave();
+    // Two layouts behind today's, so both steps of the migration are walked: 1 to 2 (the queue), 2 to 3 (the focus).
+    expect(STATE_SCHEMA - before.game.schema).toBeGreaterThanOrEqual(2);
+
+    const game = onlyGameOf(storage.loadAll());
+    expect(game.schema).toBe(STATE_SCHEMA);
+    expect(checkInvariants(game)).toEqual([]);
+    const cities = phaseOneCities();
+    expect(Object.keys(game.cities)).toEqual(cities.map((city) => city.id));
+    for (const old of cities) {
+      // What the first step made of the city, and what the second added: exactly these nine fields.
+      expect(game.cities[old.id], old.name).toStrictEqual({
+        id: old.id,
+        owner: old.owner,
+        name: old.name,
+        tile: old.tile,
+        population: old.population,
+        foodStored: old.foodStored,
+        buildQueue: old.production === null ? [] : [old.production],
+        productionStored: old.productionStored,
+        focus: 'grow',
+      });
+    }
+    expect(logs).toEqual([
+      `Saved games: ${PHASE_ONE_CODE}.json was made by an older version of the game (layout 1) and has been brought up to ` +
+        `layout ${STATE_SCHEMA}. The file itself is rewritten with the next change to the game.`,
+    ]);
+    expect(readFileSync(path).equals(Buffer.from(text, 'utf8'))).toBe(true);
+  });
+
   it('a game whose older layout cannot be converted is left exactly as it is, reported, and not loaded', () => {
     const damaged: [what: string, text: string, says: string][] = [
       // The phase 1 save with its game's cities taken out.
@@ -800,5 +843,278 @@ describe('storage: a game saved by an older version (WP3, the phase 1 save)', ()
     // Storage hands it over without a word; the room manager is the one that warns about it.
     expect(storage.loadAll()).toEqual([{ ...file, game }]);
     expect(logs).toEqual([]);
+  });
+});
+
+/**
+ * A game that round 2 saved (see roundTwoSave.ts): a real room file whose
+ * game state has layout 2, one step behind. Its cities have queues and no
+ * `focus` yet; this version gives every one of them 'grow', which is how
+ * every city placed its citizens when the game was saved.
+ */
+describe('storage: a game saved by round 2 (the layout 2 save)', () => {
+  /** A storage on a fresh data folder that holds the round 2 save (or `text` in its place) as SECND.json. */
+  function storageWithRoundTwoSave(text: string = roundTwoSaveText()) {
+    const made = newStorage();
+    const path = putRoundTwoSave(made.dataDir, text);
+    return { ...made, path, text };
+  }
+
+  /** The one game `loaded` holds, which must be a started one. */
+  function onlyGameOf(loaded: RoomFile[]): GameState {
+    expect(loaded).toHaveLength(1);
+    const game = loaded[0].game;
+    if (game === null) throw new Error('the loaded room has no game');
+    return game;
+  }
+
+  /** The first unit of a type in a round 2 game. */
+  function firstUnit(game: RoundTwoGame, type: string) {
+    const unit = Object.values(game.units).find((candidate) => candidate.type === type);
+    if (unit === undefined) throw new Error(`the round 2 save has no ${type}`);
+    return unit;
+  }
+
+  it('the round 2 save is what these tests take it for: layout 2, four players with the four tokens, turn 41, seats p1 and p3 have ended the turn, six cities with queues and without a focus', () => {
+    const save = roundTwoSave();
+    expect(save.code).toBe(ROUND_TWO_CODE);
+    expect(save.format).toBe(ROOM_FILE_FORMAT);
+    expect(save.game.schema).toBe(2);
+    expect(save.game.schema).toBeLessThan(STATE_SCHEMA);
+    expect(save.game.turn).toBe(41);
+    expect(save.game.players.map((player) => [player.id, player.endedTurn])).toEqual([
+      ['p1', true],
+      ['p2', false],
+      ['p3', true],
+      ['p4', false],
+    ]);
+    // The seats are those of the four tokens, in seat order.
+    expect(save.seats.map((seat) => [seat.playerId, seat.tokenHash])).toEqual(
+      ROUND_TWO_TOKENS.map((token, index) => [`p${index + 1}`, hashToken(token)]),
+    );
+
+    // Layout 2: a city has a queue, and neither the one `production` of layout 1 nor the `focus` of layout 3.
+    const cities = roundTwoCities();
+    expect(cities).toHaveLength(6);
+    for (const city of cities) {
+      expect(Object.keys(city), city.name).toEqual(['id', 'owner', 'name', 'tile', 'population', 'foodStored', 'buildQueue', 'productionStored']);
+      expect(Array.isArray(city.buildQueue), city.name).toBe(true);
+    }
+    expect(cities.some((city) => (city.buildQueue ?? []).length > 0 && city.productionStored > 0)).toBe(true);
+    expect(roundTwoSaveText()).not.toContain('"focus"');
+    // It holds what round 2 added and the new code has to carry over: Workers at work, farms and a mine...
+    const units = Object.values(save.game.units);
+    expect(units.filter((unit) => unit.job !== null).length).toBeGreaterThan(0);
+    expect(save.game.map.tiles.filter((tile) => tile.improvement === 'farm').length).toBeGreaterThan(0);
+    expect(save.game.map.tiles.filter((tile) => tile.improvement === 'mine').length).toBeGreaterThan(0);
+    // ...and nothing of round 3: no boat, no net, in the whole text of the file.
+    expect([...new Set(units.map((unit) => unit.type))].sort()).toEqual(['scout', 'settler', 'warrior', 'worker']);
+    for (const word of ['fishingBoat', 'scoutBoat', 'fishingNet']) expect(roundTwoSaveText()).not.toContain(word);
+
+    // What the round 2 engine said about the save is about exactly its cities.
+    const said = roundTwoCityFacts();
+    expect(Object.keys(said).sort()).toEqual(cities.map((city) => city.id).sort());
+    for (const city of cities) {
+      expect(said[city.id].name).toBe(city.name);
+      expect(said[city.id].worked.length, city.name).toBe(city.population);
+      expect(said[city.id].queueTurns, city.name).toHaveLength((city.buildQueue ?? []).length);
+    }
+
+    // The envelope around the game did not change with the layout of the
+    // game: today's writer gives the round 2 file back byte for byte.
+    expect(serializeRoomFile(save as unknown as RoomFile)).toBe(roundTwoSaveText());
+  });
+
+  it('the round 2 save is brought up to date when it is loaded: every city equals its saved self plus focus grow, nothing else changed, and the file stays byte-identical until the first save', () => {
+    const { storage, logs, dataDir, roomsDir, path, text } = storageWithRoundTwoSave();
+    const before = roundTwoSave();
+
+    const loaded = storage.loadAll();
+    const game = onlyGameOf(loaded);
+
+    // Everything around the game is as it was: code, seats, host, map size.
+    expect({ ...loaded[0], game: null }).toEqual({ ...before, game: null });
+    // The game is the saved one with the new layout number and, in every
+    // city, the one new field. Not one other thing differs: map, units,
+    // jobs, what the players remember, the turn and who has ended it.
+    const cities = roundTwoCities();
+    expect(game).toEqual({
+      ...before.game,
+      schema: STATE_SCHEMA,
+      cities: Object.fromEntries(cities.map((city) => [city.id, { ...city, focus: 'grow' }])),
+    });
+    expect(Object.keys(game.cities)).toEqual(cities.map((city) => city.id));
+    for (const city of Object.values(game.cities)) expect(Object.keys(city).sort(), city.name).toEqual(
+      ['buildQueue', 'focus', 'foodStored', 'id', 'name', 'owner', 'population', 'productionStored', 'tile'],
+    );
+    // It is what the shared package's migration makes of the old one, and it is healthy.
+    expect(game).toEqual(migrateGameState(before.game));
+    expect(checkInvariants(game)).toEqual([]);
+
+    // The file was not rewritten, not moved, and no copy of it was made.
+    expect(readFileSync(path).equals(Buffer.from(text, 'utf8'))).toBe(true);
+    expect(readdirSync(roomsDir)).toEqual([`${ROUND_TWO_CODE}.json`]);
+    // One log line: the file, and from which layout to which.
+    expect(logs).toEqual([
+      `Saved games: ${ROUND_TWO_CODE}.json was made by an older version of the game (layout 2) and has been brought up to ` +
+        `layout ${STATE_SCHEMA}. The file itself is rewritten with the next change to the game.`,
+    ]);
+
+    // Loading again, also after a restart, gives the same game, as text too.
+    const again = storage.loadAll();
+    expect(again).toEqual(loaded);
+    expect(serializeRoomFile(again[0])).toBe(serializeRoomFile(loaded[0]));
+    expect(newStorage(dataDir).storage.loadAll()).toEqual(loaded);
+    expect(readFileSync(path, 'utf8')).toBe(text);
+
+    // The first save writes the new layout over the old file; nothing is kept of it.
+    storage.save(loaded[0]);
+    const written = readFileSync(path, 'utf8');
+    expect(written).not.toBe(text);
+    expect(written).toContain(`"schema":${STATE_SCHEMA}`);
+    expect(written).not.toMatch(/"schema":2\b/);
+    expect(written.match(/"focus":"grow"/g)).toHaveLength(cities.length);
+    expect(JSON.parse(written)).toEqual(loaded[0]);
+    // The lines a person edits by hand (the seats above all) are as round 2 wrote them.
+    const upToTheGame = (save: string): string => save.slice(0, save.indexOf('  "game"'));
+    expect(upToTheGame(written)).toBe(upToTheGame(text));
+    expect(readdirSync(roomsDir)).toEqual([`${ROUND_TWO_CODE}.json`]);
+
+    // A restart now finds an ordinary save of today: the same game, and nothing to report.
+    const afterRestart = newStorage(dataDir);
+    expect(afterRestart.storage.loadAll()).toEqual(loaded);
+    expect(afterRestart.logs).toEqual([]);
+    expect(readFileSync(path, 'utf8')).toBe(written);
+  });
+
+  it('a layout 2 file whose conversion fails the health check is left untouched, byte for byte, reported with its first problem, and not loaded; its code stays reserved', async () => {
+    const unhealthy: [what: string, text: string, says: string][] = [
+      // The health check knows since round 3 where each unit may stand: a Warrior on the open sea is no healthy game.
+      [
+        'a Warrior on the water',
+        roundTwoSaveTextWith((game) => {
+          firstUnit(game, 'warrior').tile = game.map.tiles.findIndex((tile) => tile.terrain === 'ocean');
+        }),
+        'which a land unit cannot enter',
+      ],
+      // A job only another unit type can do (in a layout that had no such improvement at all).
+      [
+        'a Worker at work on a fishing net',
+        roundTwoSaveTextWith((game) => {
+          firstUnit(game, 'worker').job = { improvement: 'fishingNet', turnsWorked: 1 };
+        }),
+        "which a unit of the type 'worker' cannot build",
+      ],
+      // A city whose queue was lost by hand. Decided on purpose: such a save is not repaired, it is left alone.
+      [
+        'a city without a build queue',
+        roundTwoSaveTextWith((game) => {
+          delete Object.values(game.cities ?? {})[0].buildQueue;
+        }),
+        'has a build queue that is not a list',
+      ],
+      ['a unit off the map', roundTwoSaveTextWith((game) => void (firstUnit(game, 'scout').tile = game.map.tiles.length + 5)), 'which is not a tile of the map'],
+      [
+        'a city building a dragon',
+        roundTwoSaveTextWith((game) => {
+          Object.values(game.cities ?? {})[0].buildQueue?.unshift({ kind: 'unit', unitType: 'dragon' as never });
+        }),
+        'something in its build queue that does not exist',
+      ],
+    ];
+    for (const [what, text, says] of unhealthy) {
+      // The damage really is in the file, which is still good JSON and still says layout 2.
+      expect(text, what).not.toBe(roundTwoSaveText());
+      expect(JSON.parse(text).game.schema, what).toBe(2);
+      // The conversion itself goes through; it is the game that comes out of it that is not well.
+      const converted = migrateGameState(JSON.parse(text).game);
+      if (converted === null) throw new Error(`${what}: the save was not converted`);
+      const problems = checkInvariants(converted);
+      expect(problems.length, what).toBeGreaterThan(0);
+      expect(problems[0], what).toContain(says);
+
+      const { storage, logs, dataDir, roomsDir, path } = storageWithRoundTwoSave(text);
+      expect(storage.loadAll(), what).toEqual([]);
+
+      // Not rewritten (the first save would put the unhealthy game over what
+      // round 2 wrote), and not moved aside either.
+      expect(readFileSync(path).equals(Buffer.from(text, 'utf8')), what).toBe(true);
+      expect(readdirSync(roomsDir), what).toEqual([`${ROUND_TWO_CODE}.json`]);
+
+      expect(logs, what).toHaveLength(1);
+      expect(logs[0], what).toContain(`Saved games: ${ROUND_TWO_CODE}.json was left alone and NOT loaded.`);
+      expect(logs[0], what).toContain(`Its game state has layout 2; brought up to layout ${STATE_SCHEMA} it has`);
+      expect(logs[0], what).toContain(`${problems.length} problem(s)`);
+      expect(logs[0], what).toContain(problems[0]);
+      expect(logs[0].endsWith('The file has not been touched.'), what).toBe(true);
+
+      // Its code stays reserved: no new game is ever saved over the file.
+      expect(storage.has(ROUND_TWO_CODE), what).toBe(true);
+
+      // A server on that folder starts without the game, tells its players
+      // that it is there but could not be opened, and still does not touch the file.
+      const server = await startTestServer({ dataDir });
+      expect(server.logs, what).toContain('Saved games loaded: 0.');
+      const ben = await server.connect(ROUND_TWO_TOKENS[1]);
+      ben.send({ type: 'joinGame', code: ROUND_TWO_CODE, name: null });
+      await ben.expectError('gameNotLoaded');
+      await ben.createGame('Ben');
+      expect(readFileSync(path).equals(Buffer.from(text, 'utf8')), what).toBe(true);
+      expect(readdirSync(roomsDir).sort(), what).toHaveLength(2);
+      await cleanUp();
+    }
+  });
+
+  it('a round 2 save edited by hand: a city that was given a focus, or any other field layout 2 never had, loads, loses the field and grows first', () => {
+    // An older layout cannot have chosen: whatever stands there is not looked at.
+    const text = roundTwoSaveTextWith((game) => {
+      const [first, second] = Object.values(game.cities ?? {});
+      first.focus = 'build';
+      second.focus = 42;
+      (second as unknown as Record<string, unknown>).happiness = 7;
+    });
+    expect(text).toContain('"focus":"build"');
+    expect(text).toContain('"happiness":7');
+    const { storage, logs, path } = storageWithRoundTwoSave(text);
+
+    const game = onlyGameOf(storage.loadAll());
+
+    // The same game as the untouched save gives.
+    expect(game).toEqual(migrateGameState(roundTwoSave().game));
+    expect(Object.values(game.cities).map((city) => city.focus)).toEqual(roundTwoCities().map(() => 'grow'));
+    expect(JSON.stringify(game)).not.toContain('happiness');
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).not.toContain('NOT loaded');
+    expect(readFileSync(path, 'utf8')).toBe(text);
+  });
+
+  it('a save of a newer layout is left alone: the round 2 save with the layout number of the NEXT version (4 today) is not loaded, not converted and not touched', () => {
+    const next = STATE_SCHEMA + 1;
+    const text = roundTwoSaveTextWith((game) => {
+      game.schema = next;
+    });
+    expect(JSON.parse(text).game.schema).toBe(next);
+    expect(migrateGameState(JSON.parse(text).game)).toBeNull();
+    const { storage, logs, roomsDir, path } = storageWithRoundTwoSave(text);
+
+    expect(storage.loadAll()).toEqual([]);
+
+    expect(readdirSync(roomsDir)).toEqual([`${ROUND_TWO_CODE}.json`]);
+    expect(readFileSync(path).equals(Buffer.from(text, 'utf8'))).toBe(true);
+    // The whole sentence: nothing was converted and nothing was checked, so it speaks of no "problem".
+    expect(logs).toEqual([
+      `Saved games: ${ROUND_TWO_CODE}.json was left alone and NOT loaded. Its game state has layout ${next}, ` +
+        `this version of the game plays layout ${STATE_SCHEMA}. Run the matching version to play it.`,
+    ]);
+    expect(storage.has(ROUND_TWO_CODE)).toBe(true);
+
+    // A game of today's own layout is neither converted nor reported: the
+    // save brought up to date and written back loads without a word.
+    const today = storageWithRoundTwoSave();
+    const loaded = today.storage.loadAll();
+    today.storage.save(loaded[0]);
+    today.logs.length = 0;
+    expect(today.storage.loadAll()).toEqual(loaded);
+    expect(today.logs).toEqual([]);
   });
 });

@@ -11,6 +11,7 @@
  *    inside hex.ts and the renderer.
  */
 
+import type { CityFocusId } from './data/cityFocus';
 import type { CivId } from './data/civs';
 import type { ImprovementId } from './data/improvements';
 import type { MapSizeId } from './data/rules';
@@ -49,10 +50,11 @@ export interface Tile {
   /** The raised object on the ground, if any. Only on grounds listed in FEATURES[feature].allowedOn. */
   feature: FeatureId | null;
   /**
-   * What a Worker has built on the tile (a farm, a mine), or null. At most
-   * one per tile, only where improvementFits allows it, and never on the
-   * tile a city stands on. It changes only when a job is finished
-   * (resolveTurn, step runJobs) and when a city is founded on the tile.
+   * What a Worker or a Fishing Boat has built on the tile (a farm, a mine,
+   * a net), or null. At most one per tile, only where improvementFits
+   * allows it, and never on the tile a city stands on. It changes only when
+   * a job is finished (resolveTurn, step runJobs) and when a city is
+   * founded on the tile.
    */
   improvement: ImprovementId | null;
   /**
@@ -95,7 +97,8 @@ export interface Unit {
   movesLeft: number;
   /**
    * The work this unit is doing on its tile, or null. Only units whose type
-   * has `canImprove` ever have one. A unit with a job does not move
+   * lists improvements (UNITS[type].improvements) ever have one, and only
+   * for an improvement of that list. A unit with a job does not move
    * (moveUnit answers 'unitBusy') until the job is finished or stopped; its
    * `movesLeft` is counted as for any unit and simply cannot be used
    * meanwhile. See rules/improvements.ts.
@@ -135,6 +138,15 @@ export interface City {
    * runCityTurn in rules/city.ts and OwnCityDetail.held).
    */
   productionStored: number;
+  /**
+   * How the city places its citizens: 'grow' (the best tiles, and food
+   * first while the city would not grow; the button "Grow first") or
+   * 'build' (the most production first; the button "Build first").
+   * Chosen by the owner with the setCityFocus action; a new city
+   * starts with DEFAULT_CITY_FOCUS. A PRIVATE fact: it is in the owner's
+   * view only. See cityEconomy in rules/city.ts.
+   */
+  focus: CityFocusId;
   // Territory is NOT stored here: a city owns the tiles whose `cityId` is its id.
   // Worked tiles and yields are NOT stored either: they are derived by cityEconomy().
 }
@@ -219,9 +231,11 @@ export interface GameSettings {
  *   1  phase 1.
  *   2  City.production (one item or null) became City.buildQueue (a list);
  *      Tile.improvement, Unit.job and RememberedTile.improvement were added.
+ *   3  City.focus was added (round 3). Boats and the Fishing Net are new
+ *      rows of tables and changed no shape.
  * The migrations live in stateMigrations.ts.
  */
-export const STATE_SCHEMA = 2;
+export const STATE_SCHEMA = 3;
 
 export interface GameState {
   /** Always STATE_SCHEMA for states made by this code. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RULES, STATE_SCHEMA, UNITS, checkInvariants, updateKnowledge } from '../src/index';
+import { RULES, STATE_SCHEMA, UNITS, buildPlayerView, checkInvariants, cityEconomy, updateKnowledge } from '../src/index';
 import type { BuildItem, GameState, ImprovementId, UnitJob } from '../src/index';
 import { MEADOW, act, at, deepFreeze, foundCityAt, newGame, placeUnit, queueOf, tamper, unitOf } from './rulesKit';
 
@@ -27,6 +27,7 @@ describe('checkInvariants (WP2)', () => {
   const romeId = Object.values(healthy.cities).find((city) => city.owner === 'p1')?.id as string;
   const thebesId = Object.values(healthy.cities).find((city) => city.owner === 'p2')?.id as string;
   const openTile = at(map, 8, 8); // free, unowned grass, in nobody's sight
+  const seaTile = at(map, 8, 10); // open ocean on the edge of the map, in nobody's sight
 
   it('finds nothing wrong with a healthy state, and does not change it', () => {
     const frozen = deepFreeze(tamper(healthy, () => undefined));
@@ -109,8 +110,9 @@ describe('checkInvariants (WP2)', () => {
   ];
 
   /**
-   * Damage to the things round 2 added: the build queue, improvements and
-   * jobs. Every entry breaks one promise and must draw exactly ONE sentence
+   * Damage to the things round 2 added (the build queue, improvements and
+   * jobs) and round 3 (boats, the Fishing Net, a city's focus). Every
+   * entry breaks one promise and must draw exactly ONE sentence
    * (the third element is a word that sentence must hold, so that the
    * complaint is known to come from the check that is meant). `fog` says
    * whether the fog memory is brought up to date after the change: not for
@@ -155,7 +157,7 @@ describe('checkInvariants (WP2)', () => {
     }, 'does not suit', 'fog'],
     ['an improvement under a city', (d) => { d.map.tiles[d.cities[romeId].tile].improvement = 'farm'; }, 'under city', 'fog'],
     // jobs
-    ['a Warrior with a job', (d) => { d.units[warriorId].job = { improvement: 'farm', turnsWorked: 0 }; }, 'cannot build improvements', 'fog'],
+    ['a Warrior with a job', (d) => { d.units[warriorId].job = { improvement: 'farm', turnsWorked: 0 }; }, 'cannot build', 'fog'],
     ['a job for an unknown improvement', (d) => {
       placeUnit(d, 'p1', 'worker', openTile).job = { improvement: 'dragon' as ImprovementId, turnsWorked: 0 };
     }, 'unknown improvement', 'fog'],
@@ -173,6 +175,44 @@ describe('checkInvariants (WP2)', () => {
     ['a remembered tile without the field "improvement"', (d) => {
       delete (d.players[0].knowledge.remembered[d.cities[romeId].tile] as { improvement?: unknown }).improvement;
     }, 'improvement', 'no fog'],
+    // round 3: domains
+    ['a boat on land', (d) => { placeUnit(d, 'p1', 'fishingBoat', openTile); }, 'which a sea unit cannot enter', 'fog'],
+    ['a Scout Boat in a city', (d) => {
+      d.units[warriorId].tile = openTile; // the city's own Warrior steps out: the complaint is about the ground, not about two soldiers
+      placeUnit(d, 'p1', 'scoutBoat', d.cities[romeId].tile);
+    }, 'which a sea unit cannot enter', 'fog'],
+    ['a Warrior on water', (d) => { d.units[warriorId].tile = seaTile; }, 'which a land unit cannot enter', 'fog'],
+    ['a Worker on water', (d) => { placeUnit(d, 'p1', 'worker', seaTile); }, 'which a land unit cannot enter', 'fog'],
+    ['a boat on a mountain', (d) => {
+      d.map.tiles[openTile].feature = 'mountains';
+      placeUnit(d, 'p2', 'scoutBoat', openTile);
+    }, 'which a sea unit cannot enter', 'fog'],
+    // round 3: who builds what
+    ['a Fishing Boat with a job for a farm', (d) => {
+      placeUnit(d, 'p1', 'fishingBoat', seaTile).job = { improvement: 'farm', turnsWorked: 0 };
+    }, 'cannot build', 'fog'],
+    ['a Fishing Boat with a job for a mine', (d) => {
+      placeUnit(d, 'p1', 'fishingBoat', seaTile).job = { improvement: 'mine', turnsWorked: 2 };
+    }, 'cannot build', 'fog'],
+    ['a Worker with a job for a net', (d) => {
+      placeUnit(d, 'p1', 'worker', openTile).job = { improvement: 'fishingNet', turnsWorked: 1 };
+    }, 'cannot build', 'fog'],
+    ['a Scout Boat with a job for a net', (d) => {
+      placeUnit(d, 'p1', 'scoutBoat', seaTile).job = { improvement: 'fishingNet', turnsWorked: 0 };
+    }, 'cannot build', 'fog'],
+    // round 3: the net
+    ['a net on the open ocean', (d) => { d.map.tiles[seaTile].improvement = 'fishingNet'; }, 'does not suit', 'fog'],
+    ['a net on land', (d) => { d.map.tiles[openTile].improvement = 'fishingNet'; }, 'does not suit', 'fog'],
+    ['a farm on coast', (d) => {
+      d.map.tiles[seaTile].terrain = 'coast';
+      d.map.tiles[seaTile].improvement = 'farm';
+    }, 'does not suit', 'fog'],
+    // round 3: the focus of a city
+    ['a city with an unknown focus', (d) => { (d.cities[romeId] as { focus: string }).focus = 'fast'; }, "unknown focus 'fast'", 'fog'],
+    ['a city whose focus is an inherited name', (d) => { (d.cities[thebesId] as { focus: string }).focus = 'constructor'; }, "unknown focus 'constructor'", 'fog'],
+    ['a city whose focus is written with a capital letter', (d) => { (d.cities[romeId] as { focus: string }).focus = 'Build'; }, 'unknown focus', 'fog'],
+    ['a city without a focus', (d) => { delete (d.cities[romeId] as { focus?: unknown }).focus; }, 'unknown focus', 'fog'],
+    ['a city whose focus is no text', (d) => { (d.cities[romeId] as { focus: unknown }).focus = null; }, 'unknown focus', 'fog'],
   ];
 
   function expectComplaints(problems: string[]): void {
@@ -232,9 +272,73 @@ describe('checkInvariants (WP2)', () => {
     expect(checkInvariants(fine)).toEqual([]);
   });
 
+  it('checkInvariants: a boat on land, a Warrior on water, a Fishing Boat with a job for a farm, a Worker with a job for a net, a city with an unknown or a missing focus: one sentence each; such a city is placed as Grow and its view says \'grow\'; a healthy game with boats, nets and both ways has none', () => {
+    const one = (change: (draft: GameState) => void): string => {
+      const problems = checkInvariants(tamper(healthy, (draft) => {
+        change(draft);
+        updateKnowledge(draft);
+      }));
+      expect(problems).toHaveLength(1);
+      return problems[0];
+    };
+    // The two sentences the round's rules give word for word, with the unit, the tile and the city in them.
+    let boatId = '';
+    expect(one((d) => { boatId = placeUnit(d, 'p1', 'fishingBoat', openTile).id; })).toBe(`Unit ${boatId} stands on tile ${openTile}, which a sea unit cannot enter.`);
+    expect(one((d) => { d.units[warriorId].tile = seaTile; })).toBe(`Unit ${warriorId} stands on tile ${seaTile}, which a land unit cannot enter.`);
+    expect(one((d) => { (d.cities[romeId] as { focus: string }).focus = 'x'; })).toBe(`City ${romeId} has the unknown focus 'x'.`);
+    expect(one((d) => { delete (d.cities[romeId] as { focus?: unknown }).focus; })).toContain(`City ${romeId} has the unknown focus`);
+    // A job of the wrong kind names the unit, the improvement and the unit's type.
+    const farmer = one((d) => { boatId = placeUnit(d, 'p1', 'fishingBoat', seaTile).id; d.units[boatId].job = { improvement: 'farm', turnsWorked: 0 }; });
+    for (const word of [boatId, 'farm', 'fishingBoat']) expect(farmer).toContain(word);
+    let workerId = '';
+    const netter = one((d) => { workerId = placeUnit(d, 'p1', 'worker', openTile).id; d.units[workerId].job = { improvement: 'fishingNet', turnsWorked: 0 }; });
+    for (const word of [workerId, 'fishingNet', 'worker']) expect(netter).toContain(word);
+
+    // A city whose focus was lost by hand must behave as every city did before round 3:
+    // its citizens are placed as under Grow, and its owner's view says 'grow'. The health check is what names it.
+    const usual = cityEconomy(healthy, healthy.cities[romeId]);
+    const usualView = buildPlayerView(healthy, 'p1');
+    for (const lost of ['x', '', 'Build', null, undefined, 7] as unknown[]) {
+      const damaged = tamper(healthy, (draft) => {
+        const fields = draft.cities[romeId] as unknown as { focus?: unknown };
+        if (lost === undefined) delete fields.focus;
+        else fields.focus = lost;
+      });
+      expect(checkInvariants(damaged), String(lost)).toHaveLength(1);
+      expect(cityEconomy(damaged, damaged.cities[romeId]), String(lost)).toEqual(usual);
+      const view = buildPlayerView(damaged, 'p1');
+      expect(view.cities.find((city) => city.id === romeId)?.own?.focus, String(lost)).toBe('grow');
+      expect(view, String(lost)).toEqual(usualView);
+    }
+
+    // A healthy game with everything round 3 brought: boats of both classes on water (two of one
+    // player on one tile, one at work on a net), a net where it fits, and one city on each way.
+    const round3 = tamper(healthy, (draft) => {
+      const coast = at(map, 2, 10);
+      draft.map.tiles[coast].terrain = 'coast';
+      draft.map.tiles[coast].improvement = 'fishingNet';
+      draft.map.tiles[seaTile].terrain = 'coast';
+      placeUnit(draft, 'p1', 'fishingBoat', seaTile).job = { improvement: 'fishingNet', turnsWorked: 3 };
+      placeUnit(draft, 'p1', 'scoutBoat', seaTile);
+      placeUnit(draft, 'p2', 'scoutBoat', at(map, 0, 0), 0);
+      placeUnit(draft, 'p2', 'fishingBoat', coast);
+      draft.cities[romeId].focus = 'build';
+      draft.cities[thebesId].focus = 'grow';
+      // NOT checked, on purpose: a boat in the queue of a city that owns no water (setBuildQueue keeps it
+      // out; in a save edited by hand it waits), and whether a boat's water leads anywhere.
+      draft.cities[romeId].buildQueue = queueOf('fishingBoat', 'scoutBoat', 'warrior');
+      updateKnowledge(draft);
+    });
+    expect(checkInvariants(round3)).toEqual([]);
+    expect(buildPlayerView(round3, 'p1').cities.find((city) => city.id === romeId)?.own?.focus).toBe('build');
+  });
+
   it('the damage list really starts from a healthy state (each entry alone makes the difference)', () => {
     expect(damage.length + memoryDamage.length).toBeGreaterThan(35);
-    expect(laterDamage.length).toBeGreaterThan(20);
+    expect(laterDamage.length).toBeGreaterThan(40);
+    expect(healthy.map.tiles[seaTile]).toMatchObject({ terrain: 'ocean', cityId: null });
+    expect(healthy.players[0].knowledge.explored[seaTile]).toBe(0);
+    for (const city of Object.values(healthy.cities)) expect(city.focus).toBe('grow');
     expect(healthy.cities[romeId].buildQueue).toEqual([]);
     expect(healthy.players[0].knowledge.remembered[healthy.cities[romeId].tile]).toBeDefined();
     expect(checkInvariants(tamper(healthy, () => undefined))).toEqual([]);

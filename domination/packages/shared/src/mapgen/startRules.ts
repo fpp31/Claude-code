@@ -6,6 +6,9 @@
  * runs the checks on every result before handing it out, and starts over
  * with the next attempt if one fails: the rules engine, the client and the
  * end-to-end test all rely on them, so they are verified, not assumed.
+ *
+ * The two hard rules of round 3, the sea and a hill at every start (H6 and
+ * H7), have a file of their own with their check: startNeeds.ts.
  */
 
 import { RULES } from '../data/rules';
@@ -18,7 +21,7 @@ import { MAPGEN } from './tuning';
 
 /** Can a land unit enter this tile? */
 export function isWalkable(map: GameMap, tile: TileIndex): boolean {
-  return tileMoveCost(map.tiles[tile]) !== null;
+  return tileMoveCost(map.tiles[tile], 'land') !== null;
 }
 
 /**
@@ -26,7 +29,7 @@ export function isWalkable(map: GameMap, tile: TileIndex): boolean {
  * unit can walk from one to the other.
  */
 export function walkableAreas(grid: Grid, map: GameMap): Regions {
-  return labelRegions(grid, map.tiles.map((tile) => tileMoveCost(tile) !== null));
+  return labelRegions(grid, map.tiles.map((tile) => tileMoveCost(tile, 'land') !== null));
 }
 
 /** How many neighbors of the tile a land unit can enter (rule H4 wants at least 2). */

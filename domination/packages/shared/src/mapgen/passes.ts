@@ -24,7 +24,7 @@ export function openPasses(grid: Grid, tiles: Tile[]): void {
   // there are at most as many rounds as there are cut-off pieces. (The limit
   // on the rounds only makes sure a mistake could never loop for ever.)
   for (let round = 0; round < grid.count; round++) {
-    const areas = labelRegions(grid, tiles.map((tile) => tileMoveCost(tile) !== null));
+    const areas = labelRegions(grid, tiles.map((tile) => tileMoveCost(tile, 'land') !== null));
     const mainArea = findMainAreaWithCutOffPiece(grid, landmasses, areas);
     if (mainArea === null) return;
     openPassFrom(grid, tiles, areas, mainArea);

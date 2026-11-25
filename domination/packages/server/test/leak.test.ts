@@ -1,11 +1,27 @@
 import { cpSync } from 'node:fs';
-import { IMPROVEMENTS, RULES } from '@domination/shared';
-import type { Action, PlayerView, ServerMessage } from '@domination/shared';
+import { IMPROVEMENTS, RULES, UNITS } from '@domination/shared';
+import type { Action, CityFocusId, PlayerView, ServerMessage } from '@domination/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import { hashToken } from '../src/tokens';
 import { cleanUp, gameWith, lobbyWith, startTestServer, temporaryFolder } from './harness';
 import type { TestClient, TestServer } from './harness';
-import { MEADOW_WIDTH, at, endTurn, ownCity, ownUnit, queueItems, queueOf, raiseWorker, realRulesOnMeadow, setQueue, turnOf } from './realWorld';
+import {
+  MEADOW_WIDTH,
+  at,
+  endTurn,
+  ownCity,
+  ownUnit,
+  ownWater,
+  queueItems,
+  queueOf,
+  raiseBoat,
+  raiseWorker,
+  realRulesOnMeadow,
+  realRulesOnShore,
+  setFocus,
+  setQueue,
+  turnOf,
+} from './realWorld';
 
 /**
  * NOTHING HIDDEN ON THE WIRE. These tests look at the raw text of every
@@ -16,6 +32,9 @@ import { MEADOW_WIDTH, at, endTurn, ownCity, ownUnit, queueItems, queueOf, raise
  * (p2, Egypt) at the east end, seventeen tiles apart. Units see two or three
  * tiles, a city sees three, so neither ever sees anything of the other.
  * (The one test that puts a city IN the other player's sight says so.)
+ *
+ * The last group (round 3: boats, nets, "Grow first / Build first") plays
+ * on the same meadow with the sea on its south side, LONG_SHORE.
  */
 
 afterEach(cleanUp);
@@ -506,6 +525,303 @@ describe('NO LEAK on the wire: build queues and jobs (WP3, real rules)', () => {
     const everythingAdaGot = ada.frames.join('\n');
     const everythingBenGot = ben.frames.join('\n');
     for (const secret of ['buildQueue', 'buildOptions', 'productionStored', 'queueFull', '"held"', '"worker"']) {
+      expect(everythingBenGot.includes(secret), `Ben was told ${secret}`).toBe(true);
+      expect(everythingAdaGot.includes(secret), `Ada was told ${secret}`).toBe(false);
+    }
+  });
+});
+
+/**
+ * Round 3. A boat is a unit like any other: another player is shown its
+ * type, owner and tile while the tile is in their sight, and nothing when it
+ * is not. A net is an improvement like a farm. A boat's job is an order, and
+ * how a city places its citizens ("Grow first / Build first") is its
+ * owner's business: neither reaches anybody else, in sight or out of it.
+ */
+describe('NO LEAK on the wire: boats, nets and "Grow first / Build first" (round 3, real rules)', () => {
+  /** The frames a socket received from frame `from` on, without the pongs that only answer a test's own pings. */
+  function framesSince(client: TestClient, from: number): string[] {
+    return client.frames.slice(from).filter((frame) => frame !== '{"type":"pong"}');
+  }
+
+  function shoreServer(adaStart: [number, number], benStart: [number, number]): Promise<TestServer> {
+    return startTestServer({ rules: realRulesOnShore([adaStart, benStart]), fixedSeed: SEED, noRateLimit: true });
+  }
+
+  it("leak: nothing the other seat is sent changes when the actor's focus is flipped, and none of it holds the actor's jobs or a boat out of sight", async () => {
+    /** What Ben does in a world, out of Ada's sight. Ada only ever ends her turns, after Ben. */
+    type BenPlays = 'ends his turns' | 'fishes' | 'fishes and presses Grow / Build';
+
+    /**
+     * One world, played to the turn `lastTurn`. Ada (inland, west) and Ben
+     * (on the shore, east) are seventeen tiles apart. Unless he only ends
+     * his turns, Ben founds his capital, has it build a Fishing Boat, sails
+     * the boat, nets a coast tile from start to finish, and begins a second
+     * net that he works on for a turn and then gives up. In the third kind
+     * of world he also presses "Build first" and "Grow first" all the
+     * while, and so plays a different game: his city grows and builds at
+     * another pace.
+     */
+    async function playWorld(benPlays: BenPlays, lastTurn: number) {
+      const server = await shoreServer([3, 3], [20, 7]);
+      const { code, clients } = await gameWith(server, ['Ada', 'Ben']);
+      const [ada, ben] = clients;
+      const fromTheStart = ada.frames.length;
+      const net = IMPROVEMENTS.fishingNet;
+      let boatId = '';
+      let firstNet = -1;
+      let presses = 0;
+
+      /** In the world with presses: Ben presses this button of his capital. Ada's socket carries nothing. */
+      async function press(focus: CityFocusId): Promise<void> {
+        if (benPlays !== 'fishes and presses Grow / Build') return;
+        const told = await ben.actOk(turnOf(ben), setFocus(ownCity(ben.view).id, focus));
+        expect(told.map((message) => message.type)).toEqual(['gameUpdate']);
+        expect(ownCity(ben.view).own.focus).toBe(focus);
+        presses += 1;
+        await ada.expectNothingPending();
+      }
+      /** One turn: in the world with presses Ben first flips the choice (and, every third turn, flips it twice more). */
+      async function nextTurn(): Promise<void> {
+        const turn = turnOf(ben);
+        await press(turn % 2 === 0 ? 'grow' : 'build');
+        if (turn % 3 === 0) {
+          await press(turn % 2 === 0 ? 'build' : 'grow');
+          await press(turn % 2 === 0 ? 'grow' : 'build');
+        }
+        await endTurn([ben, ada]);
+      }
+
+      if (benPlays !== 'ends his turns') {
+        // The capital on the shore, and a Fishing Boat as the one entry of its queue.
+        await ben.actOk(1, { type: 'foundCity', unitId: ownUnit(ben.view, 'settler').id });
+        const thebes = ownCity(ben.view).id;
+        expect(ownWater(ben.view).length).toBeGreaterThan(0);
+        await ben.actOk(1, setQueue(thebes, queueOf('fishingBoat')));
+        await ada.expectNothingPending();
+        while (!ben.view?.units.some((unit) => unit.type === 'fishingBoat')) await nextTurn();
+        const boat = ownUnit(ben.view, 'fishingBoat');
+        boatId = boat.id;
+
+        // The boat sails one tile along the coast and begins a net there, in the same turn.
+        expect(boat.tile).toBe(at(21, 8));
+        firstNet = at(22, 8);
+        await ben.actOk(turnOf(ben), { type: 'moveUnit', unitId: boat.id, path: [firstNet] });
+        await ben.actOk(turnOf(ben), { type: 'startJob', unitId: boat.id, improvement: 'fishingNet' });
+        await ada.expectNothingPending();
+        for (let worked = 0; worked < net.turns; worked++) {
+          expect(ownUnit(ben.view, 'fishingBoat').own?.job).toMatchObject({ improvement: 'fishingNet', turnsWorked: worked });
+          await nextTurn();
+        }
+        // Finished: the net stands, and Ben (only Ben) got the news.
+        expect(ben.view?.tiles[firstNet]?.improvement).toBe('fishingNet');
+        expect(server.save(code).game?.map.tiles[firstNet].improvement).toBe('fishingNet');
+        expect(ben.frames.filter((frame) => frame.includes('"improvementBuilt"'))).toHaveLength(1);
+
+        // A second net, two tiles on: begun, worked on for one turn, and given up.
+        const secondNet = at(21, 9);
+        await ben.actOk(turnOf(ben), { type: 'moveUnit', unitId: boat.id, path: [at(22, 9), secondNet] });
+        await ben.actOk(turnOf(ben), { type: 'startJob', unitId: boat.id, improvement: 'fishingNet' });
+        await nextTurn();
+        expect(ownUnit(ben.view, 'fishingBoat').own?.job).toMatchObject({ improvement: 'fishingNet', turnsWorked: 1 });
+        await ben.actOk(turnOf(ben), { type: 'stopJob', unitId: boat.id });
+        expect(ownUnit(ben.view, 'fishingBoat').own?.job).toBeNull();
+        await ada.expectNothingPending();
+      }
+      // Every world must reach the same turn, or their frames could not be compared.
+      expect(turnOf(ada), `${benPlays}: the play fits into ${lastTurn} turns`).toBeLessThanOrEqual(lastTurn);
+      while (turnOf(ada) < lastTurn) await nextTurn();
+
+      return { ada, ben, boatId, firstNet, presses, adaFrames: framesSince(ada, fromTheStart) };
+    }
+
+    const LAST_TURN = 24;
+    const pressing = await playWorld('fishes and presses Grow / Build', LAST_TURN);
+    // Ben pressed often, his last press stands, and Ada's socket was busy all the while.
+    expect(pressing.presses).toBeGreaterThan(LAST_TURN);
+    expect(ownCity(pressing.ben.view).own.focus).toBe('build');
+    expect(pressing.adaFrames.length).toBeGreaterThan(3 * LAST_TURN - 6);
+
+    // Everything Ada was sent after the start: Ben has ended his turn; the
+    // turn has changed; the answers to her own End Turns. No tile, no unit,
+    // no city, and no news but the turn counter.
+    for (const frame of pressing.adaFrames) {
+      const message = JSON.parse(frame) as ServerMessage;
+      if (message.type === 'actionOk') continue;
+      if (message.type !== 'gameUpdate') throw new Error(`Ada was sent a ${message.type}: ${frame.slice(0, 200)}`);
+      expect(Object.keys(message.patch).filter((key) => key !== 'players' && key !== 'turn'), frame.slice(0, 200)).toEqual([]);
+      expect(message.events.filter((event) => event.type !== 'turnStarted'), frame.slice(0, 200)).toEqual([]);
+    }
+    // In words, over every frame from her first: nothing names the boat, its job, the net, the city or its choice.
+    const everythingAdaGot = pressing.ada.frames.join('\n');
+    const everythingBenGot = pressing.ben.frames.join('\n');
+    const secrets = [
+      pressing.boatId, '"fishingBoat"', '"fishingNet"', 'improvementBuilt', 'unitBuilt', '"turnsWorked"', '"turnsLeft"',
+      'Thebes', '"focus"', '"build"', '"worked"', 'buildQueue', '"coast"',
+    ];
+    for (const secret of secrets) {
+      // The check can fail: Ben was told every one of them.
+      expect(everythingBenGot.includes(secret), `Ben was told ${secret}`).toBe(true);
+      expect(everythingAdaGot.includes(secret), `Ada was told ${secret}`).toBe(false);
+    }
+    // What she knows of the fished tile is what she knew at the start: nothing.
+    expect(pressing.ada.view?.tiles[pressing.firstNet]).toBeNull();
+    expect(pressing.ada.view?.units.every((unit) => unit.owner === 'p1')).toBe(true);
+    expect(pressing.ada.view?.cities).toEqual([]);
+
+    // The same play without a single press is another game for Ben...
+    const fishing = await playWorld('fishes', LAST_TURN);
+    expect(fishing.presses).toBe(0);
+    expect(ownCity(fishing.ben.view).own.focus).toBe('grow');
+    expect(fishing.ben.view).not.toEqual(pressing.ben.view);
+    expect(ownCity(fishing.ben.view).own.foodStored).not.toBe(ownCity(pressing.ben.view).own.foodStored);
+    // ...and for Ada the very same: every frame after the start, byte for byte.
+    expect(fishing.adaFrames).toEqual(pressing.adaFrames);
+
+    // Nor can she tell either from a world in which Ben never did a thing.
+    const idle = await playWorld('ends his turns', LAST_TURN);
+    expect(idle.ben.view?.cities).toEqual([]);
+    expect(idle.adaFrames).toEqual(pressing.adaFrames);
+  });
+
+  it('in sight: the other player is shown a boat and a finished net like any unit and any improvement, and never the job, the queue or the choice of Grow or Build; a press sends them no frame', async () => {
+    // Ben's capital stands on the shore at (20, 7). Ada never founds a city:
+    // her Settler and her Warrior walk up to two tiles from Thebes and watch
+    // it. The Settler sees three tiles far: the city, the land around it and
+    // the coast tiles (20, 8) and (21, 8) in front of it; (22, 8) it does not.
+    const server = await shoreServer([16, 7], [20, 7]);
+    const { code, clients } = await gameWith(server, ['Ada', 'Ben']);
+    const [ada, ben] = clients;
+    const net = IMPROVEMENTS.fishingNet;
+    await ben.actOk(1, { type: 'foundCity', unitId: ownUnit(ben.view, 'settler').id });
+    for (const type of ['settler', 'warrior'] as const) {
+      await ada.actOk(1, { type: 'moveUnit', unitId: ownUnit(ada.view, type).id, path: [at(17, 7), at(18, 7)] });
+    }
+    await ada.drain();
+    await ben.drain();
+    const thebes = ownCity(ben.view).id;
+    const inSight = at(21, 8);
+    const outOfSight = at(22, 8);
+    expect(ada.view?.tiles[inSight]).toStrictEqual({ terrain: 'coast', feature: null, improvement: null, owner: 'p2', visible: true });
+    expect(ada.view?.tiles[outOfSight]).toBeNull();
+
+    /** Thebes as Ada sees it: the public facts and nothing else. */
+    const seenByAda = (population: number) => ({ id: thebes, owner: 'p2', name: 'Thebes', tile: at(20, 7), population, visible: true, own: null });
+    expect(ada.view?.cities).toStrictEqual([seenByAda(1)]);
+    /** Ben's Warrior, which stands in Thebes for the whole game, as Ada sees it. */
+    const warriorSeenByAda = { id: ownUnit(ben.view, 'warrior').id, type: 'warrior', owner: 'p2', tile: at(20, 7), own: null };
+    /** The units of Ben's that Ada's view holds, in the view's own order. */
+    const bensUnitsInAdasView = () => ada.view?.units.filter((unit) => unit.owner === 'p2');
+    /** These units as a view lists them: sorted by id. */
+    const asListed = <Seen extends { id: string }>(units: Seen[]): Seen[] => [...units].sort((a, b) => (a.id < b.id ? -1 : 1));
+    expect(bensUnitsInAdasView()).toStrictEqual([warriorSeenByAda]);
+
+    // Ben presses "Build first", "Grow first" and "Build first" again, and
+    // the button the city is already on. He is sent his city each time it
+    // changed; Ada, who is looking at the city, is sent nothing at all.
+    let adaFrames = ada.frames.length;
+    let adaView = ada.view;
+    for (const focus of ['build', 'grow', 'build'] as const) {
+      const told = await ben.actOk(1, setFocus(thebes, focus));
+      expect(told.map((message) => (message.type === 'gameUpdate' ? Object.keys(message.patch) : message.type))).toEqual([['cities']]);
+      expect(ownCity(ben.view).own.focus).toBe(focus);
+      await ada.expectNothingPending();
+    }
+    expect(await ben.actOk(1, setFocus(thebes, 'build'))).toEqual([]);
+    await ada.expectNothingPending();
+    expect(framesSince(ada, adaFrames)).toEqual([]);
+    expect(ada.view).toBe(adaView);
+    // She cannot press for him, and the answer is the one for a city that does not exist.
+    expect(await ada.actRejected(1, setFocus(thebes, 'grow'))).toBe('noSuchCity');
+    expect(await ada.actRejected(1, setFocus('c2_nosuch', 'grow'))).toBe('noSuchCity');
+    await ben.expectNothingPending();
+    expect(server.save(code).game?.cities[thebes].focus).toBe('build');
+
+    // Thebes builds a Fishing Boat, on "Build first" all the way. The boat
+    // appears on the coast tile in Ada's sight, and she is shown what
+    // anybody may know of a unit: its id, type, owner and tile.
+    const boat = await raiseBoat(ben, [ben, ada]);
+    expect(boat.tile).toBe(inSight);
+    const boatSeenByAda = { id: boat.id, type: 'fishingBoat', owner: 'p2', tile: inSight, own: null };
+    expect(bensUnitsInAdasView()).toStrictEqual(asListed([warriorSeenByAda, boatSeenByAda]));
+    expect(ada.view?.cities).toStrictEqual([seenByAda(ownCity(ben.view).population)]);
+
+    // The boat begins a net where it lies. That is an order: Ada's socket carries nothing.
+    adaFrames = ada.frames.length;
+    adaView = ada.view;
+    await ben.actOk(turnOf(ben), { type: 'startJob', unitId: boat.id, improvement: 'fishingNet' });
+    await ada.expectNothingPending();
+    expect(framesSince(ada, adaFrames)).toEqual([]);
+    expect(ada.view).toBe(adaView);
+    // Turn after turn Ben is told how far the work is. Ada sees the same
+    // boat on the same bare tile, and nothing says that it is at work.
+    for (let worked = 0; worked < net.turns; worked++) {
+      expect(ownUnit(ben.view, 'fishingBoat').own?.job).toMatchObject({ improvement: 'fishingNet', turnsWorked: worked });
+      expect(bensUnitsInAdasView()).toStrictEqual(asListed([warriorSeenByAda, boatSeenByAda]));
+      expect(ada.view?.tiles[inSight]?.improvement).toBeNull();
+      await endTurn([ben, ada]);
+    }
+    // Finished. The net is on a tile Ada sees, so she sees the net; the news of it went to Ben alone.
+    expect(ben.view?.tiles[inSight]?.improvement).toBe('fishingNet');
+    expect(ada.view?.tiles[inSight]).toStrictEqual({ terrain: 'coast', feature: null, improvement: 'fishingNet', owner: 'p2', visible: true });
+    expect(bensUnitsInAdasView()).toStrictEqual(asListed([warriorSeenByAda, boatSeenByAda]));
+
+    // The boat sails one tile on, out of Ada's sight: it is gone from her
+    // view (a unit is never remembered), and so is everything it does there.
+    await ben.actOk(turnOf(ben), { type: 'moveUnit', unitId: boat.id, path: [outOfSight] });
+    const gone = await ada.nextOfType('gameUpdate');
+    expect(Object.keys(gone.patch)).toEqual(['units']);
+    expect(gone.events).toEqual([]);
+    expect(bensUnitsInAdasView()).toStrictEqual([warriorSeenByAda]);
+    adaFrames = ada.frames.length;
+    await ben.actOk(turnOf(ben), { type: 'startJob', unitId: boat.id, improvement: 'fishingNet' });
+    await ada.expectNothingPending();
+    expect(framesSince(ada, adaFrames)).toEqual([]);
+    for (let worked = 0; worked < net.turns; worked++) await endTurn([ben, ada]);
+    // The second net stands, in Ben's view and in the file. Ada knows of one net, and of no boat.
+    expect(ben.view?.tiles[outOfSight]?.improvement).toBe('fishingNet');
+    expect(server.save(code).game?.map.tiles.flatMap((tile, index) => (tile.improvement === null ? [] : [[index, tile.improvement]]))).toEqual([
+      [inSight, 'fishingNet'],
+      [outOfSight, 'fishingNet'],
+    ]);
+    expect(ada.view?.tiles[outOfSight]).toBeNull();
+    expect(ada.view?.tiles.flatMap((tile, index) => (tile?.improvement ? [index] : []))).toEqual([inSight]);
+    expect(bensUnitsInAdasView()).toStrictEqual([warriorSeenByAda]);
+    expect(server.save(code).game?.units[boat.id]).toMatchObject({ tile: outOfSight, movesLeft: UNITS.fishingBoat.moves, job: null });
+
+    // Every frame Ada was ever sent, taken apart: a city of Ben's is the
+    // seven public facts and no more; a unit of his has no details; and the
+    // only news she got is her own and the turn counter.
+    let citiesSeen = 0;
+    let boatsSeen = 0;
+    for (const frame of ada.frames) {
+      const message = JSON.parse(frame) as ServerMessage;
+      if (message.type !== 'gameUpdate' && message.type !== 'gameSync') continue;
+      const cities = message.type === 'gameSync' ? message.view.cities : (message.patch.cities ?? []);
+      const units = message.type === 'gameSync' ? message.view.units : (message.patch.units ?? []);
+      for (const city of cities) {
+        citiesSeen += 1;
+        expect(city).toStrictEqual(seenByAda(city.population));
+      }
+      for (const unit of units.filter((candidate) => candidate.owner === 'p2')) {
+        if (unit.id === boat.id) boatsSeen += 1;
+        expect(unit).toStrictEqual(unit.id === boat.id ? boatSeenByAda : warriorSeenByAda);
+      }
+      for (const event of message.events) {
+        if (event.type !== 'turnStarted') expect(event.playerId).toBe('p1');
+      }
+    }
+    // The check can fail: she was sent the city more than once (it grew) and the boat at least once.
+    expect(citiesSeen).toBeGreaterThan(1);
+    expect(boatsSeen).toBeGreaterThan(0);
+    // And in words: of the job, the queue, the menu and the choice, not one.
+    const everythingAdaGot = ada.frames.join('\n');
+    const everythingBenGot = ben.frames.join('\n');
+    const secrets = [
+      '"turnsWorked"', '"turnsLeft"', '"job":{', 'improvementBuilt', 'unitBuilt', '"focus"', '"worked"',
+      'buildQueue', 'buildOptions', 'productionStored', '"scoutBoat"',
+    ];
+    for (const secret of secrets) {
       expect(everythingBenGot.includes(secret), `Ben was told ${secret}`).toBe(true);
       expect(everythingAdaGot.includes(secret), `Ada was told ${secret}`).toBe(false);
     }

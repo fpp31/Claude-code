@@ -4,7 +4,7 @@
  */
 
 import type { RuleErrorCode } from '../actions';
-import { IMPROVEMENTS, IMPROVEMENT_IDS, improvementFits } from '../data/improvements';
+import { IMPROVEMENTS, improvementFits } from '../data/improvements';
 import type { ImprovementId } from '../data/improvements';
 import type { Ground } from '../data/terrain';
 import { UNITS } from '../data/units';
@@ -84,9 +84,12 @@ export function improvementSiteError(site: ImprovementSite | null, improvement: 
 /**
  * May this unit start building this improvement where it stands, right now?
  * Returns null if yes, otherwise the first reason in this order:
- *  1. 'cannotImprove'  UNITS[unit.type].canImprove is false, or `improvement`
- *                      is not a key of IMPROVEMENTS (a real key: 'constructor'
- *                      and the like are not improvements);
+ *  1. 'cannotImprove'  `improvement` is not a key of IMPROVEMENTS (a real
+ *                      key: 'constructor' and the like are not
+ *                      improvements), or it is not in the list of what this
+ *                      unit's type builds (UNITS[unit.type].improvements):
+ *                      a Worker asked for a net, a Fishing Boat asked for a
+ *                      farm, a Warrior asked for anything;
  *  2. 'unitBusy'       the unit has a job;
  *  3. improvementSiteError(siteOfTile(state, unit.owner, unit.tile), improvement).
  * The unit's moves left are NOT looked at: work may begin in the turn the
@@ -99,7 +102,7 @@ export function improvementSiteError(site: ImprovementSite | null, improvement: 
  * @param improvement  as it came in the action: any string
  */
 export function startJobError(state: GameState, unit: Unit, improvement: string): RuleErrorCode | null {
-  if (!UNITS[unit.type].canImprove || !isImprovementId(improvement)) return 'cannotImprove';
+  if (!isImprovementId(improvement) || !UNITS[unit.type].improvements.includes(improvement)) return 'cannotImprove';
   if (unit.job !== null) return 'unitBusy';
   return improvementSiteError(siteOfTile(state, unit.owner, unit.tile), improvement);
 }
@@ -110,13 +113,14 @@ function isImprovementId(improvement: string): improvement is ImprovementId {
 }
 
 /**
- * The jobs a unit could do, for the view: one entry per improvement in
- * IMPROVEMENT_IDS order, with the turns it takes (IMPROVEMENTS[id].turns)
- * and startJobError for it. Empty for a unit whose type cannot improve.
+ * The jobs a unit could do, for the view: one entry per improvement its
+ * TYPE builds (UNITS[unit.type].improvements), in that order, with the
+ * turns it takes (IMPROVEMENTS[id].turns) and startJobError for it. Empty
+ * for a unit that builds nothing: nobody is shown a button that can never
+ * be pressed.
  */
 export function jobOptions(state: GameState, unit: Unit): JobOption[] {
-  if (!UNITS[unit.type].canImprove) return [];
-  return IMPROVEMENT_IDS.map((improvement): JobOption => ({
+  return UNITS[unit.type].improvements.map((improvement): JobOption => ({
     improvement,
     turns: IMPROVEMENTS[improvement].turns,
     error: startJobError(state, unit, improvement),

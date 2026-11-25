@@ -13,6 +13,7 @@
  */
 
 import {
+  CITY_FOCUS,
   CIVS,
   FEATURES,
   IMPROVEMENTS,
@@ -20,6 +21,7 @@ import {
   TERRAIN,
   UNITS,
   cityCenterYields,
+  improvementBuilder,
   improvementSiteError,
   siteInView,
   tileIsWorkable,
@@ -45,17 +47,24 @@ export type TileKnowledge = 'unexplored' | 'remembered' | 'visible';
  * What a line is about. Also the end of the line's test id
  * (`tile-card-line-yields`, `hover-box-line-unit`) and its CSS class.
  * Lines always come in the order the kinds are listed here.
+ *
+ * The words about citizens (round 3): citizens GATHER a tile's yields;
+ * units work and build. No line about citizens says "work": under a Worker
+ * that was building a farm, round 2's "No citizen works ..." read as a
+ * contradiction. The kind keeps its old name, `worked`, which no player
+ * reads (it is in test ids and in the view's `worked` list).
  */
 export type TileInfoLineKind =
   | 'remembered'   // "Out of sight: shown as you last saw it. Units are not shown."
   | 'city'         // the city standing on the tile
   | 'building'     // what the viewer's own city there builds ("Building: Warrior, 4 turns" / "Builds nothing")
+  | 'focus'        // the viewer's own city there is set to Build ("Set to Build first: not growing"); no line on Grow
   | 'unit'         // one unit on the tile (a tile holds at most two)
-  | 'improvement'  // the farm or mine on the tile
+  | 'improvement'  // the farm, mine or fishing net on the tile
   | 'yields'       // what the tile gives a city
-  | 'worked'       // own land only: whether a citizen works the tile
-  | 'canBuild'     // own land only: an improvement that could be built here (one line each)
-  | 'movement'     // what it costs to enter
+  | 'worked'       // own land only: whether a citizen gathers the tile's yields
+  | 'canBuild'     // own land only: an improvement that could be built here, and by which unit (one line each)
+  | 'movement'     // what it costs to enter, and for whom (land units, boats)
   | 'owner';       // whose land it is
 
 /** One line of a tile's description: a finished sentence, what it is about, and whose colours go in front of it. */
@@ -83,8 +92,11 @@ export interface TileInfo {
 
 /**
  * Describes a tile as the viewer knows it. The exact rules are A-D1 to A-D12
- * of the round 2 spec and the tests in test/shellTileInfo.test.ts. Pure;
- * never throws, also not for a tile number that is off the map ("Unexplored").
+ * of the round 2 spec, with the changes of round 3 (who gathers the yields,
+ * which unit could build what, whom the cost to enter is about, and the one
+ * line about an own city that is set to Build), and the tests in
+ * test/shellTileInfo.test.ts. Pure; never throws, also not for a tile
+ * number that is off the map ("Unexplored").
  */
 export function describeTile(view: PlayerView, tile: TileIndex): TileInfo {
   return readTile(view, tile).info;
@@ -93,7 +105,8 @@ export function describeTile(view: PlayerView, tile: TileIndex): TileInfo {
 /**
  * The unit panel's line about the tile a unit stands on:
  * "Tile: Hills on Plains. Yields 0 food, 2 production." or, with something
- * built there, "Tile: Grassland, Farm. Yields 3 food, 1 production.". It is
+ * built there, "Tile: Grassland, Farm. Yields 3 food, 1 production." (for a
+ * boat: "Tile: Coast, Fishing Net. Yields 4 food, 0 production."). It is
  * the title, the improvement's name and the yields line of
  * describeTile(view, unit.tile), so the panel and the boxes use the same words.
  * (For a unit in a city the yields line is the centre's: "Tile: Grassland.
@@ -108,8 +121,9 @@ export function unitTileText(view: PlayerView, unit: UnitView): string {
 
 /**
  * What an improvement adds, read from the table: "+1 food", "+3 production",
- * "+1 food, +3 production". Used by the tile's improvement line and by the
- * unit panel's job buttons (ui/texts.ts).
+ * "+2 food" (the net), and for a row that adds both "+1 food, +3
+ * production". Used by the tile's improvement line and by the unit panel's
+ * job buttons (ui/texts.ts).
  */
 export function improvementBonusText(improvement: ImprovementId): string {
   const added = IMPROVEMENTS[improvement].yields;
@@ -151,6 +165,16 @@ function readTile(view: PlayerView, tile: TileIndex): TileReading {
     const whose = city.owner === view.you ? 'your city' : `a city of ${owner.name}`;
     add('city', `${city.name}, population ${city.population}: ${whose}`, owner.civ);
     if (city.own !== null) add('building', buildingText(city.own));
+    // A-D4c (round 3). The viewer's own city, set to Build: the one word
+    // about that choice outside the city's open panel, so that a city left
+    // on Build by mistake can be found by resting the mouse on it. It is
+    // made from city.own, which is null for every other player's city:
+    // nobody else can ever be shown it. A city on Grow has no such line, so
+    // the box of a city nobody touched stays as it was.
+    if (city.own !== null && city.own.focus === 'build') {
+      const name = CITY_FOCUS.build.name;
+      add('focus', city.own.foodPerTurn <= 0 ? `Set to ${name}: not growing` : `Set to ${name}`);
+    }
   }
 
   // A-D5. Units, only on a tile in sight: soldier before civilian, then by id.
@@ -170,21 +194,27 @@ function readTile(view: PlayerView, tile: TileIndex): TileReading {
   if (city !== null) {
     add('yields', `City centre: ${yieldWords(cityCenterYields(seen))}`);
   } else if (!tileIsWorkable(seen)) {
-    add('yields', 'Yields nothing: cannot be worked');
+    // A tile no citizen can gather from (mountains).
+    add('yields', 'Yields nothing: citizens cannot gather here');
   } else {
     add('yields', `Yields ${yieldWords(tileYields(seen))}`);
-    // A-D7b. On the viewer's own land: is the tile in use?
+    // A-D7b. On the viewer's own land: who gathers these yields? The line
+    // stands right under the numbers and says what happens to exactly
+    // those, and by whom. (No "works": a Worker is a unit, a citizen is
+    // not, and a unit on the tile changes nothing about the gathering.)
     if (ownLand) {
       const workedBy = view.cities.find(
         (candidate) => candidate.owner === view.you && candidate.own !== null && candidate.own.worked.includes(tile),
       );
-      add('worked', workedBy === undefined ? 'No citizen works this tile' : `A citizen of ${workedBy.name} works this tile`);
+      add('worked', workedBy === undefined ? 'No citizen gathers these yields' : `A citizen of ${workedBy.name} gathers these yields`);
     }
   }
 
-  // A-D7c. On the viewer's own land: what a Worker could build here. The
-  // answer is the shared rule's; an improvement one of the viewer's own
-  // units is building on this very tile is left out (its unit line says so).
+  // A-D7c. On the viewer's own land: what could be built here, and by
+  // which unit (a Worker builds farms and mines, a Fishing Boat the net;
+  // the unit table says who, improvementBuilder). Where it fits is the
+  // shared rule's answer; an improvement one of the viewer's own units is
+  // building on this very tile is left out (its unit line says so).
   if (ownLand) {
     const site = siteInView(view, tile);
     for (const id of IMPROVEMENT_IDS) {
@@ -192,19 +222,23 @@ function readTile(view: PlayerView, tile: TileIndex): TileReading {
       const underWay = view.units.some(
         (unit) => unit.tile === tile && unit.own !== null && unit.own.job !== null && unit.own.job.improvement === id,
       );
-      if (!underWay) add('canBuild', `A ${IMPROVEMENTS[id].name} can be built here`);
+      if (!underWay) add('canBuild', `A ${UNITS[improvementBuilder(id)].name} can build a ${IMPROVEMENTS[id].name} here`);
     }
   }
 
-  // A-D8. What it costs to enter. The second case restates, for the two
-  // foreign cases only, what canEnterTile (shared/src/rules/movement.ts)
-  // decides for a mover: another player's city or unit blocks the tile.
-  // Whoever changes the blocking rules there changes this line with them.
-  const cost = tileMoveCost(seen);
+  // A-D8. What it costs to enter, from both columns of the terrain table
+  // (round 3: a unit moves on land or on the sea, and the line names whom it
+  // is about). The second case restates, for the two foreign cases only,
+  // what canEnterTile (shared/src/rules/movement.ts) decides for a mover:
+  // another player's city or unit blocks the tile. Whoever changes the
+  // blocking rules there changes this line with them.
+  const byLand = tileMoveCost(seen, 'land');
+  const bySea = tileMoveCost(seen, 'sea');
   const foreignHere = (city !== null && city.owner !== view.you) || units.some((unit) => unit.owner !== view.you);
-  if (cost === null) add('movement', 'Land units cannot enter');
+  if (byLand === null && bySea === null) add('movement', 'No unit can enter');
   else if (foreignHere) add('movement', "Blocked: another player's unit or city is here");
-  else add('movement', `Costs ${counted(cost, 'move', 'moves')} to enter`);
+  else if (byLand !== null) add('movement', `Land units: costs ${counted(byLand, 'move', 'moves')} to enter`);
+  else add('movement', `Boats only: costs ${counted(bySea ?? 0, 'move', 'moves')} to enter`);
 
   // A-D9. Whose land it is.
   if (seen.owner === null) {

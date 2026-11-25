@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  CIVS, CIV_IDS, FEATURE_IDS, IMPROVEMENT_IDS, MAP_SIZES, TERRAIN_IDS, UNIT_TYPE_IDS, tileCoord, tileCount,
+  CIVS, CIV_IDS, FEATURE_IDS, IMPROVEMENT_IDS, MAP_SIZES, TERRAIN_IDS, UNITS, UNIT_TYPE_IDS, tileCoord, tileCount,
 } from '@domination/shared';
-import type { GridSize } from '@domination/shared';
+import type { GridSize, UnitTypeId } from '@domination/shared';
 import {
   CAMERA_MARGIN,
   artToDevice,
@@ -17,7 +17,7 @@ import {
 } from '../src/render/camera';
 import type { Camera } from '../src/render/camera';
 import { BORDER_INNER, BORDER_OUTER } from '../src/render/borders';
-import { TILE_HEIGHT, TILE_WIDTH, hexDepth, isInsideHex, mapPixelSize, tileCenter, tileOrigin } from '../src/render/geometry';
+import { ROW_PITCH, TILE_HEIGHT, TILE_WIDTH, hexDepth, isInsideHex, mapPixelSize, tileCenter, tileOrigin } from '../src/render/geometry';
 import { tree } from '../src/sprites/art/features';
 import { MARKER_IDS } from '../src/sprites/art/markers';
 import { ALL_SPRITE_IDS, buildCatalog, featureOf, improvementOf } from '../src/sprites/catalog';
@@ -245,6 +245,8 @@ describe('the art (WP5)', () => {
     ];
     // The same ids in the same order: grounds, features, improvements, units, the city, markers.
     expect([...ALL_SPRITE_IDS]).toEqual(wanted);
+    // Round 3: the two boats and the net come from the tables like every other id.
+    for (const id of ['unit.fishingBoat', 'unit.scoutBoat', 'improvement.fishingNet'] as const) expect(wanted, id).toContain(id);
     expect(MARKER_IDS).toEqual(['selection', 'reachable', 'hover', 'worked', 'pathStep', 'pathEnd', 'working', 'idle']);
     expect(IMPROVEMENT_IDS.map((improvement) => improvementOf(`improvement.${improvement}`))).toEqual([...IMPROVEMENT_IDS]);
     expect(improvementOf('feature.hills')).toBeNull();
@@ -359,14 +361,73 @@ describe('the art (WP5)', () => {
     expect(countPixels(mayaCity, rgba(BLUE.primary))).toBe(countPixels(romeCity, rgba(RED.primary)));
   });
 
-  it('the four unit types have clearly different pictures (told apart by more than a few pixels)', () => {
+  it('the six unit types have clearly different pictures; the two boats differ from each other by more than 80 pixels', () => {
     const ids = UNIT_TYPE_IDS.map((unitType): SpriteId => `unit.${unitType}`);
-    expect(ids.length).toBe(4);
+    expect(ids.length).toBe(6);
     for (let a = 0; a < ids.length; a++) {
       for (let b = a + 1; b < ids.length; b++) {
         const different = pixelsApart(inTileBox(spriteImage(ids[a], '', 'rome')), inTileBox(spriteImage(ids[b], '', 'rome')));
         expect(different, `${ids[a]} against ${ids[b]}`).toBeGreaterThan(40);
       }
+    }
+    // The two boats do different things (one builds nets, one explores): never mixed up.
+    const fishingBoat = inTileBox(spriteImage('unit.fishingBoat', '', 'rome'));
+    const scoutBoat = inTileBox(spriteImage('unit.scoutBoat', '', 'rome'));
+    expect(pixelsApart(fishingBoat, scoutBoat)).toBeGreaterThan(80);
+    // And a boat is a hull under a mast, not a figure that stands in the water: far from every land unit.
+    const landUnits = UNIT_TYPE_IDS.filter((unitType) => UNITS[unitType].domain === 'land');
+    expect(landUnits.length).toBe(4);
+    for (const unitType of landUnits) {
+      const figure = inTileBox(spriteImage(`unit.${unitType}`, '', 'rome'));
+      expect(pixelsApart(fishingBoat, figure), `the Fishing Boat against the ${unitType}`).toBeGreaterThan(150);
+      expect(pixelsApart(scoutBoat, figure), `the Scout Boat against the ${unitType}`).toBeGreaterThan(150);
+    }
+  });
+
+  it('a boat is 26 x 17 and sits one row lower than the figures; its colours are its owner\'s where the eye looks first', () => {
+    /** How many pixels of a unit's picture are in the owner's primary colour (lit, plain, shaded), in the second colour, and the longest row of primary. */
+    const ownerPixels = (unitType: UnitTypeId): { primary: number; secondary: number; longestRow: number } => {
+      const ramp = ownerRamp(CIVS.rome.primary);
+      const primary = [ramp.lit, ramp.base, ramp.shaded].map((color) => rgba(color).join());
+      const secondary = rgba(CIVS.rome.secondary).join();
+      const picture = inTileBox(spriteImage(`unit.${unitType}`, '', 'rome'));
+      let longestRow = 0;
+      for (let y = 0; y < TILE_HEIGHT; y++) {
+        let run = 0;
+        for (let x = 0; x < TILE_WIDTH; x++) {
+          run = primary.includes(picture[y * TILE_WIDTH + x]) ? run + 1 : 0;
+          longestRow = Math.max(longestRow, run);
+        }
+      }
+      return {
+        primary: picture.filter((pixel) => primary.includes(pixel)).length,
+        secondary: picture.filter((pixel) => pixel === secondary).length,
+        longestRow,
+      };
+    };
+    for (const boat of ['fishingBoat', 'scoutBoat'] as const) {
+      const sprite = spriteImage(`unit.${boat}`, '', 'rome');
+      expect([sprite.image.width, sprite.image.height, sprite.offsetX, sprite.offsetY], boat).toEqual([TILE_WIDTH, 17, 0, 5]);
+      // Its last row (the shadow, the oars) is the last row of the hexagon that has the full width.
+      const rows = inTileBox(sprite).map((pixel, index) => (pixel === '' ? -1 : Math.floor(index / TILE_WIDTH))).filter((row) => row >= 0);
+      expect([Math.min(...rows), Math.max(...rows)], boat).toEqual([5, ROW_PITCH - 1]);
+    }
+    // The Fishing Boat: the upper plank of the hull is one long line of the owner's colour (what is left of the
+    // colour at the smallest zoom), and the pennant is in the second colour.
+    const fishing = ownerPixels('fishingBoat');
+    expect(fishing.longestRow).toBeGreaterThanOrEqual(18);
+    expect(fishing.secondary).toBeGreaterThanOrEqual(3);
+    // The Scout Boat: its sail is the largest patch of owner colour any unit has, with stripes of the second colour.
+    const scout = ownerPixels('scoutBoat');
+    expect(scout.secondary).toBeGreaterThanOrEqual(8);
+    for (const unitType of UNIT_TYPE_IDS) {
+      if (unitType === 'scoutBoat') continue;
+      const other = ownerPixels(unitType);
+      expect(scout.primary + scout.secondary, unitType).toBeGreaterThan(other.primary + other.secondary);
+    }
+    // Every land unit keeps its colour in short rows (a tunic, a helmet): only a boat has the long line.
+    for (const unitType of UNIT_TYPE_IDS) {
+      if (UNITS[unitType].domain === 'land') expect(ownerPixels(unitType).longestRow, unitType).toBeLessThan(10);
     }
   });
 
@@ -424,6 +485,74 @@ describe('the art (WP5)', () => {
         expect(painted).toBeGreaterThan(40);
       }
     }
+  });
+
+  it('the net stays inside its tile box and 3 pixels inside the hexagon', () => {
+    const sprite = spriteImage('improvement.fishingNet', 'coast');
+    expect([sprite.image.width, sprite.image.height, sprite.offsetX, sprite.offsetY]).toEqual([20, 18, 3, 6]);
+    const net = inTileBox(sprite); // with its lattice, which is see-through
+    const painted = net.map((pixel, index) => (pixel === '' ? -1 : index)).filter((index) => index >= 0);
+    // Enough of it to be seen at the smallest zoom, all of it clear of the border strip.
+    expect(painted.length).toBeGreaterThan(100);
+    for (const index of painted) {
+      expect(hexDepth(index % TILE_WIDTH, Math.floor(index / TILE_WIDTH)), `pixel ${index}`).toBeGreaterThanOrEqual(BORDER_OUTER + BORDER_INNER);
+    }
+    // One picture on every ground (only coast is ever drawn), and nobody takes it for a farm or a mine.
+    expect(new Set(TERRAIN_IDS.map((terrain) => inTileBox(spriteImage('improvement.fishingNet', terrain)).join('|'))).size).toBe(1);
+    expect(pixelsApart(net, inTileBox(spriteImage('improvement.farm', 'coast')))).toBeGreaterThan(150);
+    expect(pixelsApart(net, inTileBox(spriteImage('improvement.mine', 'coast')))).toBeGreaterThan(150);
+
+    // Six floats: an orange disc of three pixels with a light one, bright and fogged alike.
+    const [cork, light] = [rgba(PALETTE.bow).join(), rgba(PALETTE.strawLight).join()];
+    expect(net.filter((pixel) => pixel === cork).length).toBe(6 * 3);
+    expect(net.filter((pixel) => pixel === light).length).toBe(6);
+    const fogged = inTileBox(spriteImage('improvement.fishingNet', 'coast', '', 'fogged'));
+    expect(new Set(fogged.filter((pixel, index) => net[index] === cork)).size).toBe(1);
+    expect(fogged.filter((pixel, index) => net[index] === cork)[0]).not.toBe(cork);
+
+    // The worked-tile token lies in the top point, the ring's top float right under it: they share no pixel, so
+    // a fished tile that a citizen gathers from shows both whole.
+    const token = inTileBox(spriteImage('marker.worked'));
+    expect(painted.filter((index) => token[index] !== '')).toEqual([]);
+    const tokenRows = token.map((pixel, index) => (pixel === '' ? -1 : Math.floor(index / TILE_WIDTH))).filter((row) => row >= 0);
+    expect(Math.min(...painted.map((index) => Math.floor(index / TILE_WIDTH)))).toBe(Math.max(...tokenRows) + 1);
+  });
+
+  it('a net under a boat is still seen: under a Fishing Boat three floats stay whole, under a Scout Boat or under both boats one', () => {
+    // The inner pixels (orange and light) of each float, as lists of places in the tile box.
+    const net = inTileBox(spriteImage('improvement.fishingNet', 'coast'));
+    const inner = [rgba(PALETTE.bow).join(), rgba(PALETTE.strawLight).join()];
+    const floats: number[][] = [];
+    net.forEach((pixel, index) => {
+      if (!inner.includes(pixel)) return;
+      const near = floats.find((float) => float.some((other) => Math.abs((other % TILE_WIDTH) - (index % TILE_WIDTH)) <= 1 && Math.abs(Math.floor(other / TILE_WIDTH) - Math.floor(index / TILE_WIDTH)) <= 1));
+      if (near === undefined) floats.push([index]);
+      else near.push(index);
+    });
+    expect(floats.map((float) => float.length)).toEqual([4, 4, 4, 4, 4, 4]);
+
+    /** The places a boat's solid pixels cover when it is drawn (dx, dy) art pixels from the middle of the tile. */
+    const covered = (boat: SpriteId, dx = 0, dy = 0): Set<number> => {
+      const sprite = spriteImage(boat, '', 'rome');
+      const places = new Set<number>();
+      for (let y = 0; y < sprite.image.height; y++) {
+        for (let x = 0; x < sprite.image.width; x++) {
+          const [px, py] = [x + sprite.offsetX + dx, y + sprite.offsetY + dy];
+          if (getPixel(sprite.image, x, y)[3] === 255 && px >= 0 && px < TILE_WIDTH && py >= 0 && py < TILE_HEIGHT) places.add(py * TILE_WIDTH + px);
+        }
+      }
+      return places;
+    };
+    /** How many floats keep at least `pixels` of their four inner pixels in view. */
+    const inView = (cover: Set<number>, pixels: number): number =>
+      floats.filter((float) => float.filter((index) => !cover.has(index)).length >= pixels).length;
+
+    // Whoever draws a boat anew looks at it on a net (sprites.html) before changing these.
+    expect(inView(covered('unit.fishingBoat'), 4)).toBeGreaterThanOrEqual(3);
+    expect(inView(covered('unit.scoutBoat'), 3)).toBeGreaterThanOrEqual(1);
+    // Both on the tile, where render/scene.ts puts a pair: the Fishing Boat behind (-5, -3), the Scout Boat in front (4, 2).
+    const both = new Set([...covered('unit.fishingBoat', -5, -3), ...covered('unit.scoutBoat', 4, 2)]);
+    expect(inView(both, 3)).toBeGreaterThanOrEqual(1);
   });
 
   it('the farm\'s three colourings are three different pictures, and a farm paints more than 150 pixels of its tile', () => {
@@ -503,6 +632,9 @@ describe('the art (WP5)', () => {
     expect(covered('unit.settler')).toBe(0);
     expect(covered('unit.scout')).toBeGreaterThan(0);
     expect(covered('unit.scout')).toBeLessThanOrEqual(12);
+    // A boat's mast top is that dark line too: the token of a fished tile covers nothing of the boat on it.
+    expect(covered('unit.fishingBoat')).toBe(0);
+    expect(covered('unit.scoutBoat')).toBe(0);
   });
 
   it('the "at work" sign is 7 x 7 and the "builds nothing" sign 7 x 9; they differ from each other and from the path dot in more than 12 pixels', () => {

@@ -3,8 +3,11 @@ import { MAP_SIZES, MAP_SIZE_IDS, RULES } from '../src/data/rules';
 import type { MapSizeId } from '../src/data/rules';
 import { FEATURES, FEATURE_IDS, TERRAIN_IDS, tileIsWater, tileMoveCost } from '../src/data/terrain';
 import type { FeatureId, TerrainId } from '../src/data/terrain';
-import { neighbors, tileCoord } from '../src/hex';
+import { distance, neighbors, tileCoord } from '../src/hex';
+import { attemptStreams } from '../src/mapgen/attempts';
+import { buildMap } from '../src/mapgen/buildMap';
 import { generateMap } from '../src/mapgen/generateMap';
+import { gridFor } from '../src/mapgen/grid';
 import type { GameMap, Tile, TileIndex } from '../src/types';
 
 /**
@@ -18,6 +21,11 @@ import type { GameMap, Tile, TileIndex } from '../src/types';
  * goes round from 1 to RULES.maxSeats with the seeds, so every size is seen
  * with every player count.
  *
+ * Since round 3 the finished map is the land the terrain steps make plus up
+ * to one hill by every start (rule H7). The checks here look at the
+ * finished map, with one exception that says so: "in clusters" is a claim
+ * about the terrain steps and is measured on their land.
+ *
  * (The rule "only Math functions that give the same result everywhere" is
  * checked for the whole shared package by purity.test.ts.)
  */
@@ -28,6 +36,7 @@ const SEEDS_PER_SIZE = 200;
 interface Sample {
   /** For failure messages: seed, size and player count. */
   label: string;
+  seed: string;
   mapSize: MapSizeId;
   map: GameMap;
   starts: TileIndex[];
@@ -48,19 +57,19 @@ beforeAll(() => {
       const seed = `map-${i}`;
       const playerCount = 1 + (i % RULES.maxSeats);
       const { map, starts } = generateMap(seed, mapSize, playerCount);
-      samples.push({ label: `seed '${seed}', ${mapSize}, ${playerCount} players`, mapSize, map, starts, neighborsOf });
+      samples.push({ label: `seed '${seed}', ${mapSize}, ${playerCount} players`, seed, mapSize, map, starts, neighborsOf });
     }
   }
 }, 120_000);
 
 /**
- * Runs `check` on every sample. `check` returns null if all is well, or a
- * few words about what is wrong. The result lists the samples that failed,
- * so that a failing test names the seed.
+ * Runs `check` on every sample (or on every sample of `among`). `check`
+ * returns null if all is well, or a few words about what is wrong. The
+ * result lists the samples that failed, so that a failing test names the seed.
  */
-function problemsIn(check: (sample: Sample) => string | null): string[] {
+function problemsIn(check: (sample: Sample) => string | null, among: readonly Sample[] = samples): string[] {
   const problems: string[] = [];
-  for (const sample of samples) {
+  for (const sample of among) {
     const problem = check(sample);
     if (problem !== null) problems.push(`${sample.label}: ${problem}`);
   }
@@ -182,14 +191,41 @@ describe('generateMap: the same input always gives the same result', () => {
     }
   });
 
-  it('makes the same land for every player count (as long as the first attempt has room for the starts)', () => {
+  it('the land is the seed\'s but for the hills by the starts: the maps for two and for five players differ in at most 2 + 5 tiles, each of them hills in one map, within two of a start of that map, and forest or open land in the other', () => {
     // The seed alone fixes the land: asking for more players moves no coast.
-    // (Only a failed attempt, which is very rare, would make the maps differ.)
-    const two = generateMap('same-land', 'large', 2);
-    const five = generateMap('same-land', 'large', 5);
-    expect(five.map).toEqual(two.map);
-    expect(five.starts).toHaveLength(5);
-    expect(two.starts).toHaveLength(2);
+    // Then every start that has no tile for a Mine is given one hill, so
+    // each map has up to one tile per player that the other may not have.
+    // (Only a failed attempt, which a test of mapgenStarts.test.ts counts
+    // and never finds on the game's sizes, would make the maps differ more.)
+    let mapsThatDiffer = 0;
+    for (const seed of ['same-land', 'same-land-2', 'same-land-3', 'same-land-4', 'same-land-5', 'same-land-6']) {
+      const two = generateMap(seed, 'large', 2);
+      const five = generateMap(seed, 'large', 5);
+      expect(two.starts).toHaveLength(2);
+      expect(five.starts).toHaveLength(5);
+      expect(five.map.tiles).toHaveLength(two.map.tiles.length);
+
+      const differing: TileIndex[] = [];
+      two.map.tiles.forEach((tile, index) => {
+        if (JSON.stringify(tile) !== JSON.stringify(five.map.tiles[index])) differing.push(index);
+      });
+      expect(differing.length, seed).toBeLessThanOrEqual(2 + 5);
+      if (differing.length > 0) mapsThatDiffer++;
+      for (const tile of differing) {
+        const inTwo = two.map.tiles[tile];
+        const inFive = five.map.tiles[tile];
+        // One of the two maps has hills there, by one of ITS starts ...
+        const hillsInTwo = inTwo.feature === 'hills';
+        const [withHills, itsStarts, other] = hillsInTwo ? [inTwo, two.starts, inFive] : [inFive, five.starts, inTwo];
+        expect(withHills.feature, `${seed}, tile ${tile}`).toBe('hills');
+        expect(itsStarts.some((start) => distance(start, tile, two.map) <= 2), `${seed}, tile ${tile}`).toBe(true);
+        // ... and the other has the land the seed made: forest or open ground, the same ground.
+        expect([null, 'forest'], `${seed}, tile ${tile}`).toContain(other.feature);
+        expect(other, `${seed}, tile ${tile}`).toEqual({ ...withHills, feature: other.feature });
+      }
+    }
+    // The examples really show the difference: the first seed alone would do.
+    expect(mapsThatDiffer).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -339,6 +375,21 @@ describe('generateMap: sensible terrain', () => {
     // the same kind? Scattered at random it would be about 47% for desert,
     // 67% for forest, 53% for hills and 26% for mountains (at the shares
     // the generator uses). Clusters score far higher.
+    //
+    // The claim is about the terrain steps, so it is measured on the land
+    // they make, before the starts are chosen: buildMap on the streams of
+    // the first attempt. The one hill that is then put by a start which has
+    // none may stand alone, on purpose (rule H7), and is no cluster.
+    const lands: Sample[] = samples.map((sample) => ({
+      ...sample,
+      map: buildMap(gridFor(MAP_SIZES[sample.mapSize]), attemptStreams(sample.seed, 1)),
+    }));
+    // The finished map IS that land but for hills: the same coast, desert, forest elsewhere and mountains.
+    for (let i = 0; i < samples.length; i++) {
+      const changed = samples[i].map.tiles.filter((tile, index) => JSON.stringify(tile) !== JSON.stringify(lands[i].map.tiles[index]));
+      expect(changed.length, samples[i].label).toBeLessThanOrEqual(samples[i].starts.length);
+      expect(changed.every((tile) => tile.feature === 'hills'), samples[i].label).toBe(true);
+    }
     const kinds: { name: string; test: (tile: Tile) => boolean; everyMap: number; onAverage: number }[] = [
       { name: 'desert', test: (t) => t.terrain === 'desert', everyMap: 0.8, onAverage: 0.95 },
       { name: 'forest', test: (t) => t.feature === 'forest', everyMap: 0.75, onAverage: 0.9 },
@@ -346,13 +397,13 @@ describe('generateMap: sensible terrain', () => {
       { name: 'mountains', test: (t) => t.feature === 'mountains', everyMap: 0.5, onAverage: 0.85 },
     ];
     for (const { name, test, everyMap, onAverage } of kinds) {
-      const problems = problemsIn((sample) => {
-        const share = shareWithLikeNeighbor(sample, test);
+      const problems = problemsIn((land) => {
+        const share = shareWithLikeNeighbor(land, test);
         return share >= everyMap ? null : `only ${percent(share)} of the ${name} tiles touch another one`;
-      });
+      }, lands);
       expect(problems, name).toEqual([]);
       for (const mapSize of MAP_SIZE_IDS) {
-        const shares = samples.filter((s) => s.mapSize === mapSize).map((s) => shareWithLikeNeighbor(s, test));
+        const shares = lands.filter((s) => s.mapSize === mapSize).map((s) => shareWithLikeNeighbor(s, test));
         expect(average(shares), `${name} on ${mapSize} maps`).toBeGreaterThanOrEqual(onAverage);
       }
     }
@@ -401,7 +452,7 @@ describe('generateMap: sensible terrain', () => {
     // groups than there are landmasses.
     const problems = problemsIn((sample) => {
       const landmasses = groupSizes(sample, isLand).length;
-      const walkableAreas = groupSizes(sample, (tile) => tileMoveCost(tile) !== null).length;
+      const walkableAreas = groupSizes(sample, (tile) => tileMoveCost(tile, 'land') !== null).length;
       return walkableAreas === landmasses ? null : `${landmasses} landmasses but ${walkableAreas} separate walkable areas`;
     });
     expect(problems).toEqual([]);

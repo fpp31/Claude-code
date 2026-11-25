@@ -13,6 +13,7 @@ import { foundCity } from './foundCity';
 import { moveUnit } from './moveUnit';
 import { noChange, rejected } from './results';
 import { setBuildQueue } from './setBuildQueue';
+import { setCityFocus } from './setCityFocus';
 import { startJob, stopJob } from './unitJob';
 
 /**
@@ -33,7 +34,7 @@ import { startJob, stopJob } from './unitJob';
  *  1. `playerId` is not a player of this game, the action type is unknown,
  *     or a field of the action is of the wrong basic kind (`unitId` or
  *     `cityId` is not a string, `path` is not a list, `queue` is not a list,
- *     `improvement` is not a string) -> 'badAction'. Fields of the right
+ *     `improvement` or `focus` is not a string) -> 'badAction'. Fields of the right
  *     kind with a wrong VALUE get the code of their own check further down
  *     ('badPath', 'noSuchUnit', 'cannotBuild', 'cannotImprove', ...).
  *  2. `turn !== state.turn` -> 'staleTurn'. (A late End Turn must never end
@@ -46,8 +47,9 @@ import { startJob, stopJob } from './unitJob';
  *
  * Accepted no-ops return `{ ok: true, state: <the input object>, events: [],
  * changed: false }`: endTurn when already ended, cancelEndTurn when not
- * ended, setBuildQueue with the queue the city already has, startJob for the
- * job the unit is already doing, stopJob for a unit without a job.
+ * ended, setBuildQueue with the queue the city already has, setCityFocus
+ * with the focus the city already has, startJob for the job the unit is
+ * already doing, stopJob for a unit without a job.
  *
  * moveUnit { unitId, path }
  *  - Unit missing or not owned by the player -> 'noSuchUnit' (same code for
@@ -62,11 +64,18 @@ import { startJob, stopJob } from './unitJob';
  *  - Then the path is WALKED on the true state, one step at a time:
  *      * stop if the unit has no moves left;
  *      * stop if canEnterTile(boardFromState(draft), unit, nextTile) reports
- *        an error (water, mountains, another player's unit or city, own unit
- *        of the same class). Every step must be a tile the unit could stop
- *        on; there is no passing through anything;
- *      * otherwise move: movesLeft = max(0, movesLeft - tileMoveCost(tile)).
- *        A unit with any moves left may always enter a passable tile;
+ *        an error. The first that applies: 'impassable' for a tile this
+ *        unit's domain cannot enter (for a land unit water and mountains,
+ *        for a boat every land tile, a city's tile among them); 'blocked'
+ *        for another player's city, another player's unit, or an own unit
+ *        of the same class. Every step must be a tile the unit could stop
+ *        on; there is no passing through anything, and no carrying: a boat
+ *        never ends a step on land or in a city, a land unit never on
+ *        water. Borders stop nobody: a unit may enter any tile its domain
+ *        can enter, whoever owns it (a boat any water it can reach);
+ *      * otherwise move: movesLeft = max(0, movesLeft - tileMoveCost(tile,
+ *        UNITS[unit.type].domain)). A unit with any moves left may always
+ *        enter a tile its domain can enter;
  *      * call updateKnowledge after EVERY step, so units explore along the
  *        way and the next step is judged with fresh sight.
  *    (Phase 1 limit, on purpose: other players' views are built only at the
@@ -93,7 +102,8 @@ import { startJob, stopJob } from './unitJob';
  *  - foundCityError(state, unit) (rules/city.ts) is not null -> that code.
  *  - Otherwise, in this order: make the city (id from newCityId, name from
  *    cityNameFor(civ, citiesFounded), population 1, foodStored 0, an empty
- *    build queue, productionStored 0) on the unit's tile; set the city tile's
+ *    build queue, productionStored 0, focus DEFAULT_CITY_FOCUS: every new
+ *    city starts on "Grow first") on the unit's tile; set the city tile's
  *    `cityId` to the new city (even if another of the player's own cities
  *    owned it) and its `improvement` to null; set `cityId` on every tile
  *    within RULES.cityClaimRadius whose `cityId` is null (water and
@@ -106,14 +116,35 @@ import { startJob, stopJob } from './unitJob';
  *    (judged before any entry is looked at).
  *  - Any entry is not something a city can build (not an object, `kind` not
  *    'unit', `unitType` not a key of UNITS) -> 'cannotBuild'; nothing is stored.
+ *    ALL entries are looked at before the next check.
+ *  - buildItemError(state, city, item) (rules/city.ts) of the FIRST entry
+ *    that has one -> that code: 'noWaterForBoat' for a boat in a city that
+ *    owns no water tile. Nothing is stored. (So a queue with a boat for a
+ *    dry city AND an entry that is no item is 'cannotBuild', in either
+ *    order, and a stored queue that already holds such a boat is refused
+ *    when it is sent again unchanged.)
  *  - The same queue as now -> no-op. Otherwise the city's queue becomes a new
  *    list of new { kind, unitType } objects; productionStored is kept. No event.
+ *
+ * setCityFocus { cityId, focus }
+ *  - City missing or not owned -> 'noSuchCity'.
+ *  - `focus` is not a key of CITY_FOCUS (a real key) -> 'badAction': the two
+ *    values are a closed list, so anything else is a malformed action.
+ *  - The focus the city already has -> no-op. Otherwise the city's `focus`
+ *    is set and nothing else is touched: not the food store, not the
+ *    production store, not the queue. Nothing is paid. No event.
+ *  - The view built from the returned state shows the new worked tiles,
+ *    numbers and forecast at once; turn resolution reads the focus as it
+ *    stands when the turn resolves, so only the last press of a turn counts.
+ *  - Nobody else's view changes: the focus is in the owner's view only.
  *
  * startJob { unitId, improvement }
  *  - Unit missing or not owned -> 'noSuchUnit'.
  *  - The unit already has a job for this improvement -> no-op.
  *  - startJobError(state, unit, improvement) (rules/improvements.ts) is not
- *    null -> that code: 'cannotImprove', 'unitBusy', 'notYourLand',
+ *    null -> that code: 'cannotImprove' (no such improvement, or not one
+ *    this unit's type builds, UNITS[type].improvements: a Worker asked for
+ *    a net, a Fishing Boat asked for a farm), 'unitBusy', 'notYourLand',
  *    'cityOnTile', 'badImprovementTile', 'alreadyImproved', in this order.
  *  - Otherwise the unit's job becomes { improvement, turnsWorked: 0 }. Its
  *    moves are not touched. No event. The work itself is done by
@@ -164,6 +195,8 @@ export function applyAction(state: GameState, playerId: PlayerId, turn: number, 
       return foundCity(state, playerId, action);
     case 'setBuildQueue':
       return setBuildQueue(state, playerId, action);
+    case 'setCityFocus':
+      return setCityFocus(state, playerId, action);
     case 'startJob':
       return startJob(state, playerId, action);
     case 'stopJob':
@@ -183,8 +216,8 @@ export function applyAction(state: GameState, playerId: PlayerId, turn: number, 
 
 /**
  * Is this one of the known actions, with fields of the right basic kind (an
- * id is a string, a path is a list, a queue is a list, an improvement is a
- * string)?
+ * id is a string, a path is a list, a queue is a list, an improvement and a
+ * focus are strings)?
  *
  * The server checks the shape of every message before it gets here; this is
  * the engine's own safety net, so that nothing malformed can reach the
@@ -204,6 +237,8 @@ function isWellFormedAction(action: Action): boolean {
       return typeof fields.unitId === 'string';
     case 'setBuildQueue':
       return typeof fields.cityId === 'string' && Array.isArray(fields.queue);
+    case 'setCityFocus':
+      return typeof fields.cityId === 'string' && typeof fields.focus === 'string';
     case 'startJob':
       return typeof fields.unitId === 'string' && typeof fields.improvement === 'string';
     case 'stopJob':

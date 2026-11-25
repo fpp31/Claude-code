@@ -2,6 +2,7 @@
  * Health check for a game state (work package WP2).
  */
 
+import { CITY_FOCUS } from '../data/cityFocus';
 import { IMPROVEMENTS, improvementFits } from '../data/improvements';
 import { RULES } from '../data/rules';
 import { FEATURES, TERRAIN, tileMoveCost } from '../data/terrain';
@@ -28,16 +29,18 @@ import { computeVisible } from '../view/visibility';
  *  - at least 1 and at most RULES.maxSeats players, whose ids are seat names
  *    ('p1'..'p8') in ascending seat order, each at most once;
  *  - every unit: key equals id, known type, owner is a player, tile is on the
- *    map and passable, movesLeft is a whole number from 0 to its type's moves;
+ *    map and one its domain can enter (a land unit on land, a boat on
+ *    water), movesLeft is a whole number from 0 to its type's moves;
  *    `job` is there, and is null or a job for a known improvement with a
- *    whole number of 0 or more turns worked, held by a unit whose type can
- *    build improvements;
+ *    whole number of 0 or more turns worked, and for an improvement the
+ *    unit's type builds (UNITS[type].improvements);
  *  - stacking: no tile holds two units of the same class, or units of two
  *    different players;
  *  - every city: key equals id, owner is a player, tile is on the map,
  *    population >= 1, foodStored >= 0, productionStored >= 0, the city
  *    tile's `cityId` is this city and the tile carries no improvement, no
- *    other player's unit on the city tile;
+ *    other player's unit on the city tile; `focus` is there and is a key of
+ *    CITY_FOCUS;
  *  - every city's `buildQueue` is a list of at most RULES.maxQueueLength
  *    entries, each an object with exactly the two fields `kind` ('unit') and
  *    `unitType` (a key of UNITS); no city still carries the field
@@ -51,6 +54,9 @@ import { computeVisible } from '../view/visibility';
  * improvement is null or a known one.
  *
  * NOT checked, on purpose: that the first entry of a queue is affordable;
+ * that a queue holds no boat in a city that cannot build one (setBuildQueue
+ * keeps it out; in a save edited by hand the entry waits and the player
+ * removes it); that a boat's water leads anywhere;
  * that a job's tile is its owner's land (resolveTurn drops such a job, step
  * runJobs); that `turnsWorked` is less than the table's `turns` (the table
  * may be tuned under a running game).
@@ -163,8 +169,8 @@ function checkUnits(state: GameState, problems: string[]): void {
 
     if (!isValidTile(unit.tile, state.map)) {
       problems.push(`Unit ${key} stands on ${unit.tile}, which is not a tile of the map.`);
-    } else if (tileMoveCost(state.map.tiles[unit.tile]) === null) {
-      problems.push(`Unit ${key} stands on tile ${unit.tile}, which land units cannot enter.`);
+    } else if (hasKey(UNITS, unit.type) && tileMoveCost(state.map.tiles[unit.tile], UNITS[unit.type].domain) === null) {
+      problems.push(`Unit ${key} stands on tile ${unit.tile}, which a ${UNITS[unit.type].domain} unit cannot enter.`);
     }
 
     if (!hasKey(UNITS, unit.type)) {
@@ -197,8 +203,8 @@ function checkJob(key: string, unit: Unit, problems: string[]): void {
   if (!isWholeNumber(fields.turnsWorked) || fields.turnsWorked < 0) {
     problems.push(`Unit ${key} has worked ${String(fields.turnsWorked)} turns on its job, expected a whole number of 0 or more.`);
   }
-  if (hasKey(UNITS, unit.type) && !UNITS[unit.type].canImprove) {
-    problems.push(`Unit ${key} has a job, but a unit of the type '${unit.type}' cannot build improvements.`);
+  if (hasKey(UNITS, unit.type) && hasKey(IMPROVEMENTS, fields.improvement) && !UNITS[unit.type].improvements.some((id) => id === fields.improvement)) {
+    problems.push(`Unit ${key} has a job for a ${String(fields.improvement)}, which a unit of the type '${unit.type}' cannot build.`);
   }
 }
 
@@ -233,6 +239,7 @@ function checkCities(state: GameState, problems: string[]): void {
       problems.push(`City ${key} has ${city.productionStored} production stored, expected 0 or more.`);
     }
     checkBuildQueue(key, city, problems);
+    if (!hasKey(CITY_FOCUS, city.focus)) problems.push(`City ${key} has the unknown focus '${String(city.focus)}'.`);
 
     if (!isValidTile(city.tile, state.map)) {
       problems.push(`City ${key} stands on ${city.tile}, which is not a tile of the map.`);

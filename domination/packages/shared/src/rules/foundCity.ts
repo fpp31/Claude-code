@@ -7,6 +7,7 @@
  */
 
 import type { Action, ActionResult } from '../actions';
+import { DEFAULT_CITY_FOCUS } from '../data/cityFocus';
 import { cityNameFor } from '../data/civs';
 import { RULES } from '../data/rules';
 import { tilesInRange } from '../hex';
@@ -44,6 +45,7 @@ export function foundCity(state: GameState, playerId: PlayerId, action: FoundCit
     foodStored: 0,
     buildQueue: [],
     productionStored: 0,
+    focus: DEFAULT_CITY_FOCUS,
   };
 
   // Its land: the centre always (even if another of the player's own cities

@@ -3,7 +3,6 @@ import {
   FEATURES,
   FEATURE_IDS,
   IMPROVEMENTS,
-  IMPROVEMENT_IDS,
   RULES,
   TERRAIN_IDS,
   UNITS,
@@ -24,6 +23,7 @@ import {
   tileCount,
   tileIsWater,
   tileYields,
+  unitCanImprove,
   updateKnowledge,
 } from '../src/index';
 import type { TileView } from '../src/index';
@@ -216,10 +216,23 @@ describe('the sample view', () => {
     const rowTurns = own.buildQueue.map((row) => row.turns ?? 0);
     expect(rowTurns).toEqual([...rowTurns].sort((a, b) => a - b));
     expect(new Set(rowTurns).size).toBe(rowTurns.length);
-    for (const option of own.buildOptions) expect(option.turns).toBeGreaterThan(rowTurns[rowTurns.length - 1]);
-    // The menu is the unit table, in its order; the queue is not full, so everything can be added.
+    const landOptions = own.buildOptions.filter((option) => UNITS[option.item.unitType].domain === 'land');
+    const boatOptions = own.buildOptions.filter((option) => UNITS[option.item.unitType].domain === 'sea');
+    for (const option of landOptions) expect(option.turns).toBeGreaterThan(rowTurns[rowTurns.length - 1]);
+    // The menu is the unit table, in its order; the queue is not full, so every land unit can be added.
     expect(own.buildOptions.map((option) => option.item.unitType)).toEqual(UNIT_TYPE_IDS);
-    for (const option of own.buildOptions) expect(option.addError).toBeNull();
+    for (const option of landOptions) expect(option.addError).toBeNull();
+    // The sample's Rome owns no water (its 19 tiles are all land), so the demo page shows the
+    // two boats greyed, with the reason: no number, and "this city can never build that".
+    const romesLand = view.tiles.filter((tile) => tile !== null && tile.owner === 'p1');
+    expect(romesLand).toHaveLength(19);
+    expect(romesLand.some((tile) => tile !== null && tileIsWater(tile))).toBe(false);
+    expect(boatOptions.map((option) => option.item.unitType)).toEqual(['fishingBoat', 'scoutBoat']);
+    for (const option of boatOptions) {
+      expect([option.turns, option.wait, option.addError], option.item.unitType).toEqual([null, 'noRoom', 'noWaterForBoat']);
+    }
+    // The city is on Grow, as every new city is.
+    expect(own.focus).toBe('grow');
     // Nothing is held: the first entry is not even paid for.
     expect(own.held).toBeNull();
     expect(own.productionStored).toBeLessThan(own.buildQueue[0].cost);
@@ -290,12 +303,12 @@ describe('the sample view', () => {
     const worker = view.units.find((unit) => unit.type === 'worker');
     const own = worker?.own;
     if (worker === undefined || own === null || own === undefined || own.job === null) throw new Error('the sample view has lost its Worker at work');
-    expect(UNITS[worker.type].canImprove).toBe(true);
+    expect(UNITS[worker.type].improvements).toContain(own.job.improvement);
     expect(own.job).toEqual(jobView({ improvement: own.job.improvement, turnsWorked: own.job.turnsWorked }));
     expect(own.job.turnsWorked).toBeLessThan(own.job.turnsTotal);
     expect(improvementSiteError(siteInView(view, worker.tile), own.job.improvement)).toBeNull();
     // While it works, every option says so; the turns are the table's.
-    expect(own.jobOptions).toEqual(IMPROVEMENT_IDS.map((improvement) => ({
+    expect(own.jobOptions).toEqual(UNITS[worker.type].improvements.map((improvement) => ({
       improvement, turns: IMPROVEMENTS[improvement].turns, error: 'unitBusy',
     })));
     expect(own.foundCityError).toBe('cannotFoundCity');
@@ -303,7 +316,7 @@ describe('the sample view', () => {
     // Units that cannot build carry no job and no options; the foreign unit carries nothing at all.
     for (const unit of view.units) {
       if (unit.own === null) continue;
-      if (UNITS[unit.type].canImprove) continue;
+      if (unitCanImprove(unit.type)) continue;
       expect(unit.own.job, unit.id).toBeNull();
       expect(unit.own.jobOptions, unit.id).toEqual([]);
     }

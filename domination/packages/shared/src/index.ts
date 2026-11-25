@@ -10,6 +10,7 @@
 export * from './data/terrain';
 export * from './data/units';
 export * from './data/improvements';
+export * from './data/cityFocus';
 export * from './data/civs';
 export * from './data/rules';
 

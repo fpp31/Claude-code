@@ -11,6 +11,7 @@ import {
   pathTo,
   reachableTiles,
   tileCount,
+  tileIsWater,
   tileMoveCost,
 } from '../src/index';
 import type { Action, GameState, TileIndex, Unit } from '../src/index';
@@ -83,7 +84,8 @@ describe('applyAction: moveUnit (WP2)', () => {
       scoutId = placeUnit(draft, 'p1', 'scout', at(map, 2, 2)).id;
     });
     const intoForest = act(withScout, 'p1', { type: 'moveUnit', unitId: scoutId, path: [at(map, 3, 2)] });
-    expect(intoForest.units[scoutId].movesLeft).toBe(UNITS.scout.moves - (tileMoveCost(map.tiles[at(map, 3, 2)]) as number));
+    expect(intoForest.units[scoutId].movesLeft).toBe(UNITS.scout.moves - (tileMoveCost(map.tiles[at(map, 3, 2)], 'land') as number));
+    expect(tileMoveCost(map.tiles[at(map, 3, 2)], 'land')).toBe(2);
     const beyond = act(withScout, 'p1', { type: 'moveUnit', unitId: scoutId, path: [at(map, 3, 2), at(map, 4, 2)] });
     expect(beyond.units[scoutId].tile).toBe(at(map, 4, 2));
     expect(beyond.units[scoutId].movesLeft).toBe(0);
@@ -538,7 +540,7 @@ describe('movement rules: canEnterTile, reachableTiles and the two boards (WP2)'
     // A tile two steps away that can be reached through the forest or through open grass.
     const target = stepFrom(map, forest, SOUTH_EAST);
     expect(stepFrom(map, grassSouthEast, EAST)).toBe(target);
-    expect(tileMoveCost(map.tiles[target])).toBe(1);
+    expect(tileMoveCost(map.tiles[target], 'land')).toBe(1);
 
     const scout = { owner: 'p1', type: 'scout' as const, tile: origin, movesLeft: UNITS.scout.moves };
     const empty = arrange(start, (draft) => {
@@ -594,7 +596,7 @@ describe('movement rules: canEnterTile, reachableTiles and the two boards (WP2)'
         // Only known, enterable tiles without somebody else's unit or city.
         const ground = view.tiles[tile];
         expect(ground).not.toBeNull();
-        if (ground !== null) expect(tileMoveCost(ground)).not.toBeNull();
+        if (ground !== null) expect(tileMoveCost(ground, UNITS[unit.type].domain)).not.toBeNull();
         expect(view.units.some((other) => other.tile === tile && other.owner !== unit.owner)).toBe(false);
         expect(view.cities.some((city) => city.tile === tile && city.owner !== unit.owner)).toBe(false);
         expect(step.movesLeft).toBeGreaterThanOrEqual(0);
@@ -657,5 +659,315 @@ describe('movement rules: canEnterTile, reachableTiles and the two boards (WP2)'
       }
     }
     expect(tried).toBeGreaterThan(30);
+  });
+});
+
+describe('boats: sea units move on water only (round 3)', () => {
+  /**
+   * Land in the north, the sea in the south, 16 x 11. Rows 1 to 3 are
+   * grassland with one mountain on the shore at (7, 3); rows 4 and 5 are
+   * coast; everything below is open ocean. p1 starts on the shore at
+   * (3, 3), p2 at (12, 3), nine tiles apart and out of each other's sight.
+   *
+   * Row 3 is an odd row: the tile (x, 3) touches the coast tiles (x, 4) to
+   * its south-west and (x + 1, 4) to its south-east.
+   */
+  const SEASIDE: readonly string[] = [
+    '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+    ' ~ g g g g g g g g g g g g g g ~',
+    '~ g g g g g g g g g g g g g g ~',
+    ' ~ g g g g g g m g g g g g g g ~',
+    '~ , , , , , , , , , , , , , , ~',
+    ' ~ , , , , , , , , , , , , , , ~',
+    '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+    ' ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+    '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+    ' ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+    '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+  ];
+
+  function seasideGame(): GameState {
+    return newGame(SEASIDE, [[3, 3], [12, 3]]);
+  }
+
+  /** A copy of the state with one more boat, and that boat as it stands in the copy. */
+  function withBoat(state: GameState, owner: 'p1' | 'p2', type: 'fishingBoat' | 'scoutBoat', tile: TileIndex): { state: GameState; boat: Unit } {
+    let id = '';
+    const ready = arrange(state, (draft) => {
+      id = placeUnit(draft, owner, type, tile).id;
+    });
+    return { state: ready, boat: ready.units[id] };
+  }
+
+  it('a boat moves over coast and ocean for 1 each and stops before land (impassable), on a hand-drawn map', () => {
+    const start = seasideGame();
+    const map = start.map;
+    // The drawing is what the test says it is.
+    expect(map.tiles[at(map, 3, 4)].terrain).toBe('coast');
+    expect(map.tiles[at(map, 3, 5)].terrain).toBe('coast');
+    expect(map.tiles[at(map, 3, 6)].terrain).toBe('ocean');
+    expect(tileMoveCost(map.tiles[at(map, 3, 4)], 'sea')).toBe(1);
+    expect(tileMoveCost(map.tiles[at(map, 3, 6)], 'sea')).toBe(1);
+
+    // A Fishing Boat (2 moves): one step over coast costs 1; coast and then ocean use up both.
+    const fishing = withBoat(start, 'p1', 'fishingBoat', at(map, 3, 4));
+    const coast = stepFrom(map, fishing.boat.tile, SOUTH_EAST);
+    const ocean = stepFrom(map, coast, SOUTH_EAST);
+    expect([coast, ocean]).toEqual([at(map, 3, 5), at(map, 4, 6)]);
+    expect(map.tiles[ocean].terrain).toBe('ocean');
+    const oneStep = act(fishing.state, 'p1', move(fishing.boat, [coast]));
+    expect(oneStep.units[fishing.boat.id]).toMatchObject({ tile: coast, movesLeft: UNITS.fishingBoat.moves - 1 });
+    const twoSteps = actWithEvents(fishing.state, 'p1', move(fishing.boat, [coast, ocean]));
+    expect(twoSteps.state.units[fishing.boat.id]).toMatchObject({ tile: ocean, movesLeft: 0 });
+    expect(twoSteps.events).toEqual([
+      { to: ['p1'], event: { type: 'unitMoved', playerId: 'p1', unitId: fishing.boat.id, from: fishing.boat.tile, path: [coast, ocean], stoppedEarly: false } },
+    ]);
+    // Nothing else of the boat changed, and nothing of any other unit.
+    expect(twoSteps.state.units[fishing.boat.id]).toEqual({ ...fishing.boat, tile: ocean, movesLeft: 0 });
+    for (const unit of Object.values(fishing.state.units)) {
+      if (unit.id !== fishing.boat.id) expect(twoSteps.state.units[unit.id]).toEqual(unit);
+    }
+
+    // It stops before land: the first step is refused, a later one ends the walk on the water.
+    const ashore = stepFrom(map, fishing.boat.tile, NORTH_EAST);
+    expect(ashore).toBe(at(map, 3, 3));
+    expect(refusal(fishing.state, 'p1', move(fishing.boat, [ashore]))).toBe('impassable');
+    const east = stepFrom(map, fishing.boat.tile, EAST);
+    const landBeyond = stepFrom(map, east, NORTH_EAST);
+    expect(tileIsWater(map.tiles[landBeyond])).toBe(false);
+    const halted = actWithEvents(fishing.state, 'p1', move(fishing.boat, [east, landBeyond]));
+    expect(halted.state.units[fishing.boat.id]).toMatchObject({ tile: east, movesLeft: 1 });
+    expect(halted.events[0].event).toMatchObject({ path: [east], stoppedEarly: true });
+  });
+
+  it('a land unit is refused water, a boat is refused land, a city and mountains: impassable for the first step, a shorter walk for a later one; impassable comes before blocked for a boat sent onto a city', () => {
+    const start = seasideGame();
+    const map = start.map;
+    const warrior = unitOf(start, 'p1', 'warrior');
+    const home = at(map, 3, 3);
+    expect(warrior.tile).toBe(home);
+
+    // A land unit and water: the first step, and a later one.
+    expect(refusal(start, 'p1', move(warrior, [at(map, 3, 4)]))).toBe('impassable');
+    const alongTheShore = stepFrom(map, home, EAST);
+    const wet = actWithEvents(start, 'p1', move(warrior, [alongTheShore, stepFrom(map, alongTheShore, SOUTH_EAST)]));
+    expect(wet.state.units[warrior.id]).toMatchObject({ tile: alongTheShore, movesLeft: 1 });
+    expect(wet.events[0].event).toMatchObject({ path: [alongTheShore], stoppedEarly: true });
+
+    // A boat and open land.
+    const fishing = withBoat(start, 'p1', 'fishingBoat', at(map, 5, 4));
+    expect(refusal(fishing.state, 'p1', move(fishing.boat, [at(map, 5, 3)]))).toBe('impassable');
+    expect(refusal(fishing.state, 'p1', move(fishing.boat, [at(map, 4, 3)]))).toBe('impassable');
+
+    // A boat and mountains: land that lets nobody in. First step, and a later one.
+    const mountain = at(map, 7, 3);
+    expect(map.tiles[mountain].feature).toBe('mountains');
+    const underTheMountain = withBoat(start, 'p1', 'scoutBoat', at(map, 7, 4));
+    expect(stepFrom(map, underTheMountain.boat.tile, NORTH_EAST)).toBe(mountain);
+    expect(refusal(underTheMountain.state, 'p1', move(underTheMountain.boat, [mountain]))).toBe('impassable');
+    const scouting = withBoat(start, 'p1', 'scoutBoat', at(map, 6, 4));
+    const climbing = actWithEvents(scouting.state, 'p1', move(scouting.boat, [at(map, 7, 4), mountain, at(map, 8, 4)]));
+    expect(climbing.state.units[scouting.boat.id]).toMatchObject({ tile: at(map, 7, 4), movesLeft: UNITS.scoutBoat.moves - 1 });
+    expect(climbing.events[0].event).toMatchObject({ path: [at(map, 7, 4)], stoppedEarly: true });
+
+    // A boat and its owner's own city: a city stands on land, so no boat is ever in one.
+    const settled = act(start, 'p1', { type: 'foundCity', unitId: unitOf(start, 'p1', 'settler').id });
+    const atHome = withBoat(settled, 'p1', 'fishingBoat', at(map, 3, 4));
+    expect(refusal(atHome.state, 'p1', move(atHome.boat, [home]))).toBe('impassable');
+    expect(canEnterTile(boardFromState(atHome.state), { owner: 'p1', type: 'fishingBoat' }, home)).toBe('impassable');
+    // (A land unit of the owner walks in: the Warrior stands there.)
+    expect(canEnterTile(boardFromState(atHome.state), { owner: 'p1', type: 'settler' }, home)).toBeNull();
+
+    // A boat and ANOTHER player's city, with that player's Warrior in it:
+    // three reasons at once, and the ground is named first. 'blocked' would
+    // tell a boat's owner nothing a land unit's owner is not told, but the
+    // order is the documented one (rule M4) and the page's words follow it.
+    const foreign = act(settled, 'p2', { type: 'foundCity', unitId: unitOf(settled, 'p2', 'settler').id });
+    const thebes = at(map, 12, 3);
+    expect(foreign.cities[Object.keys(foreign.cities)[1]]).toMatchObject({ owner: 'p2', tile: thebes });
+    expect(unitOf(foreign, 'p2', 'warrior').tile).toBe(thebes);
+    const visitor = withBoat(foreign, 'p1', 'scoutBoat', at(map, 12, 4));
+    expect(stepFrom(map, visitor.boat.tile, NORTH_EAST)).toBe(thebes);
+    expect(refusal(visitor.state, 'p1', move(visitor.boat, [thebes]))).toBe('impassable');
+    expect(canEnterTile(boardFromState(visitor.state), { owner: 'p1', type: 'scoutBoat' }, thebes)).toBe('impassable');
+    // The same tile for a land unit of p1 is 'blocked', as it always was.
+    expect(canEnterTile(boardFromState(visitor.state), { owner: 'p1', type: 'warrior' }, thebes)).toBe('blocked');
+    // As a later step the city ends the walk on the water in front of it.
+    const approaching = withBoat(foreign, 'p1', 'scoutBoat', at(map, 10, 4));
+    const stopped = actWithEvents(approaching.state, 'p1', move(approaching.boat, [at(map, 11, 4), at(map, 12, 4), thebes]));
+    expect(stopped.state.units[approaching.boat.id]).toMatchObject({ tile: at(map, 12, 4), movesLeft: UNITS.scoutBoat.moves - 2 });
+    expect(stopped.events[0].event).toMatchObject({ path: [at(map, 11, 4), at(map, 12, 4)], stoppedEarly: true });
+    // Borders do not stop boats (rule M8): the water in front of Thebes is p2's, and the boat is on it.
+    expect(stopped.state.map.tiles[at(map, 12, 4)].cityId).toBe(foreign.map.tiles[thebes].cityId);
+
+    // Water the boat's owner has never seen is unknown ground to the page's board, and unknown is impassable.
+    const view = buildPlayerView(visitor.state, 'p1');
+    const neverSeen = at(map, 1, 10);
+    expect(view.tiles[neverSeen]).toBeNull();
+    expect(canEnterTile(boardFromView(view), { owner: 'p1', type: 'scoutBoat' }, neverSeen)).toBe('impassable');
+    expect(canEnterTile(boardFromState(visitor.state), { owner: 'p1', type: 'scoutBoat' }, neverSeen)).toBeNull();
+  });
+
+  it('reachableTiles of a boat holds water tiles only, and of a land unit land tiles only; the reach from the view equals the reach from the truth', () => {
+    const start = seasideGame();
+    const map = start.map;
+    // p1: the Settler and the Warrior on the shore, a Fishing Boat next to them and a Scout Boat out on the open sea.
+    const busy = arrange(start, (draft) => {
+      placeUnit(draft, 'p1', 'fishingBoat', at(map, 3, 4));
+      placeUnit(draft, 'p1', 'scoutBoat', at(map, 7, 6));
+      placeUnit(draft, 'p2', 'fishingBoat', at(map, 6, 5)); // in the Scout Boat's way
+    });
+    const view = buildPlayerView(busy, 'p1');
+    const tried: Record<string, number> = {};
+
+    for (const unit of view.units) {
+      if (unit.own === null) continue;
+      const mover = { owner: unit.owner, type: unit.type, tile: unit.tile, movesLeft: unit.own.movesLeft };
+      const fromView = reachableTiles(boardFromView(view), mover);
+      // Every unit sees at least as far as it moves, so the page's board and the truth agree completely.
+      const fromTruth = reachableTiles(boardFromState(busy), mover);
+      expect([...fromView.entries()], unit.type).toEqual([...fromTruth.entries()]);
+      expect(fromView.size, unit.type).toBeGreaterThan(0);
+
+      const boat = UNITS[unit.type].domain === 'sea';
+      for (const [target, step] of fromView) {
+        expect(tileIsWater(map.tiles[target]), `${unit.type} reaches tile ${target}`).toBe(boat);
+        // The server accepts the page's route to every lit tile, with the predicted moves left.
+        const path = pathTo(fromView, target) as TileIndex[];
+        const result = actWithEvents(busy, 'p1', { type: 'moveUnit', unitId: unit.id, path });
+        expect(result.state.units[unit.id]).toMatchObject({ tile: target, movesLeft: step.movesLeft });
+        expect(result.events[0].event).toMatchObject({ path, stoppedEarly: false });
+        tried[unit.type] = (tried[unit.type] ?? 0) + 1;
+      }
+      // And a neighbor that is not lit is refused.
+      for (const neighbor of neighbors(unit.tile, map)) {
+        if (fromView.has(neighbor)) continue;
+        expect(refusal(busy, 'p1', { type: 'moveUnit', unitId: unit.id, path: [neighbor] }), `${unit.type} to ${neighbor}`).not.toBeNull();
+      }
+    }
+
+    // All water costs 1, so a Scout Boat on the open sea reaches every water
+    // tile within four steps but the one a foreign boat stands on (there is
+    // room to sail around it); a Fishing Boat every water tile within two.
+    const waterWithin = (from: TileIndex, range: number): TileIndex[] =>
+      map.tiles.map((_, tile) => tile).filter((tile) => tile !== from && distance(from, tile, map) <= range && tileIsWater(map.tiles[tile]));
+    const scoutBoat = unitOf(busy, 'p1', 'scoutBoat');
+    const scoutReach = [...reachableTiles(boardFromState(busy), scoutBoat).keys()].sort((a, b) => a - b);
+    expect(scoutReach).toEqual(waterWithin(scoutBoat.tile, 4).filter((tile) => tile !== at(map, 6, 5)));
+    const fishingBoat = unitOf(busy, 'p1', 'fishingBoat');
+    expect([...reachableTiles(boardFromState(busy), fishingBoat).keys()].sort((a, b) => a - b)).toEqual(waterWithin(fishingBoat.tile, 2));
+    // The two land units, from the shore: every land tile within two steps (open grassland costs 1), and no water.
+    const home = unitOf(busy, 'p1', 'warrior').tile;
+    const landWithinTwo = map.tiles.map((_, tile) => tile).filter((tile) => tile !== home && distance(home, tile, map) <= 2 && !tileIsWater(map.tiles[tile]));
+    expect([...reachableTiles(boardFromState(busy), unitOf(busy, 'p1', 'warrior')).keys()].sort((a, b) => a - b)).toEqual(landWithinTwo);
+    expect(tried).toEqual({
+      warrior: landWithinTwo.length,
+      settler: landWithinTwo.length,
+      fishingBoat: waterWithin(fishingBoat.tile, 2).length,
+      scoutBoat: scoutReach.length,
+    });
+    expect([landWithinTwo.length, waterWithin(fishingBoat.tile, 2).length, scoutReach.length]).toEqual([11, 11, 48]);
+  });
+
+  it('a Scout Boat and a Fishing Boat of one player share a water tile; two Fishing Boats do not (blocked); a foreign boat blocks, and a move that meets it later stops early', () => {
+    const start = seasideGame();
+    const map = start.map;
+    const berth = at(map, 3, 4);
+    const east = at(map, 4, 4);
+    const furtherEast = at(map, 5, 4);
+
+    // The two classes share: a Scout Boat (military) sails onto the Fishing Boat's (civilian) tile, and the other way round.
+    let fishingId = '';
+    let scoutId = '';
+    const two = arrange(start, (draft) => {
+      fishingId = placeUnit(draft, 'p1', 'fishingBoat', berth).id;
+      scoutId = placeUnit(draft, 'p1', 'scoutBoat', east).id;
+    });
+    const together = act(two, 'p1', { type: 'moveUnit', unitId: scoutId, path: [berth] });
+    expect([together.units[fishingId].tile, together.units[scoutId].tile]).toEqual([berth, berth]);
+    const joined = act(two, 'p1', { type: 'moveUnit', unitId: fishingId, path: [east] });
+    expect([joined.units[fishingId].tile, joined.units[scoutId].tile]).toEqual([east, east]);
+
+    // Two of one class do not: as a first step refused, as a later step the end of the walk.
+    let secondId = '';
+    const twins = arrange(two, (draft) => {
+      secondId = placeUnit(draft, 'p1', 'fishingBoat', furtherEast).id;
+      draft.units[scoutId].tile = at(map, 9, 6); // out of the way
+    });
+    expect(refusal(twins, 'p1', { type: 'moveUnit', unitId: secondId, path: [east, berth] })).toBeNull();
+    const behind = actWithEvents(twins, 'p1', { type: 'moveUnit', unitId: secondId, path: [east, berth] });
+    expect(behind.state.units[secondId]).toMatchObject({ tile: east, movesLeft: 1 });
+    expect(behind.events[0].event).toMatchObject({ path: [east], stoppedEarly: true });
+    expect(refusal(behind.state, 'p1', { type: 'moveUnit', unitId: secondId, path: [berth] })).toBe('blocked');
+    let otherScoutId = '';
+    const scouts = arrange(two, (draft) => {
+      otherScoutId = placeUnit(draft, 'p1', 'scoutBoat', furtherEast).id;
+    });
+    expect(refusal(scouts, 'p1', { type: 'moveUnit', unitId: otherScoutId, path: [east] })).toBe('blocked');
+
+    // Another player's boat blocks both classes, whatever its own class.
+    for (const foreignType of ['fishingBoat', 'scoutBoat'] as const) {
+      const met = arrange(two, (draft) => {
+        placeUnit(draft, 'p2', foreignType, furtherEast);
+        draft.units[fishingId].tile = at(map, 5, 5); // next to the foreign boat too
+      });
+      expect(refusal(met, 'p1', { type: 'moveUnit', unitId: scoutId, path: [furtherEast] }), foreignType).toBe('blocked');
+      expect(refusal(met, 'p1', { type: 'moveUnit', unitId: fishingId, path: [furtherEast] }), foreignType).toBe('blocked');
+      expect(canEnterTile(boardFromState(met), { owner: 'p1', type: 'scoutBoat' }, furtherEast)).toBe('blocked');
+    }
+
+    // A move that meets a foreign boat on a later step stops in front of it and keeps the moves it did not spend.
+    const strait = arrange(start, (draft) => {
+      scoutId = placeUnit(draft, 'p1', 'scoutBoat', berth).id;
+      placeUnit(draft, 'p2', 'fishingBoat', furtherEast);
+    });
+    const halted = actWithEvents(strait, 'p1', { type: 'moveUnit', unitId: scoutId, path: [east, furtherEast, at(map, 6, 4)] });
+    expect(halted.state.units[scoutId]).toMatchObject({ tile: east, movesLeft: UNITS.scoutBoat.moves - 1 });
+    expect(halted.events[0].event).toMatchObject({ path: [east], stoppedEarly: true });
+  });
+
+  it('a boat that sails explores: its owner\'s knowledge grows along the way; a Scout Boat goes 4 tiles and sees 4', () => {
+    expect([UNITS.scoutBoat.moves, UNITS.scoutBoat.sight]).toEqual([4, 4]);
+    const start = seasideGame();
+    const map = start.map;
+    const origin = at(map, 3, 5);
+    const scout = withBoat(start, 'p1', 'scoutBoat', origin);
+    const row = (x: number): TileIndex => at(map, x, 5);
+
+    // Out two tiles and back again: the tile furthest east was in sight only from the turning point.
+    const farEast = row(3 + 2 + UNITS.scoutBoat.sight);
+    expect(distance(row(5), farEast, map)).toBe(UNITS.scoutBoat.sight);
+    expect(distance(row(4), farEast, map)).toBeGreaterThan(UNITS.scoutBoat.sight);
+    expect(scout.state.players[0].knowledge.explored[farEast]).toBe(0);
+    const thereAndBack = act(scout.state, 'p1', move(scout.boat, [row(4), row(5), row(4), origin]));
+    expect(thereAndBack.units[scout.boat.id]).toMatchObject({ tile: origin, movesLeft: 0 });
+    expect(thereAndBack.players[0].knowledge.explored[farEast]).toBe(1);
+    expect(buildPlayerView(thereAndBack, 'p1').tiles[farEast]).toMatchObject({ terrain: 'coast', visible: false });
+    // The other player learnt nothing from it.
+    expect(thereAndBack.players[1].knowledge).toEqual(scout.state.players[1].knowledge);
+
+    // Four tiles in one turn, and not a fifth.
+    const fourEast = [row(4), row(5), row(6), row(7)];
+    const sailed = actWithEvents(scout.state, 'p1', move(scout.boat, [...fourEast, row(8)]));
+    expect(sailed.state.units[scout.boat.id]).toMatchObject({ tile: row(7), movesLeft: 0 });
+    expect(sailed.events[0].event).toMatchObject({ path: fourEast, stoppedEarly: true });
+    const whole = actWithEvents(scout.state, 'p1', move(scout.boat, fourEast));
+    expect(whole.events[0].event).toMatchObject({ path: fourEast, stoppedEarly: false });
+
+    // From where it lies now it sees every tile within four, land and water alike; more tiles are known than before.
+    const view = buildPlayerView(sailed.state, 'p1');
+    const inSight = map.tiles.map((_, tile) => tile).filter((tile) => distance(row(7), tile, map) <= UNITS.scoutBoat.sight);
+    expect(inSight.length).toBeGreaterThan(50);
+    for (const tile of inSight) expect(view.tiles[tile], `tile ${tile}`).toMatchObject({ visible: true });
+    const justOutOfSight = row(7 + UNITS.scoutBoat.sight + 1);
+    expect(view.tiles[justOutOfSight]).toBeNull();
+    const known = (state: GameState): number => state.players[0].knowledge.explored.filter((entry) => entry === 1).length;
+    expect(known(sailed.state)).toBeGreaterThan(known(scout.state));
+    // A Fishing Boat sees and moves two.
+    expect([UNITS.fishingBoat.moves, UNITS.fishingBoat.sight]).toEqual([2, 2]);
+    const fishing = withBoat(start, 'p1', 'fishingBoat', at(map, 9, 8));
+    const fishingView = buildPlayerView(fishing.state, 'p1');
+    expect(fishingView.tiles[at(map, 11, 8)]).toMatchObject({ visible: true });
+    expect(fishingView.tiles[at(map, 12, 8)]).toBeNull();
   });
 });

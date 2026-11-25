@@ -1,4 +1,5 @@
 import {
+  CITY_FOCUS_IDS,
   CIV_IDS,
   GAME_CODE_ALPHABET,
   GAME_CODE_LENGTH,
@@ -50,6 +51,7 @@ const VALID_MESSAGES: ClientMessage[] = [
     turn: 3,
     action: { type: 'setBuildQueue', cityId: 'c1_r6wz2e', queue: queueOf(RULES.maxQueueLength + 1) },
   },
+  { type: 'action', requestId: 9, turn: 3, action: { type: 'setCityFocus', cityId: 'c1_r6wz2e', focus: 'build' } },
   { type: 'action', requestId: 7, turn: 4, action: { type: 'startJob', unitId: 'u1_m4wq7e', improvement: 'farm' } },
   { type: 'action', requestId: 8, turn: 4, action: { type: 'stopJob', unitId: 'u1_m4wq7e' } },
   { type: 'action', requestId: 4, turn: 9, action: { type: 'endTurn' } },
@@ -100,6 +102,13 @@ const STOP_JOB: ClientMessage = {
   requestId: 1,
   turn: 1,
   action: { type: 'stopJob', unitId: 'u1_m4wq7e' },
+};
+/** A press on "Build first" (round 3). */
+const FOCUS: ClientMessage = {
+  type: 'action',
+  requestId: 1,
+  turn: 1,
+  action: { type: 'setCityFocus', cityId: 'c1_r6wz2e', focus: 'build' },
 };
 /** What a phase 1 page would still send. The action no longer exists. */
 const SET_PRODUCTION = {
@@ -197,7 +206,7 @@ describe('tokens, codes and parsing (WP3)', () => {
     // And every action type of the game (the compiler checks the reverse here too).
     const actionTypes = new Set(VALID_MESSAGES.flatMap((message) => (message.type === 'action' ? [message.action.type] : [])));
     expect([...actionTypes].sort()).toEqual(
-      ['cancelEndTurn', 'endTurn', 'foundCity', 'moveUnit', 'setBuildQueue', 'startJob', 'stopJob'],
+      ['cancelEndTurn', 'endTurn', 'foundCity', 'moveUnit', 'setBuildQueue', 'setCityFocus', 'startJob', 'stopJob'],
     );
     // Every id of the tables is accepted, and the longest allowed path.
     for (const civ of CIV_IDS) expect(parseClientMessage(JSON.stringify({ type: 'chooseCiv', civ }))).not.toBeNull();
@@ -373,6 +382,60 @@ describe('tokens, codes and parsing (WP3)', () => {
     }
   });
 
+  it('parseClientMessage accepts setCityFocus with each id of the table and refuses an unknown focus, a missing one, a number, a long city id', () => {
+    // Each way of the table, and nothing but the three fields comes out.
+    expect(CITY_FOCUS_IDS).toEqual(['grow', 'build']);
+    for (const focus of CITY_FOCUS_IDS) {
+      const text = withField(FOCUS, ['action', 'focus'], focus);
+      expect(parseClientMessage(text), focus).toStrictEqual({
+        type: 'action',
+        requestId: 1,
+        turn: 1,
+        action: { type: 'setCityFocus', cityId: 'c1_r6wz2e', focus },
+      });
+    }
+    // The longest id there is, and the shortest: whether there is such a city is the rules' answer.
+    for (const cityId of ['c'.repeat(32), '']) {
+      expect(parseClientMessage(withField(FOCUS, ['action', 'cityId'], cityId)), `a city id of ${cityId.length} characters`).not.toBeNull();
+    }
+
+    const bad: [what: string, text: string][] = [
+      // The focus: a word the table does not have, in any spelling...
+      ['an unknown focus', withField(FOCUS, ['action', 'focus'], 'fast')],
+      ['a name instead of an id', withField(FOCUS, ['action', 'focus'], 'Build first')],
+      ['another case', withField(FOCUS, ['action', 'focus'], 'Build')],
+      ['a space behind it', withField(FOCUS, ['action', 'focus'], 'build ')],
+      ['an empty word', withField(FOCUS, ['action', 'focus'], '')],
+      // ...a word every JavaScript object answers to...
+      ['"constructor"', withField(FOCUS, ['action', 'focus'], 'constructor')],
+      ['"toString"', withField(FOCUS, ['action', 'focus'], 'toString')],
+      ['"__proto__"', withField(FOCUS, ['action', 'focus'], '__proto__')],
+      // ...no focus at all, or something that is no word.
+      ['a missing focus', withField(FOCUS, ['action', 'focus'], undefined)],
+      ['null', withField(FOCUS, ['action', 'focus'], null)],
+      ['a number', withField(FOCUS, ['action', 'focus'], 1)],
+      ['zero', withField(FOCUS, ['action', 'focus'], 0)],
+      ['true', withField(FOCUS, ['action', 'focus'], true)],
+      ['a list', withField(FOCUS, ['action', 'focus'], ['build'])],
+      ['an object', withField(FOCUS, ['action', 'focus'], { focus: 'build' })],
+      // The city id.
+      ['a long city id', withField(FOCUS, ['action', 'cityId'], 'c'.repeat(33))],
+      ['a missing city id', withField(FOCUS, ['action', 'cityId'], undefined)],
+      ['a city id that is a number', withField(FOCUS, ['action', 'cityId'], 7)],
+      ['a city id that is null', withField(FOCUS, ['action', 'cityId'], null)],
+      ['a city id that is a list', withField(FOCUS, ['action', 'cityId'], ['c1_r6wz2e'])],
+      // A focus that only the object's parent has is not the message's own.
+      ['a focus inherited from "__proto__"', '{"type":"action","requestId":1,"turn":1,"action":{"type":"setCityFocus","cityId":"c1_a","__proto__":{"focus":"build"}}}'],
+      // The name of the action, misspelt: there is no such action.
+      ['"setFocus"', withField(FOCUS, ['action', 'type'], 'setFocus')],
+      ['"setcityfocus"', withField(FOCUS, ['action', 'type'], 'setcityfocus')],
+    ];
+    for (const [what, text] of bad) {
+      expect(() => parseClientMessage(text), what).not.toThrow();
+      expect(parseClientMessage(text), what).toBeNull();
+    }
+  });
+
   it('parseClientMessage never throws, whatever it is given', () => {
     const nasty = [
       '\u0000',
@@ -384,6 +447,7 @@ describe('tokens, codes and parsing (WP3)', () => {
       '{"type":"action","requestId":1,"turn":1,"action":{"type":"setBuildQueue","cityId":"c1_a","queue":[{"__proto__":{"kind":"unit","unitType":"warrior"}}]}}',
       '{"type":"action","requestId":1,"turn":1,"action":{"type":"setBuildQueue","cityId":"c1_a","queue":{"length":1e999}}}',
       '{"type":"action","requestId":1,"turn":1,"action":{"type":"startJob","unitId":"u1_a","improvement":{"valueOf":null}}}',
+      '{"type":"action","requestId":1,"turn":1,"action":{"type":"setCityFocus","cityId":"c1_a","focus":{"toString":null}}}',
       `{"type":"action","requestId":1,"turn":1,"action":{"type":"setBuildQueue","cityId":"c1_a","queue":[${'{"kind":"unit","unitType":"warrior"},'.repeat(20_000)}null]}}`,
     ];
     for (const text of nasty) {
@@ -425,6 +489,10 @@ describe('tokens, codes and parsing (WP3)', () => {
       [
         '{"type":"action","requestId":1,"turn":2,"action":{"type":"stopJob","unitId":"u1_a","improvement":"mine","keepProgress":true}}',
         { type: 'action', requestId: 1, turn: 2, action: { type: 'stopJob', unitId: 'u1_a' } },
+      ],
+      [
+        '{"type":"action","requestId":1,"turn":2,"action":{"type":"setCityFocus","cityId":"c1_a","focus":"build","owner":"p2","worked":[5,6],"foodStored":99,"population":9}}',
+        { type: 'action', requestId: 1, turn: 2, action: { type: 'setCityFocus', cityId: 'c1_a', focus: 'build' } },
       ],
       ['{"type":"action","requestId":1,"turn":2,"action":{"type":"endTurn","playerId":"p2"}}', {
         type: 'action',

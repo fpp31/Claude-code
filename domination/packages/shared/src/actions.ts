@@ -6,6 +6,7 @@
  * the connection and passes that player id to the rules engine.
  */
 
+import type { CityFocusId } from './data/cityFocus';
 import type { ImprovementId } from './data/improvements';
 import type { UnitTypeId } from './data/units';
 import type { BuildItem, CityId, GameState, PlayerId, TileIndex, UnitId } from './types';
@@ -32,6 +33,13 @@ export type Action =
    * applyAction for the checks.
    */
   | { type: 'setBuildQueue'; cityId: CityId; queue: BuildItem[] }
+  /**
+   * Choose how a city places its citizens: 'grow' or 'build' (CITY_FOCUS in
+   * data/cityFocus.ts). The view that comes back shows the new worked
+   * tiles, numbers and forecast; the turn that resolves next uses it. See
+   * applyAction.
+   */
+  | { type: 'setCityFocus'; cityId: CityId; focus: CityFocusId }
   /**
    * Begin building an improvement on the tile the unit stands on. The work
    * takes IMPROVEMENTS[improvement].turns turn resolutions; the unit stays
@@ -61,7 +69,7 @@ export type RuleErrorCode =
   /** The path is empty, too long, leaves the map or has a step that is not to an adjacent tile. */
   | 'badPath'
   | 'noMovesLeft'
-  /** Water, mountains or an unknown tile. */
+  /** A tile this unit cannot enter (a land unit: water, mountains; a boat: land), or an unknown tile. */
   | 'impassable'
   /** Another player's unit or city is there, or one of your own units of the same class. */
   | 'blocked'
@@ -76,7 +84,9 @@ export type RuleErrorCode =
   | 'cannotBuild'
   /** The build queue would be longer than RULES.maxQueueLength. (Reachable over the wire: the server's message check lets up to 64 entries through.) */
   | 'queueFull'
-  /** This unit type cannot build improvements, or there is no such improvement. */
+  /** A boat was asked of a city that owns no water tile: it has nowhere to put one, now or later. */
+  | 'noWaterForBoat'
+  /** This unit type cannot build that improvement (a Worker a net, a Fishing Boat a farm, a Warrior anything), or there is no such improvement. */
   | 'cannotImprove'
   /** The unit has a job: it cannot move, or start another job, until the job is finished or stopped. */
   | 'unitBusy'
@@ -84,7 +94,7 @@ export type RuleErrorCode =
   | 'notYourLand'
   /** A city stands on the tile. */
   | 'cityOnTile'
-  /** The ground does not suit that improvement (a farm on hills, a mine on open ground, anything on forest). */
+  /** The ground does not suit that improvement (a farm on hills, a mine on open ground, anything on forest, a net on ocean). */
   | 'badImprovementTile'
   /** The tile already has that improvement. */
   | 'alreadyImproved'
@@ -105,7 +115,7 @@ export const RULE_ERROR_MESSAGES: Record<RuleErrorCode, string> = {
   noSuchCity: 'That city is not yours to manage.',
   badPath: 'That is not a valid route.',
   noMovesLeft: 'This unit has no moves left this turn.',
-  impassable: 'Land units cannot go there.',
+  impassable: 'This unit cannot go there.',
   blocked: 'Something is in the way.',
   cannotFoundCity: 'This unit cannot found a city.',
   badCityTile: 'A city cannot be founded on this kind of tile.',
@@ -113,9 +123,10 @@ export const RULE_ERROR_MESSAGES: Record<RuleErrorCode, string> = {
   tileOwned: 'This land belongs to another player.',
   cannotBuild: 'This city cannot build that.',
   queueFull: 'The build queue is full.',
+  noWaterForBoat: 'This city has no water inside its borders, so it cannot build boats.',
   cannotImprove: 'This unit cannot build that.',
   unitBusy: 'This unit is at work. Stop the work first.',
-  notYourLand: 'That can only be built on your own land.',
+  notYourLand: 'That can only be built inside your own borders.',
   cityOnTile: 'Nothing can be built on the tile of a city.',
   badImprovementTile: 'That cannot be built on this kind of tile.',
   alreadyImproved: 'This tile already has one.',
@@ -166,7 +177,9 @@ export type GameEvent =
  * Phase 1 audiences: 'unitMoved', 'cityFounded', 'cityGrew' and 'unitBuilt'
  * go to the acting player only (`to: [event.playerId]`); 'turnStarted' goes
  * to everybody (`to: 'all'`). 'improvementBuilt' goes to the unit's owner
- * only. Changing a queue, starting a job and stopping a job make no event.
+ * only. Changing a queue, choosing "Grow first" or "Build first", starting
+ * a job and stopping a job make no event. A finished boat is announced by
+ * 'unitBuilt' and a finished net by 'improvementBuilt', like any other.
  * Phase 2 adds the victim and the onlookers of a fight to `to` without
  * changing any type.
  *

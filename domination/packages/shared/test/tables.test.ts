@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CITY_FOCUS,
+  CITY_FOCUS_IDS,
   CIVS,
   CIV_IDS,
+  DEFAULT_CITY_FOCUS,
   FEATURES,
   FEATURE_IDS,
   IMPROVEMENTS,
@@ -13,9 +16,11 @@ import {
   TERRAIN,
   TERRAIN_IDS,
   UNITS,
+  UNIT_DOMAINS,
   UNIT_TYPE_IDS,
   cityNameFor,
   foodToGrow,
+  improvementBuilder,
   improvementFits,
   maxPlayers,
   ruleError,
@@ -24,7 +29,9 @@ import {
   tileIsWorkable,
   tileMoveCost,
   tileYields,
+  unitCanImprove,
 } from '../src/index';
+import type { FeatureId, Ground, TerrainId } from '../src/index';
 
 /**
  * These tests guard the RELATIONSHIPS between numbers in the data tables.
@@ -40,18 +47,75 @@ describe('id lists match the tables', () => {
     expect([...IMPROVEMENT_IDS].sort()).toEqual(Object.keys(IMPROVEMENTS).sort());
     expect([...CIV_IDS].sort()).toEqual(Object.keys(CIVS).sort());
     expect([...MAP_SIZE_IDS].sort()).toEqual(Object.keys(MAP_SIZES).sort());
+    expect([...CITY_FOCUS_IDS].sort()).toEqual(Object.keys(CITY_FOCUS).sort());
   });
 });
 
+/** Every kind of tile the game has: each ground, and each feature on each ground it may stand on. */
+const GROUNDS: readonly { terrain: TerrainId; feature: FeatureId | null }[] = TERRAIN_IDS.flatMap((terrain) => [
+  { terrain, feature: null },
+  ...FEATURE_IDS.filter((feature) => FEATURES[feature].allowedOn.includes(terrain)).map((feature) => ({ terrain, feature })),
+]);
+
+/** "open coast", "hills grassland": a kind of tile in the words of a failure message. */
+function groundName(ground: Ground): string {
+  return `${ground.feature ?? 'open'} ${ground.terrain}`;
+}
+
 describe('terrain and features', () => {
-  it('water cannot be entered by land units and cannot hold a city', () => {
+  it('water cannot be entered by land units and cannot hold a city; land cannot be entered by boats', () => {
     for (const id of TERRAIN_IDS) {
       const terrain = TERRAIN[id];
       if (terrain.water) {
-        expect(terrain.moveCost).toBeNull();
-        expect(terrain.canFoundCity).toBe(false);
+        expect(terrain.moveCost.land, id).toBeNull();
+        expect(terrain.moveCost.sea, id).toBeGreaterThanOrEqual(1);
+        expect(terrain.canFoundCity, id).toBe(false);
       } else {
-        expect(terrain.moveCost).toBeGreaterThanOrEqual(1);
+        expect(terrain.moveCost.land, id).toBeGreaterThanOrEqual(1);
+        expect(terrain.moveCost.sea, id).toBeNull();
+      }
+    }
+  });
+
+  it('every terrain has a cost for each domain, and no ground can be entered by both; water costs a boat 1 and land nothing; mountains let neither in', () => {
+    expect(UNIT_DOMAINS).toEqual(['land', 'sea']);
+    for (const id of TERRAIN_IDS) {
+      // Exactly the two columns, each a whole number of at least 1 or null.
+      expect(Object.keys(TERRAIN[id].moveCost).sort(), id).toEqual([...UNIT_DOMAINS].sort());
+      for (const domain of UNIT_DOMAINS) {
+        const cost = TERRAIN[id].moveCost[domain];
+        expect(cost === null || (Number.isInteger(cost) && cost >= 1), `${id}, ${domain}`).toBe(true);
+      }
+    }
+    for (const ground of GROUNDS) {
+      const land = tileMoveCost(ground, 'land');
+      const sea = tileMoveCost(ground, 'sea');
+      // Rule M5 stands on this: a land unit and a boat can never share a
+      // tile, so the stacking rule needs no word about domains. (It also
+      // keeps a city, which stands on land, out of every boat's reach.)
+      expect(land !== null && sea !== null, `${groundName(ground)}: a tile both a land unit and a boat can enter`).toBe(false);
+      if (tileIsWater(ground)) {
+        expect(sea, groundName(ground)).toBe(1);
+        expect(land, groundName(ground)).toBeNull();
+      } else {
+        expect(sea, groundName(ground)).toBeNull();
+      }
+      if (ground.feature === 'mountains') {
+        expect(land, groundName(ground)).toBeNull();
+        expect(sea, groundName(ground)).toBeNull();
+      }
+    }
+    // Water is the only ground a boat can enter, and every water tile is one.
+    expect(TERRAIN_IDS.filter((id) => TERRAIN[id].moveCost.sea !== null)).toEqual(TERRAIN_IDS.filter((id) => TERRAIN[id].water));
+  });
+
+  it('no feature is allowed on a terrain a boat can enter', () => {
+    // tileMoveCost gives a boat the ground's cost and never looks at the
+    // feature. That is right only while no feature stands on water: a
+    // feature that could (a reef, ice) needs a sea cost of its own first.
+    for (const id of FEATURE_IDS) {
+      for (const terrain of FEATURES[id].allowedOn) {
+        expect(TERRAIN[terrain].moveCost.sea, `${id} on ${terrain}: give features a cost for sea units before one may stand on water`).toBeNull();
       }
     }
   });
@@ -74,10 +138,17 @@ describe('terrain and features', () => {
   });
 
   it('a feature replaces the numbers of the ground it stands on', () => {
-    expect(tileMoveCost({ terrain: 'grassland', feature: null })).toBe(TERRAIN.grassland.moveCost);
-    expect(tileMoveCost({ terrain: 'grassland', feature: 'forest' })).toBe(FEATURES.forest.moveCost);
-    expect(tileMoveCost({ terrain: 'plains', feature: 'mountains' })).toBeNull();
-    expect(tileMoveCost({ terrain: 'ocean', feature: null })).toBeNull();
+    // For a land unit the feature's cost replaces the ground's.
+    expect(tileMoveCost({ terrain: 'grassland', feature: null }, 'land')).toBe(TERRAIN.grassland.moveCost.land);
+    expect(tileMoveCost({ terrain: 'grassland', feature: 'forest' }, 'land')).toBe(FEATURES.forest.moveCost);
+    expect(tileMoveCost({ terrain: 'plains', feature: 'mountains' }, 'land')).toBeNull();
+    expect(tileMoveCost({ terrain: 'ocean', feature: null }, 'land')).toBeNull();
+    // A sea unit pays the ground's own cost for sea units, whatever stands on the tile.
+    expect(tileMoveCost({ terrain: 'ocean', feature: null }, 'sea')).toBe(TERRAIN.ocean.moveCost.sea);
+    expect(tileMoveCost({ terrain: 'coast', feature: null }, 'sea')).toBe(TERRAIN.coast.moveCost.sea);
+    expect(tileMoveCost({ terrain: 'grassland', feature: null }, 'sea')).toBeNull();
+    expect(tileMoveCost({ terrain: 'grassland', feature: 'forest' }, 'sea')).toBeNull();
+    expect(tileMoveCost({ terrain: 'plains', feature: 'mountains' }, 'sea')).toBeNull();
 
     expect(tileYields({ terrain: 'plains', feature: null })).toEqual(TERRAIN.plains.yields);
     expect(tileYields({ terrain: 'plains', feature: 'hills' })).toEqual(FEATURES.hills.yields);
@@ -101,10 +172,12 @@ describe('terrain and features', () => {
     expect(TERRAIN.grassland.yields.food).not.toBe(99);
   });
 
-  it('rough ground costs more than open ground', () => {
-    expect(FEATURES.forest.moveCost as number).toBeGreaterThan(TERRAIN.grassland.moveCost as number);
-    expect(FEATURES.hills.moveCost as number).toBeGreaterThan(TERRAIN.plains.moveCost as number);
+  it('rough ground costs a land unit more than open ground; all water costs a boat the same', () => {
+    expect(FEATURES.forest.moveCost as number).toBeGreaterThan(TERRAIN.grassland.moveCost.land as number);
+    expect(FEATURES.hills.moveCost as number).toBeGreaterThan(TERRAIN.plains.moveCost.land as number);
     expect(FEATURES.mountains.moveCost).toBeNull();
+    // The sea has no rough water: a Scout Boat's four moves are four tiles.
+    expect(TERRAIN.ocean.moveCost.sea).toBe(TERRAIN.coast.moveCost.sea);
   });
 });
 
@@ -121,6 +194,19 @@ describe('units', () => {
     }
   });
 
+  it('every unit has a domain of UNIT_DOMAINS: the two boats are sea units, the four others land units', () => {
+    for (const id of UNIT_TYPE_IDS) expect(UNIT_DOMAINS, id).toContain(UNITS[id].domain);
+    expect(UNIT_TYPE_IDS.filter((id) => UNITS[id].domain === 'sea')).toEqual(['fishingBoat', 'scoutBoat']);
+    expect(UNIT_TYPE_IDS.filter((id) => UNITS[id].domain === 'land')).toEqual(['warrior', 'scout', 'settler', 'worker']);
+    // The build menu lists land units first and the boats last, so the four older buttons stay where they were.
+    const firstBoat = UNIT_TYPE_IDS.findIndex((id) => UNITS[id].domain === 'sea');
+    expect(UNIT_TYPE_IDS.slice(firstBoat).every((id) => UNITS[id].domain === 'sea')).toBe(true);
+    // Every unit has ground it can enter at all.
+    for (const id of UNIT_TYPE_IDS) {
+      expect(GROUNDS.some((ground) => tileMoveCost(ground, UNITS[id].domain) !== null), id).toBe(true);
+    }
+  });
+
   it('starting units exist, include a city founder, and fit on one tile', () => {
     expect(RULES.startingUnits.length).toBeGreaterThan(0);
     for (const id of RULES.startingUnits) expect(UNITS[id]).toBeDefined();
@@ -129,6 +215,10 @@ describe('units', () => {
     const civilian = RULES.startingUnits.filter((id) => UNITS[id].unitClass === 'civilian').length;
     expect(military).toBeLessThanOrEqual(1);
     expect(civilian).toBeLessThanOrEqual(1);
+    // They are put on the start tile, which is land (rule H1 of the map generator).
+    for (const id of RULES.startingUnits) expect(UNITS[id].domain, id).toBe('land');
+    // A city stands on land, so its founder walks there.
+    for (const id of UNIT_TYPE_IDS) if (UNITS[id].canFoundCity) expect(UNITS[id].domain, id).toBe('land');
   });
 
   it('a city founder always sees any city that could be too close (so that error reveals nothing hidden)', () => {
@@ -200,22 +290,20 @@ describe('descriptions for players', () => {
 });
 
 describe('improvements', () => {
-  /** Every kind of tile the game has: each ground, and each feature on each ground it may stand on. */
-  const grounds = TERRAIN_IDS.flatMap((terrain) => [
-    { terrain, feature: null },
-    ...FEATURE_IDS.filter((feature) => FEATURES[feature].allowedOn.includes(terrain)).map((feature) => ({ terrain, feature })),
-  ]);
+  const grounds = GROUNDS;
 
-  it('an improvement only fits land a unit can stand on and a citizen can work', () => {
+  it('an improvement only fits tiles its builder can stand on and a citizen can gather from', () => {
     for (const id of IMPROVEMENT_IDS) {
       const fitting = grounds.filter((ground) => improvementFits(id, ground));
       // It can be built somewhere at all...
       expect(fitting.length, id).toBeGreaterThan(0);
+      const builder = improvementBuilder(id);
       for (const ground of fitting) {
-        const what = `${id} on ${ground.feature ?? 'open'} ${ground.terrain}`;
-        // ...and only where a Worker can walk to and where the yield is of use to a city.
-        expect(tileMoveCost(ground), what).not.toBeNull();
-        expect(tileIsWater(ground), what).toBe(false);
+        const what = `${id} on ${groundName(ground)}`;
+        // ...and only where the unit type that builds it can go (a job is
+        // done on the tile the unit stands on) and where the yield is of
+        // use to a city.
+        expect(tileMoveCost(ground, UNITS[builder].domain), `${what}: a ${UNITS[builder].name} cannot enter it`).not.toBeNull();
         expect(tileIsWorkable(ground), what).toBe(true);
       }
       // The two lists of the table name real grounds and real features (or null for open ground).
@@ -238,8 +326,58 @@ describe('improvements', () => {
     expect(improvementFits('mine', { terrain: 'desert', feature: null })).toBe(false);
     expect(improvementFits('mine', { terrain: 'plains', feature: 'forest' })).toBe(false);
     expect(improvementFits('mine', { terrain: 'grassland', feature: 'mountains' })).toBe(false);
+    // A net is for the coast: not for the open ocean, and for no land.
+    expect(improvementFits('fishingNet', { terrain: 'coast', feature: null })).toBe(true);
+    expect(improvementFits('fishingNet', { terrain: 'ocean', feature: null })).toBe(false);
+    expect(improvementFits('fishingNet', { terrain: 'grassland', feature: null })).toBe(false);
+    expect(improvementFits('fishingNet', { terrain: 'desert', feature: 'hills' })).toBe(false);
+    expect(grounds.filter((ground) => improvementFits('fishingNet', ground))).toEqual([{ terrain: 'coast', feature: null }]);
     // What is already built there is not its business (improvementSiteError judges that).
     expect(improvementFits('farm', { terrain: 'grassland', feature: null, improvement: 'farm' })).toBe(true);
+  });
+
+  it('every improvement is in the list of exactly one unit type, improvementBuilder names it, and every list is in IMPROVEMENT_IDS order', () => {
+    for (const id of IMPROVEMENT_IDS) {
+      const builders = UNIT_TYPE_IDS.filter((type) => UNITS[type].improvements.includes(id));
+      expect(
+        builders.length,
+        `${id} is built by ${builders.length} unit types (${builders.join(', ')}): the page says "A ${UNITS[improvementBuilder(id)].name} can build a ${IMPROVEMENTS[id].name} here" ` +
+          'and names ONE builder. A second builder is a decision about that sentence first (client game/tileInfo.ts), then about this test',
+      ).toBe(1);
+      expect(improvementBuilder(id), id).toBe(builders[0]);
+    }
+    expect(improvementBuilder('farm')).toBe('worker');
+    expect(improvementBuilder('mine')).toBe('worker');
+    expect(improvementBuilder('fishingNet')).toBe('fishingBoat');
+
+    for (const type of UNIT_TYPE_IDS) {
+      const list = UNITS[type].improvements;
+      // Real improvements, each once, in the order the unit panel lists its buttons (rule N2).
+      for (const id of list) expect(IMPROVEMENT_IDS, `${type}: ${id}`).toContain(id);
+      expect(new Set(list).size, type).toBe(list.length);
+      expect([...list], type).toEqual(IMPROVEMENT_IDS.filter((id) => list.includes(id)));
+      expect(unitCanImprove(type), type).toBe(list.length > 0);
+    }
+    expect(UNIT_TYPE_IDS.map((type) => [type, [...UNITS[type].improvements]])).toEqual([
+      ['warrior', []],
+      ['scout', []],
+      ['settler', []],
+      ['worker', ['farm', 'mine']],
+      ['fishingBoat', ['fishingNet']],
+      ['scoutBoat', []],
+    ]);
+  });
+
+  it('no ground fits two improvements', () => {
+    // improvementSiteError lets a job begin on a tile that carries ANOTHER
+    // improvement and fits this one ("the new one replaces the old one").
+    // No tile can come to that today. The round that adds such a ground
+    // decides what replacing means (is the old one lost at once, or when the
+    // new one is finished? is the player asked?) before this test changes.
+    for (const ground of grounds) {
+      const fitting = IMPROVEMENT_IDS.filter((id) => improvementFits(id, ground));
+      expect(fitting.length, `${groundName(ground)} fits ${fitting.join(' and ')}`).toBeLessThanOrEqual(1);
+    }
   });
 
   it('an improvement adds whole, non-negative yields, and at least one of them is more than 0', () => {
@@ -270,25 +408,52 @@ describe('improvements', () => {
     }
   });
 
-  it('a mined hill\'s food + production is higher than that of every FARMED tile', () => {
-    // The same first choice, one step on: a Worker goes on building farms.
+  it('a mined hill\'s food + production is higher than that of every tile with any other improvement', () => {
+    // The same first choice, one step on: a Worker goes on building farms,
+    // and a Fishing Boat nets the coast.
     // With +2 production a mined hill (0 + 4) stood level with a farmed
     // grassland tile (3 + 1) and a farmed plains tile (2 + 2) and lost the
     // tie on food. Every farm after the first then pushed the mine one
     // citizen back: measured on generated capitals with a Worker that went on
     // farming, the mine was worked in fewer than half of the turns after it
     // stood, and a mine that had been worked fell out of use again.
-    const farmed = grounds.filter((candidate) => improvementFits('farm', candidate)).map((ground) => tileYields({ ...ground, improvement: 'farm' }));
-    expect(farmed.length).toBeGreaterThan(0);
-    const best = Math.max(...farmed.map((yields) => yields.food + yields.production));
+    // A fished coast tile (4 + 0) is held by the same limit: at +3 food it
+    // would stand level with the mine (5) and win the tie on food.
+    const others = IMPROVEMENT_IDS.filter((id) => id !== 'mine').flatMap((id) =>
+      grounds
+        .filter((candidate) => improvementFits(id, candidate))
+        .map((ground) => ({ id, ground, yields: tileYields({ ...ground, improvement: id }) })),
+    );
+    expect(others.some((other) => other.id === 'farm')).toBe(true);
+    expect(others.some((other) => other.id === 'fishingNet')).toBe(true);
     for (const ground of grounds.filter((candidate) => improvementFits('mine', candidate))) {
       const mined = tileYields({ ...ground, improvement: 'mine' });
+      for (const other of others) {
+        const sum = other.yields.food + other.yields.production;
+        expect(
+          mined.food + mined.production,
+          `a mine on ${ground.terrain} hills gives ${mined.food} food + ${mined.production} production, and a ${other.id} on ${groundName(other.ground)} gives ${sum} in all: ` +
+            'the mine must give MORE. Level with another improved tile it loses the tie (it gives no food), so every farm a Worker ' +
+            'builds and every net a Fishing Boat builds pushes the mine one citizen back, and a mine that was worked stands unused again. ' +
+            'Do not put the Mine back to +2 production, do not make a Farm give more, and do not make a Fishing Net give +3 food, ' +
+            'without changing how citizens choose their tiles (rules/city.ts)',
+        ).toBeGreaterThan(sum);
+      }
+    }
+  });
+
+  it('a fished coast tile gives 4 food and no production: more food + production than every unimproved tile', () => {
+    expect(tileYields({ terrain: 'coast', feature: null, improvement: 'fishingNet' })).toEqual({ food: 4, production: 0 });
+    // What a net adds is food and nothing else: the sea has one plain meaning.
+    expect(IMPROVEMENTS.fishingNet.yields.production).toBe(0);
+    const best = Math.max(...grounds.map((ground) => tileYields(ground).food + tileYields(ground).production));
+    for (const ground of grounds.filter((candidate) => improvementFits('fishingNet', candidate))) {
+      const fished = tileYields({ ...ground, improvement: 'fishingNet' });
       expect(
-        mined.food + mined.production,
-        `a mine on ${ground.terrain} hills gives ${mined.food} food + ${mined.production} production, and the best farmed tile gives ${best} in all: ` +
-          'the mine must give MORE. Level with a farmed tile it loses the tie (it gives no food), so every farm a Worker ' +
-          'builds pushes the mine one citizen back and a mine that was worked stands unused again. ' +
-          'Do not put the Mine back to +2 production (or make a Farm give more) without changing how citizens choose their tiles (rules/city.ts)',
+        fished.food + fished.production,
+        `a fished ${ground.terrain} tile gives ${fished.food} food + ${fished.production} production, and the best unimproved tile gives ${best} in all: ` +
+          'the net must give MORE, or citizens take open land before it and the Fishing Boat\'s turns are wasted: ' +
+          'at +1 food a net was worked in two thirds of the turns in a farmed city (facts 3B)',
       ).toBeGreaterThan(best);
     }
   });
@@ -300,6 +465,7 @@ describe('improvements', () => {
     expect(tileYields({ terrain: 'desert', feature: null, improvement: 'farm' })).toEqual({ food: 1, production: 1 });
     expect(tileYields({ terrain: 'grassland', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 5 });
     expect(tileYields({ terrain: 'desert', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 5 });
+    expect(tileYields({ terrain: 'coast', feature: null, improvement: 'fishingNet' })).toEqual({ food: 4, production: 0 });
 
     // In general: the tile's own yields plus the table's, for every improvement on every ground it fits.
     for (const id of IMPROVEMENT_IDS) {
@@ -328,21 +494,66 @@ describe('improvements', () => {
     expect(IMPROVEMENTS.farm.yields).toEqual({ food: 1, production: 0 });
     expect(TERRAIN.grassland.yields).toEqual({ food: 2, production: 1 });
     // The other tile helpers do not look at what is built.
-    expect(tileMoveCost({ terrain: 'grassland', feature: 'hills', improvement: 'mine' })).toBe(FEATURES.hills.moveCost);
+    expect(tileMoveCost({ terrain: 'grassland', feature: 'hills', improvement: 'mine' }, 'land')).toBe(FEATURES.hills.moveCost);
+    expect(tileMoveCost({ terrain: 'coast', feature: null, improvement: 'fishingNet' }, 'sea')).toBe(TERRAIN.coast.moveCost.sea);
     expect(tileIsWorkable({ terrain: 'grassland', feature: null, improvement: 'farm' })).toBe(true);
     expect(tileAllowsCity({ terrain: 'grassland', feature: null, improvement: 'farm' })).toBe(true);
   });
 
   it('at least one unit type can build improvements, and every such unit is a civilian', () => {
-    const builders = UNIT_TYPE_IDS.filter((id) => UNITS[id].canImprove);
+    const builders = UNIT_TYPE_IDS.filter((id) => UNITS[id].improvements.length > 0);
     expect(builders.length).toBeGreaterThan(0);
     for (const id of builders) {
       // A tile holds one civilian: that is what keeps two units from sharing a job.
       expect(UNITS[id].unitClass, id).toBe('civilian');
     }
-    for (const id of UNIT_TYPE_IDS) expect(typeof UNITS[id].canImprove, id).toBe('boolean');
+    for (const id of UNIT_TYPE_IDS) expect(Array.isArray(UNITS[id].improvements), id).toBe(true);
+    // The column that was replaced must not come back beside the list: two columns that must agree are one bug waiting.
+    for (const id of UNIT_TYPE_IDS) expect(Object.hasOwn(UNITS[id], 'canImprove'), id).toBe(false);
     // A city can build one, so the column is of use.
     expect(builders.some((id) => UNITS[id].cost > 0)).toBe(true);
+  });
+});
+
+describe('the two ways of placing citizens', () => {
+  it('the ids match the table and the first is the default', () => {
+    expect([...CITY_FOCUS_IDS]).toEqual(['grow', 'build']);
+    expect(Object.keys(CITY_FOCUS).sort()).toEqual([...CITY_FOCUS_IDS].sort());
+    expect(new Set(CITY_FOCUS_IDS).size).toBe(CITY_FOCUS_IDS.length);
+    // The city panel shows the default on the left, where a new city stands.
+    expect(DEFAULT_CITY_FOCUS).toBe(CITY_FOCUS_IDS[0]);
+    expect(DEFAULT_CITY_FOCUS).toBe('grow');
+  });
+
+  it('each name has at most 11 characters and the two differ; each summary has at most 34 characters, no digit and no full stop; each description ends with a full stop and has no digit', () => {
+    for (const id of CITY_FOCUS_IDS) {
+      const way = CITY_FOCUS[id];
+      // The words on a button 138 pixels wide: one line.
+      expect(way.name.length, `${id}: the name takes one line in the button at 11 characters or fewer`).toBeLessThanOrEqual(11);
+      expect(way.name, id).toMatch(/^[A-Z][a-z]+( [a-z]+)*$/);
+      // Not the bare verb: "Build" alone reads as an order to the city's queue.
+      expect(way.name.includes(' '), `${id}: two words`).toBe(true);
+      // The small line in the button: two lines at most, and it never changes with the city.
+      expect(way.summary.length, `${id}: the summary takes two lines at most in the button at 34 characters or fewer`).toBeLessThanOrEqual(34);
+      expect(way.summary.length, id).toBeGreaterThan(5);
+      expect(way.summary, `${id}: no digit`).not.toMatch(/[0-9]/);
+      expect(way.summary, `${id}: no full stop, one line`).not.toMatch(/[.\n\r]/);
+      expect(way.summary, `${id}: begins with a small letter`).toMatch(/^[a-z]/);
+      expect(way.summary, id).toBe(way.summary.trim());
+      // The tooltip: one or two sentences.
+      expect(way.description.endsWith('.'), `${id}: the description ends with a full stop`).toBe(true);
+      expect(way.description, `${id}: no digit`).not.toMatch(/[0-9]/);
+      expect(way.description, id).not.toMatch(/[\n\r]/);
+      expect(way.description, id).toBe(way.description.trim());
+      expect(way.description.length, id).toBeGreaterThan(20);
+      expect(Object.keys(way).sort(), id).toEqual(['description', 'name', 'summary']);
+    }
+    expect(new Set(CITY_FOCUS_IDS.map((id) => CITY_FOCUS[id].name)).size).toBe(CITY_FOCUS_IDS.length);
+    expect(new Set(CITY_FOCUS_IDS.map((id) => CITY_FOCUS[id].summary)).size).toBe(CITY_FOCUS_IDS.length);
+    // The words on the two buttons (the page and the README use them).
+    expect(CITY_FOCUS_IDS.map((id) => CITY_FOCUS[id].name)).toEqual(['Grow first', 'Build first']);
+    // Build's food line may show a minus, which reads as starvation: its description says the city never shrinks.
+    expect(CITY_FOCUS.build.description).toContain('never shrinks');
   });
 });
 

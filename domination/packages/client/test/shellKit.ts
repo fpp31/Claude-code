@@ -5,8 +5,8 @@
  * neither a server nor the rules engine.
  */
 
-import { cloneJson } from '@domination/shared';
-import type { CityView, ClientMessage, OwnCityDetail, OwnUnitDetail, PlayerView, UnitView } from '@domination/shared';
+import { IMPROVEMENTS, UNITS, cloneJson } from '@domination/shared';
+import type { CityView, ClientMessage, OwnCityDetail, OwnUnitDetail, PlayerView, TileView, UnitTypeId, UnitView } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import type { Connection } from '../src/net/connection';
 import { createStore, initialState } from '../src/state/store';
@@ -24,7 +24,7 @@ export const SAMPLE = {
   /** The player's Worker, at work: it is building a farm on plains and has three turns to go. */
   workerId: 'u1_m4wq7e',
   workerTile: 5 * 14 + 3,
-  /** Own grassland with a finished farm; a citizen of Rome works it. */
+  /** Own grassland with a finished farm; a citizen of Rome gathers from it. */
   farmTile: 3 * 14 + 3,
   /** Desert hills on Egypt's land, out of sight: a mine the player remembers. */
   rememberedMineTile: 2 * 14 + 10,
@@ -34,13 +34,92 @@ export const SAMPLE = {
   romeTile: 4 * 14 + 3,
   thebesId: 'c2_h5yd7m',
   thebesTile: 3 * 14 + 10,
-  /** A land tile with nothing on it (own grassland that no citizen works). */
+  /** A land tile with nothing on it (own grassland that no citizen gathers from). */
   emptyTile: 5 * 14 + 4,
 } as const;
 
 /** The tile at column x, row y of the sample map (14 tiles wide). */
 export function at(x: number, y: number): number {
   return y * 14 + x;
+}
+
+/**
+ * The shore west of Rome in sampleView(): three coast tiles in sight, one
+ * under the other, three tiles from the city. In the sample view they are
+ * nobody's: Rome owns no water there, which is why its two boats are
+ * greyed. shoreView() puts them inside Rome's borders.
+ */
+export const SHORE = {
+  north: at(0, 3),
+  middle: at(0, 4),
+  south: at(0, 5),
+  /** Coast in sight further south, outside every border also in shoreView(). */
+  free: at(1, 6),
+  /** Own grassland of Rome beside the middle coast tile. */
+  beach: at(1, 4),
+} as const;
+
+/** The tile of a view the viewer has seen; throws for a never-seen one. */
+export function seenTile(view: PlayerView, tile: number): TileView {
+  const seen = view.tiles[tile];
+  if (seen === null || seen === undefined) throw new Error(`tile ${tile} is not explored in this view`);
+  return seen;
+}
+
+/**
+ * The sample view as it would be if Rome's borders reached the sea: the
+ * three coast tiles of SHORE are Rome's, and Rome's menu says what a city
+ * with water says about its boats (a number of turns and no addError).
+ * `change` is applied on top.
+ */
+export function shoreView(change: (view: PlayerView) => void = () => {}): PlayerView {
+  const view = sampleView();
+  for (const tile of [SHORE.north, SHORE.middle, SHORE.south]) seenTile(view, tile).owner = SAMPLE.me;
+  for (const option of romeOf(view).buildOptions) {
+    if (UNITS[option.item.unitType].domain !== 'sea') continue;
+    option.turns = 15;
+    option.wait = null;
+    option.addError = null;
+  }
+  change(view);
+  return view;
+}
+
+/**
+ * Adds a unit of the viewer's own to a view, as the server would list it:
+ * full moves, no job, and one job option per improvement its type builds,
+ * each with `jobError` (null: the job can be started where it stands).
+ * Returns the unit, so that a test can change it further.
+ */
+export function addOwnUnit(view: PlayerView, id: string, type: UnitTypeId, tile: number, jobError: OwnUnitDetail['jobOptions'][number]['error'] = null): UnitView {
+  const unit: UnitView = {
+    id,
+    type,
+    owner: view.you,
+    tile,
+    own: {
+      movesLeft: UNITS[type].moves,
+      foundCityError: UNITS[type].canFoundCity ? null : 'cannotFoundCity',
+      job: null,
+      jobOptions: UNITS[type].improvements.map((improvement) => ({ improvement, turns: IMPROVEMENTS[improvement].turns, error: jobError })),
+    },
+  };
+  view.units.push(unit);
+  return unit;
+}
+
+/**
+ * Puts an own unit to work on what its type builds first (a Worker on a
+ * farm, a Fishing Boat on a net), as the server's view shows a unit at
+ * work: the job with its turns, and every option busy.
+ */
+export function putToWork(unit: UnitView, turnsWorked: number): void {
+  if (unit.own === null) throw new Error(`unit ${unit.id} is not the viewer's own`);
+  const improvement = UNITS[unit.type].improvements[0];
+  if (improvement === undefined) throw new Error(`a ${unit.type} builds nothing`);
+  const turnsTotal = IMPROVEMENTS[improvement].turns;
+  unit.own.job = { improvement, turnsWorked, turnsTotal, turnsLeft: Math.max(1, turnsTotal - turnsWorked) };
+  for (const option of unit.own.jobOptions) option.error = 'unitBusy';
 }
 
 /**

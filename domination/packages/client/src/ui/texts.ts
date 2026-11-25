@@ -19,6 +19,7 @@ import type {
   PlayerView,
   QueueEntryView,
   UnitJobView,
+  UnitTypeId,
   UnitView,
 } from '@domination/shared';
 import { citiesWaiting, citiesWithoutProduction, idleUnits, ownThingsAt } from '../game/selectors';
@@ -118,12 +119,41 @@ export function ordersClosedText(closed: OrdersClosed): string {
   return closed === 'offline' ? 'No connection: orders have to wait.' : 'You have ended your turn. Cancel that to give orders.';
 }
 
+/** The words of "Stop work" while it does not ask. */
+export const STOP_LABEL = 'Stop work';
+
 /**
- * The small print beside "Stop work". It is about the button, not about the
- * job: "The work done so far is lost." read as news of a loss. The panel
- * leaves it out while the button cannot be pressed (ui/panelButtons.ts).
+ * The words of "Stop work" while it waits for its second press (round 3:
+ * the button asks once before it throws work away). Short on purpose: the
+ * button keeps its top and its right edge and grows to the left only, and
+ * longer words ("Tap again to stop the work") left the small print beside
+ * it too little room, so that the row grew under the finger.
  */
-export const STOP_WARNING = 'Stopping loses the work done so far.';
+export const STOP_ASK = 'Tap again to stop';
+
+/**
+ * The small print beside "Stop work" (it replaces round 2's one fixed
+ * sentence, "Stopping loses the work done so far."). It is about the
+ * button, not about the job: "The work done so far is lost." read as news
+ * of a loss. The numbers are the view's (UnitJobView.turnsWorked).
+ *   no turn worked yet        -> 'Stopping now loses nothing.' (the button
+ *                                does not ask then, whatever `asking` says)
+ *   not asking, turns worked  -> 'Stopping loses 3 turns of work.',
+ *                                'Stopping loses 1 turn of work.'
+ *   asking                    -> '3 turns will be lost.', '1 turn will be
+ *                                lost.' The short form: beside the wide
+ *                                asking button the longer sentence took
+ *                                three lines and the row changed its height.
+ * The panel leaves it out while the button cannot be pressed
+ * (ui/panelButtons.ts).
+ *
+ * @param asking  is the button waiting for its second press?
+ */
+export function stopWarningText(job: UnitJobView, asking: boolean): string {
+  if (job.turnsWorked <= 0) return 'Stopping now loses nothing.';
+  const turns = countOf(job.turnsWorked, 'turn', 'turns');
+  return asking ? `${turns} will be lost.` : `Stopping loses ${turns} of work.`;
+}
 
 /**
  * The two sentences of the unit panel's hint, apart: `main` is what can be
@@ -173,17 +203,19 @@ export function unitHintText(view: PlayerView, unit: UnitView, online: boolean):
   return more === '' ? main : `${main} ${more}`;
 }
 
-/** "Build Farm (4 turns)", "Build Farm (1 turn)". */
+/** "Build Farm (4 turns)", "Build Farm (1 turn)", "Build Fishing Net (4 turns)". */
 export function jobButtonText(option: JobOption): string {
   return `Build ${IMPROVEMENTS[option.improvement].name} (${countOf(option.turns, 'turn', 'turns')})`;
 }
 
 /**
  * Why a job button is greyed out, in words; null if it is not.
- *  'badImprovementTile' -> "A Farm needs open grassland, plains or desert."
+ *  'badImprovementTile' -> "A Farm needs open grassland, plains or desert.",
+ *                          "A Fishing Net needs coast."
  *                          ("A <name> needs <IMPROVEMENTS[id].needs>.")
  *  'alreadyImproved'    -> "This tile already has a Farm."
- *  anything else        -> RULE_ERROR_MESSAGES[error]
+ *  anything else        -> RULE_ERROR_MESSAGES[error] ("That can only be
+ *                          built inside your own borders.")
  */
 export function jobReasonText(option: JobOption): string | null {
   if (option.error === null) return null;
@@ -196,9 +228,11 @@ export function jobReasonText(option: JobOption): string | null {
 /**
  * The ONE sentence for the whole job block when every job is impossible for
  * the same reason (the same jobReasonText for every option, and there is at
- * least one option): "That can only be built on your own land.", "Nothing
- * can be built on the tile of a city." null otherwise; the panel then puts
- * each button's own reason under it.
+ * least one option): "That can only be built inside your own borders.",
+ * "Nothing can be built on the tile of a city." null otherwise; the panel
+ * then puts each button's own reason under it. A Fishing Boat has one job,
+ * so for it this is every case: "A Fishing Net needs coast.", "This tile
+ * already has a Fishing Net."
  */
 export function jobsReasonText(options: JobOption[]): string | null {
   if (options.length === 0) return null;
@@ -207,7 +241,7 @@ export function jobsReasonText(options: JobOption[]): string | null {
   return options.every((option) => jobReasonText(option) === first) ? first : null;
 }
 
-/** "Building a Farm: 3 turns left", "Building a Mine: 1 turn left". */
+/** "Building a Farm: 3 turns left", "Building a Mine: 1 turn left", "Building a Fishing Net: 3 turns left". */
 export function jobProgressText(job: UnitJobView): string {
   return `Building a ${IMPROVEMENTS[job.improvement].name}: ${countOf(job.turnsLeft, 'turn', 'turns')} left`;
 }
@@ -242,26 +276,50 @@ export function populationText(population: number): string {
   return `Population ${population}`;
 }
 
-/** "Food 4/16 (+2 per turn)". */
+/**
+ * "Food 4/16 (+2 per turn)"; with a surplus of 0 or less "Food 0/10 (+0 per
+ * turn): not growing", "Food 6/22 (-2 per turn): not growing". The last
+ * words are said under either way of placing citizens, whenever they are
+ * true: they are how a player sees what "Build first" costs, and that a
+ * city has reached the limit of its land.
+ */
 export function foodText(own: OwnCityDetail): string {
-  return `Food ${own.foodStored}/${own.foodToGrow} (${signed(own.foodPerTurn)} per turn)`;
+  const food = `Food ${own.foodStored}/${own.foodToGrow} (${signed(own.foodPerTurn)} per turn)`;
+  return own.foodPerTurn <= 0 ? `${food}: not growing` : food;
 }
+
+/** The label of the pair of buttons "Grow first" / "Build first", for screen readers. */
+export const FOCUS_GROUP_LABEL = "What this city's citizens put first";
+
+/**
+ * The last line of the city panel: what the gold tokens on the map are.
+ * (Round 2 wrote it out in ui/cityPanel.ts and said the city "works" the
+ * marked tiles; citizens gather, units work.)
+ */
+export const CITY_TILES_HINT = "Gold tokens on the map mark the tiles this city's citizens gather from.";
 
 /**
  * The words for why something has no "in N turns" (lower case, no full stop:
  * callers put them into a sentence):
  *   needsPopulation -> 'the city must grow first'
- *   noRoom          -> 'no free tile for the unit'
+ *   noRoom          -> 'no free tile for the unit' for a land unit,
+ *                      'no free water tile for the boat' for a sea unit
  *   noProduction    -> 'this city makes no production'
  *   tooFar          -> 'more than 50 turns' (RULES.forecastTurns)
  *   earlier         -> 'after the item above'
+ *
+ * @param unitType  the type of the item that waits: the first entry of the
+ *                  queue for OwnCityDetail.held, the row's entry, the
+ *                  option's item. A boat appears on a water tile the city
+ *                  owns, never on the city tile, so its 'noRoom' is about
+ *                  water.
  */
-export function buildWaitText(wait: BuildWait): string {
+export function buildWaitText(wait: BuildWait, unitType: UnitTypeId): string {
   switch (wait) {
     case 'needsPopulation':
       return 'the city must grow first';
     case 'noRoom':
-      return 'no free tile for the unit';
+      return UNITS[unitType].domain === 'sea' ? 'no free water tile for the boat' : 'no free tile for the unit';
     case 'noProduction':
       return 'this city makes no production';
     case 'tooFar':
@@ -275,11 +333,15 @@ export function buildWaitText(wait: BuildWait): string {
  * The current build: "Warrior 6/18 (+3 per turn, 4 turns)", "Warrior 15/18
  * (+3 per turn, 1 turn)"; the turns are left out when the first row has no
  * number ("Settler 30/30 (+2 per turn)"). With an empty queue: "Nothing to
- * build." (what is saved and what is lost follows it: productionNoteText).
+ * build:" (was "Nothing to build."). What follows it in the same element is
+ * productionNoteText, so that the two read as ONE sentence on one line:
+ * "Nothing to build: production is lost." On a small phone the two
+ * sentences of before took two lines, and the heading of the build list
+ * lay under the panel's edge.
  */
 export function productionText(own: OwnCityDetail): string {
   const first = own.buildQueue[0];
-  if (first === undefined) return 'Nothing to build.';
+  if (first === undefined) return 'Nothing to build:';
   const name = UNITS[first.item.unitType].name;
   const rate = `${signed(own.productionPerTurn)} per turn`;
   const detail = first.turns === null ? rate : `${rate}, ${countOf(first.turns, 'turn', 'turns')}`;
@@ -288,23 +350,28 @@ export function productionText(own: OwnCityDetail): string {
 
 /**
  * What follows the current build in the same element, or null:
- *   empty queue      -> "This city's production is lost every turn.", or,
- *                       with production saved, "6 production are saved for
- *                       the next item; what the city makes meanwhile is
- *                       lost." ("1 production is saved ..."): the savings
- *                       stay, and "saved" and "lost" must not read as one
+ *   empty queue      -> "production is lost." (round 2's longer sentence
+ *                       took two lines on a phone), or, with production saved,
+ *                       "6 production are saved for the next item; what the
+ *                       city makes meanwhile is lost." ("1 production is
+ *                       saved ..."): the savings stay, and "saved" and
+ *                       "lost" must not read as one. Both follow the colon
+ *                       of productionText ("Nothing to build: ...")
  *   own.held is set  -> "Waiting: the city must grow first", "Waiting: no
- *                       free tile for the unit" (buildWaitText)
+ *                       free tile for the unit", "Waiting: no free water
+ *                       tile for the boat" (buildWaitText with the unit
+ *                       type of the first entry, which is the one that waits)
  *   otherwise        -> null (also for a first entry that has no number but
  *                       is not paid for yet)
  */
 export function productionNoteText(own: OwnCityDetail): string | null {
-  if (own.buildQueue.length === 0) {
-    if (own.productionStored <= 0) return "This city's production is lost every turn.";
+  const first = own.buildQueue[0];
+  if (first === undefined) {
+    if (own.productionStored <= 0) return 'production is lost.';
     const saved = `${own.productionStored} production ${own.productionStored === 1 ? 'is' : 'are'} saved`;
     return `${saved} for the next item; what the city makes meanwhile is lost.`;
   }
-  if (own.held !== null) return `Waiting: ${buildWaitText(own.held)}`;
+  if (own.held !== null) return `Waiting: ${buildWaitText(own.held, first.item.unitType)}`;
   return null;
 }
 
@@ -314,7 +381,9 @@ export function productionNoteText(own: OwnCityDetail): string | null {
  * turn the next item starts.
  *   index 0, a number   -> 'building now, ready in 4 turns', 'building now, ready in 1 turn'
  *   index > 0, a number -> 'ready in 8 turns'
- *   no number           -> buildWaitText(entry.wait) (every row, the first included)
+ *   no number           -> buildWaitText(entry.wait, the row's unit type)
+ *                          (every row, the first included; a boat's row
+ *                          says 'no free water tile for the boat')
  * (A row with neither a number nor a reason, which the server never sends,
  * says what is true of every row: 'building now' for the first, 'after the
  * item above' for the others.)
@@ -324,8 +393,8 @@ export function queueRowText(entry: QueueEntryView, index: number): string {
     const ready = `ready in ${countOf(entry.turns, 'turn', 'turns')}`;
     return index === 0 ? `building now, ${ready}` : ready;
   }
-  if (entry.wait !== null) return buildWaitText(entry.wait);
-  return index === 0 ? 'building now' : buildWaitText('earlier');
+  if (entry.wait !== null) return buildWaitText(entry.wait, entry.item.unitType);
+  return index === 0 ? 'building now' : buildWaitText('earlier', entry.item.unitType);
 }
 
 /**
@@ -344,22 +413,26 @@ export function queueCountText(own: OwnCityDetail): string {
 }
 
 /**
- * The line in the city panel's head, or null: why the queue cannot be
- * changed right now. (In the head, because the head stays in sight while
- * the panel scrolls: the sentence is on the screen whenever a greyed button
+ * The line in the city panel's head, or null: a reason that holds for the
+ * whole panel. (In the head, because the head stays in sight while the
+ * panel scrolls: the sentence is on the screen whenever a greyed button
  * is.) First that applies:
- *   closed === 'offline'    -> 'No connection: the queue cannot be changed right now.'
- *   closed === 'turnEnded'  -> 'You have ended your turn. Cancel that to change the queue.'
- *   an option has addError  -> RULE_ERROR_MESSAGES[addError] ('The build queue is full.')
- *                              (the first such option of the menu)
+ *   closed === 'offline'    -> 'No connection: this city cannot be changed right now.'
+ *   closed === 'turnEnded'  -> 'You have ended your turn. Cancel that to change this city.'
+ *   an option says 'queueFull' -> 'The build queue is full.' (RULE_ERROR_MESSAGES.queueFull)
+ * The two sentences about closed orders say "this city", not "the queue":
+ * they also stand for the greyed "Grow first" and "Build first" buttons.
+ *
+ * Only the reason that is about the QUEUE is printed here. A boat's
+ * 'noWaterForBoat' stands inside its own add button (buildOptionText): it
+ * lasts for as long as the city stands, and in the head it would be said of
+ * every city without water for ever (it was, for a while, when this
+ * function printed the first addError of the menu).
  */
 export function queueNoteText(own: OwnCityDetail, closed: OrdersClosed | null): string | null {
-  if (closed === 'offline') return 'No connection: the queue cannot be changed right now.';
-  if (closed === 'turnEnded') return 'You have ended your turn. Cancel that to change the queue.';
-  for (const option of own.buildOptions) {
-    if (option.addError !== null) return RULE_ERROR_MESSAGES[option.addError];
-  }
-  return null;
+  if (closed === 'offline') return 'No connection: this city cannot be changed right now.';
+  if (closed === 'turnEnded') return 'You have ended your turn. Cancel that to change this city.';
+  return own.buildOptions.some((option) => option.addError === 'queueFull') ? RULE_ERROR_MESSAGES.queueFull : null;
 }
 
 /** How full a progress bar is, from 0 to 1 (a total of zero counts as empty). */
@@ -369,22 +442,47 @@ export function progressFraction(stored: number, total: number | null): number {
 }
 
 /**
- * The second line of an add button: what the item costs (in production) and
- * the turn it would be ready in if it were added now.
- *   'costs 18, ready in 4 turns', 'costs 18, ready in 1 turn'
- *   'costs 30, ready in 18 turns, uses 1 population'
- *   'costs 30, uses 1 population (the city must grow first)'
- *                            a wait other than 'earlier': the reason in brackets
- *   'costs 18 (more than 50 turns)'
- *   'costs 18'               wait 'earlier': the rows above already say why
+ * The middle line of a boat's add button in a city that owns no water (the
+ * option's addError is 'noWaterForBoat'): the reason alone, without cost
+ * and turns. It stands inside the button, so it is in view whenever the
+ * grey button is, on a phone too.
+ */
+export const NEEDS_WATER = "needs water inside this city's borders";
+
+/**
+ * The longest middle line of an add button that was seen on ONE line in the
+ * narrowest panel (282 pixels): 'costs 30, ready in 48 turns, uses 1
+ * population'. A test holds every answer of buildOptionText to it.
+ */
+export const ADD_LINE_MAX = 46;
+
+/**
+ * The second (middle) line of an add button: what the item costs (in
+ * production) and the turn it would be ready in if it were added now. ONE
+ * line in every state, at most ADD_LINE_MAX characters: when the line of
+ * the Settler took two, its button grew from 62 to 76 pixels at an answer,
+ * every button under it moved down, and a second press on the same spot
+ * queued another unit than the first. The first that applies:
+ *   addError 'noWaterForBoat'    -> NEEDS_WATER alone
+ *   a number of turns            -> 'costs 18, ready in 4 turns', 'costs 18, ready in 1 turn',
+ *                                   'costs 30, ready in 18 turns, uses 1 population'
+ *   wait null or 'earlier'       -> 'costs 18', 'costs 30, uses 1 population'
+ *                                   ('earlier': the rows above already say why)
+ *   any other wait               -> the reason in brackets, WITHOUT ', uses 1 population':
+ *                                   'costs 30 (the city must grow first)', 'costs 18 (more than 50 turns)',
+ *                                   'costs 20 (no free water tile for the boat)'
+ *                                   (the Settler's third line already says "Takes one citizen.")
+ * A full queue ('queueFull') changes nothing in this line: the head of the
+ * panel says it (queueNoteText).
  */
 export function buildOptionText(option: BuildOption): string {
-  const parts = [`costs ${option.cost}`];
-  if (option.turns !== null) parts.push(`ready in ${countOf(option.turns, 'turn', 'turns')}`);
+  if (option.addError === 'noWaterForBoat') return NEEDS_WATER;
+  const cost = `costs ${option.cost}`;
   const populationCost = UNITS[option.item.unitType].populationCost;
-  if (populationCost > 0) parts.push(`uses ${populationCost} population`);
-  const text = parts.join(', ');
-  return option.wait === null || option.wait === 'earlier' ? text : `${text} (${buildWaitText(option.wait)})`;
+  const uses = populationCost > 0 ? `, uses ${populationCost} population` : '';
+  if (option.turns !== null) return `${cost}, ready in ${countOf(option.turns, 'turn', 'turns')}${uses}`;
+  if (option.wait === null || option.wait === 'earlier') return `${cost}${uses}`;
+  return `${cost} (${buildWaitText(option.wait, option.item.unitType)})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +496,9 @@ export function buildOptionText(option: BuildOption): string {
  *     one: "Rome has nothing to build", "2 cities have nothing to build";
  *  2. cities that wait with no end in sight (citiesWaiting), by name and
  *     reason when there is exactly one: "Rome is waiting: the city must
- *     grow first", "2 cities are waiting to finish a unit";
+ *     grow first", "Rome is waiting: no free water tile for the boat" (the
+ *     reason is about the first entry of its queue), "2 cities are waiting
+ *     to finish a unit";
  *  3. the units (idleUnits, which leaves out units at work): "1 unit can
  *     still move", "2 units can still move".
  * Empty when nothing does. (A reminder only: it never stops anybody from
@@ -412,9 +512,13 @@ export function todoHints(view: PlayerView): string[] {
   else if (idle.length > 1) hints.push(`${idle.length} cities have nothing to build`);
 
   const waiting = citiesWaiting(view);
-  const held = waiting.length === 1 ? (waiting[0].own?.held ?? null) : null;
-  if (held !== null) hints.push(`${waiting[0].name} is waiting: ${buildWaitText(held)}`);
-  else if (waiting.length > 0) hints.push(`${countOf(waiting.length, 'city is', 'cities are')} waiting to finish a unit`);
+  const own = waiting.length === 1 ? waiting[0].own : null;
+  // citiesWaiting lists only cities that are held with a first entry: that entry is the unit that waits.
+  if (own !== null && own.held !== null && own.buildQueue.length > 0) {
+    hints.push(`${waiting[0].name} is waiting: ${buildWaitText(own.held, own.buildQueue[0].item.unitType)}`);
+  } else if (waiting.length > 0) {
+    hints.push(`${countOf(waiting.length, 'city is', 'cities are')} waiting to finish a unit`);
+  }
 
   const units = idleUnits(view).length;
   if (units > 0) hints.push(`${countOf(units, 'unit', 'units')} can still move`);

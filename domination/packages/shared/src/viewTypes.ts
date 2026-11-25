@@ -23,11 +23,13 @@
  *
  * What a view never contains: anything about never-seen tiles, units on tiles
  * out of sight, other players' moves left / food / production / worked tiles,
- * build queues, other players' units' jobs, which city owns a foreign tile,
- * other players' knowledge, seeds, RNG states.
+ * build queues, how another player's city places its citizens (its "Grow
+ * first / Build first" choice), other players' units' jobs, which city owns
+ * a foreign tile, other players' knowledge, seeds, RNG states.
  */
 
 import type { RuleErrorCode } from './actions';
+import type { CityFocusId } from './data/cityFocus';
 import type { CivId } from './data/civs';
 import type { ImprovementId } from './data/improvements';
 import type { FeatureId, TerrainId } from './data/terrain';
@@ -37,7 +39,7 @@ import type { BuildItem, CityId, PlayerId, TileIndex, UnitId } from './types';
 export interface TileView {
   terrain: TerrainId;
   feature: FeatureId | null;
-  /** What is built on the tile (a farm, a mine): current if `visible`, otherwise as last seen. null = nothing (as far as the player knows). */
+  /** What is built on the tile (a farm, a mine, a fishing net): current if `visible`, otherwise as last seen. null = nothing (as far as the player knows). */
   improvement: ImprovementId | null;
   /** Owner of the tile: current if `visible`, otherwise as last seen. null = unowned (as far as the player knows). */
   owner: PlayerId | null;
@@ -89,9 +91,10 @@ export interface OwnUnitDetail {
   /** The work the unit is doing on its tile, or null. A unit with a job cannot be moved until the job is finished or stopped. */
   job: UnitJobView | null;
   /**
-   * For a unit that can build improvements (UNITS[type].canImprove): one
-   * entry per improvement, in IMPROVEMENT_IDS order. Empty for every other
-   * unit.
+   * One entry per improvement the unit's TYPE builds
+   * (UNITS[type].improvements), in that order: a Worker's are the farm and
+   * the mine, a Fishing Boat's the fishing net. Empty for a unit that
+   * builds nothing, so nobody is shown a button that can never be pressed.
    */
   jobOptions: JobOption[];
 }
@@ -105,7 +108,7 @@ export interface UnitView {
   own: OwnUnitDetail | null;
 }
 
-/** Why a city cannot complete an entry that is paid for: it cannot spare the citizen the item takes, or there is no free tile for the unit. */
+/** Why a city cannot complete an entry that is paid for: it cannot spare the citizen the item takes, or there is no free tile for the unit (for a boat: no free water tile of the city's own). */
 export type ProductionBlock = 'needsPopulation' | 'noRoom';
 
 /**
@@ -155,11 +158,16 @@ export interface BuildOption {
   /** Set exactly when `turns` is null. */
   wait: BuildWait | null;
   /**
-   * Why the item cannot be added right now, or null if it can (the button is
-   * offered when this is null): 'queueFull' when the queue already holds
-   * RULES.maxQueueLength entries. Like OwnUnitDetail.foundCityError, it is
-   * about the city only; whether the player may give any order at this
-   * moment is a separate question.
+   * Why the item cannot be added, or null if it can (the button is offered
+   * when this is null). The first that applies:
+   *  - 'noWaterForBoat'  the item is a boat and the city owns no water
+   *                      tile. A LASTING reason: a city's land does not
+   *                      change. `turns` is then null and `wait` 'noRoom'.
+   *  - 'queueFull'       the queue already holds RULES.maxQueueLength entries.
+   * setBuildQueue refuses a queue with this item added exactly when this is
+   * not null (with a full queue AND no water it names the full queue first).
+   * Like OwnUnitDetail.foundCityError, it is about the city only; whether
+   * the player may give any order at this moment is a separate question.
    */
   addError: RuleErrorCode | null;
 }
@@ -196,8 +204,14 @@ export interface OwnCityDetail {
    * selected (MapOverlay.workedTiles in client/src/render/api.ts).
    */
   worked: TileIndex[];
-  /** Everything the city could add to its queue, in UNIT_TYPE_IDS order. */
+  /** Everything a city can build, in UNIT_TYPE_IDS order: one entry per unit type, also for one THIS city cannot build (its addError says so). */
   buildOptions: BuildOption[];
+  /**
+   * How the city places its citizens (City.focus): 'grow' or 'build'.
+   * `worked`, `foodPerTurn`, `productionPerTurn` and every forecast above
+   * are worked out with it. A stored focus that is not 'build' reads 'grow'.
+   */
+  focus: CityFocusId;
 }
 
 export interface CityView {

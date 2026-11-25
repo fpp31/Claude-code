@@ -3,7 +3,7 @@
  * `parseClientMessage` before any other code looks at it.
  */
 
-import { CIV_IDS, IMPROVEMENT_IDS, MAP_SIZE_IDS, RULES, UNIT_TYPE_IDS } from '@domination/shared';
+import { CITY_FOCUS_IDS, CIV_IDS, IMPROVEMENT_IDS, MAP_SIZE_IDS, RULES, UNIT_TYPE_IDS } from '@domination/shared';
 import type { Action, BuildItem, ClientMessage } from '@domination/shared';
 
 /** Longest strings accepted in a message (see parseClientMessage). */
@@ -37,12 +37,12 @@ type Fields = Record<string, unknown>;
  *    and cut to RULES.maxNameLength later), `code` at most 16, `token` at
  *    most 64, ids at most 32;
  *  - `civ` is one of CIV_IDS and `mapSize` one of MAP_SIZE_IDS;
- *  - `action.type` is one of the seven action types with exactly its fields;
+ *  - `action.type` is one of the eight action types with exactly its fields;
  *    `path` is an array of at most RULES.maxPathLength whole numbers;
  *    `queue` is an array of at most 64 entries, each
  *    `{ kind: 'unit', unitType: <one of UNIT_TYPE_IDS> }` (whether it is too
  *    long for the rules is the rules' answer); `improvement` is one of
- *    IMPROVEMENT_IDS.
+ *    IMPROVEMENT_IDS; `focus` is one of CITY_FOCUS_IDS.
  *
  * The result is rebuilt field by field (never the parsed object itself), so
  * unexpected extra properties cannot travel further into the server.
@@ -136,6 +136,12 @@ function parseAction(value: unknown): Action | null {
         items.push(item);
       }
       return { type: 'setBuildQueue', cityId, queue: items };
+    }
+    case 'setCityFocus': {
+      const { cityId } = value;
+      if (!isShortString(cityId, MAX_ID_LENGTH)) return null;
+      const focus = CITY_FOCUS_IDS.find((id) => id === value.focus);
+      return focus === undefined ? null : { type: 'setCityFocus', cityId, focus };
     }
     case 'startJob': {
       const { unitId } = value;

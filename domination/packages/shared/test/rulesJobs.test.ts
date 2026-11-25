@@ -3,15 +3,19 @@ import {
   IMPROVEMENTS,
   IMPROVEMENT_IDS,
   UNITS,
+  UNIT_TYPE_IDS,
   buildPlayerView,
+  checkInvariants,
   cityEconomy,
   cloneJson,
   improvementFits,
+  jobOptions,
   resolveTurn,
   startJobError,
   tileYields,
+  unitCanImprove,
 } from '../src/index';
-import type { Action, City, GameState, ImprovementId, RuleErrorCode, TileIndex, UnitJob } from '../src/index';
+import type { Action, City, CityFocusId, GameState, ImprovementId, RuleErrorCode, TileIndex, UnitJob, UnitTypeId } from '../src/index';
 import {
   act,
   actWithEvents,
@@ -34,10 +38,15 @@ import {
 } from './rulesKit';
 
 /**
- * Tests for Workers at work: the startJob and stopJob actions
+ * Tests for units at work: the startJob and stopJob actions
  * (rules/unitJob.ts, rules/improvements.ts), what a job does to moving and
  * founding, and the step of turn resolution that does the work (runJobs in
  * rules/turn.ts). Every action goes through the real applyAction.
+ *
+ * The first blocks are about the Worker, who came first. The Fishing Boat
+ * and its net (round 3) have the job of the Worker unchanged, so their
+ * block at the end tests what is theirs alone: who builds what, where a
+ * net fits, and what citizens make of a fished tile.
  */
 
 /**
@@ -138,7 +147,8 @@ describe('applyAction: startJob', () => {
       const state = arrange(game.state, (draft) => {
         unitId = placeUnit(draft, 'p1', type, site).id;
       });
-      expect(UNITS[type].canImprove).toBe(false);
+      expect(UNITS[type].improvements).toEqual([]);
+      expect(unitCanImprove(type)).toBe(false);
       for (const improvement of IMPROVEMENT_IDS) expect(refusal(state, 'p1', start(unitId, improvement)), type).toBe('cannotImprove');
     }
 
@@ -178,9 +188,12 @@ describe('applyAction: startJob', () => {
   it('rejects the tile of a city (cityOnTile)', () => {
     const game = jobsGame();
     const inRome = workerOn(game.state, 'p1', game.rome.tile);
-    for (const improvement of IMPROVEMENT_IDS) {
+    expect(UNITS.worker.improvements).toEqual(['farm', 'mine']);
+    for (const improvement of UNITS.worker.improvements) {
       expect(refusal(inRome.state, 'p1', start(inRome.workerId, improvement)), improvement).toBe('cityOnTile');
     }
+    // What a Worker does not build is refused for that, before the tile is looked at.
+    expect(refusal(inRome.state, 'p1', start(inRome.workerId, 'fishingNet'))).toBe('cannotImprove');
     // A city on hills is no place for a mine either. (The capital of this game is moved onto hills by hand.)
     const hillTown = arrange(inRome.state, (draft) => {
       draft.map.tiles[game.rome.tile].feature = 'hills';
@@ -204,10 +217,12 @@ describe('applyAction: startJob', () => {
     for (const [what, x, y, fitting] of grounds) {
       const { state, workerId, tile, rome } = withWorkerAt(x, y);
       expect(state.map.tiles[tile].cityId, what).toBe(rome.id);
-      for (const improvement of IMPROVEMENT_IDS) {
+      for (const improvement of UNITS.worker.improvements) {
         const expected: RuleErrorCode | null = improvement === fitting ? null : 'badImprovementTile';
         expect(refusal(state, 'p1', start(workerId, improvement)), `${improvement} on ${what}`).toBe(expected);
       }
+      // A net is not a Worker's to build, on any ground.
+      expect(refusal(state, 'p1', start(workerId, 'fishingNet')), `fishingNet on ${what}`).toBe('cannotImprove');
     }
     // The drawing is what the comment says it is.
     const map = jobsGame().state.map;
@@ -678,7 +693,7 @@ describe('turn resolution: runJobs', () => {
       ['the tile is nobody\'s land', (draft) => { draft.map.tiles[tile].cityId = null; }, null],
       ['the tile is another player\'s land', (draft) => { draft.map.tiles[tile].cityId = thebes.id; }, null],
       ['a city stands on the tile', (draft) => {
-        draft.cities.c1_under = { id: 'c1_under', owner: 'p1', name: 'Under', tile, population: 1, foodStored: 0, buildQueue: [], productionStored: 0 };
+        draft.cities.c1_under = { id: 'c1_under', owner: 'p1', name: 'Under', tile, population: 1, foodStored: 0, buildQueue: [], productionStored: 0, focus: 'grow' };
         draft.map.tiles[tile].cityId = 'c1_under';
       }, null],
       ['the tile already has the improvement', (draft) => { draft.map.tiles[tile].improvement = 'farm'; }, 'farm'],
@@ -837,5 +852,364 @@ describe('founding a city', () => {
     const settled = foundCityAt(twoFarms, 'p1', site);
     expect(settled.map.tiles[neighbor]).toMatchObject({ improvement: 'farm', cityId: cityOn(settled, site).id });
     expect(settled.map.tiles[site].improvement).toBeNull();
+  });
+});
+
+describe('the Fishing Boat and its net (round 3)', () => {
+  /**
+   * Two cities on a shore. Rome (p1) stands at (3,3), Thebes (p2) at (9,3);
+   * row 4 is coast, everything below is open ocean. Row 3 is an odd row, so
+   * Rome touches the coast tiles (3,4) and (4,4).
+   *   Rome's water:   coast (2,4) (3,4) (4,4) (5,4), ocean (2,5) (3,5) (4,5)
+   *   nobody's coast: (6,4) and (7,4)
+   *   Thebes's coast: (8,4) to (11,4)
+   */
+  const HARBOUR: readonly string[] = [
+    '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+    ' ~ g g g g g g g g g g g ~',
+    '~ g g g g g g g g g g g ~',
+    ' ~ g g g g g g g g g g g ~',
+    '~ , , , , , , , , , , , ~',
+    ' ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+    '~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~',
+  ];
+
+  /** Both capitals founded; their Warriors stand in the cities. */
+  function harbourGame(): JobsGame {
+    const begun = newGame(HARBOUR, [[3, 3], [9, 3]]);
+    let state = act(begun, 'p1', { type: 'foundCity', unitId: unitOf(begun, 'p1', 'settler').id });
+    state = act(state, 'p2', { type: 'foundCity', unitId: unitOf(state, 'p2', 'settler').id });
+    return { state, rome: cityOn(state, at(state.map, 3, 3)), thebes: cityOn(state, at(state.map, 9, 3)) };
+  }
+
+  /** A copy of the state with one more unit of p1 on the tile (x, y), and its id. */
+  function withUnitAt(state: GameState, type: UnitTypeId, x: number, y: number): { state: GameState; unitId: string; tile: TileIndex } {
+    const tile = at(state.map, x, y);
+    let unitId = '';
+    const ready = arrange(state, (draft) => {
+      unitId = placeUnit(draft, 'p1', type, tile).id;
+    });
+    return { state: ready, unitId, tile };
+  }
+
+  it('a Fishing Boat on a coast tile of its owner\'s land starts a net; four resolutions later the tile carries it, the boat is still there and free, the event names the city; the tile gives 4 food from the turn after', () => {
+    const game = harbourGame();
+    const map = game.state.map;
+    expect(IMPROVEMENTS.fishingNet.turns).toBe(4);
+
+    // The boat sails two tiles to a coast tile next to Rome and begins in the same turn, with no moves left.
+    const boat = withUnitAt(game.state, 'fishingBoat', 6, 4);
+    const site = at(map, 4, 4);
+    expect(game.state.map.tiles[site]).toMatchObject({ terrain: 'coast', improvement: null, cityId: game.rome.id });
+    const arrived = act(boat.state, 'p1', { type: 'moveUnit', unitId: boat.unitId, path: [at(map, 5, 4), site] });
+    expect(arrived.units[boat.unitId]).toMatchObject({ tile: site, movesLeft: 0 });
+    const begun = actWithEvents(arrived, 'p1', start(boat.unitId, 'fishingNet'));
+    expect(begun.events).toEqual([]);
+    expect(begun.state.units[boat.unitId]).toEqual({
+      id: boat.unitId, type: 'fishingBoat', owner: 'p1', tile: site, movesLeft: 0, job: { improvement: 'fishingNet', turnsWorked: 0 },
+    });
+    expect(begun.state.map.tiles[site]).toEqual(arrived.map.tiles[site]);
+
+    // Three resolutions: the work goes on, the tile is bare, the boat stays (it cannot sail while it works).
+    let current = begun.state;
+    const bare = cityEconomy(current, current.cities[game.rome.id]);
+    expect(bare.worked).not.toContain(site); // the citizen gathers from grassland: bare coast gives 2 food and nothing else
+    for (let resolved = 1; resolved <= 3; resolved++) {
+      const step = endTurnForAll(current);
+      current = step.state;
+      expect(current.units[boat.unitId], `after ${resolved} turns`).toMatchObject({ tile: site, job: { improvement: 'fishingNet', turnsWorked: resolved } });
+      expect(current.map.tiles[site].improvement, `after ${resolved} turns`).toBeNull();
+      expect(step.events.some((addressed) => addressed.event.type === 'improvementBuilt')).toBe(false);
+      expect(refusal(current, 'p1', { type: 'moveUnit', unitId: boat.unitId, path: [at(map, 5, 4)] })).toBe('unitBusy');
+      expect(buildPlayerView(current, 'p1').units.find((unit) => unit.id === boat.unitId)?.own?.job).toEqual({
+        improvement: 'fishingNet', turnsWorked: resolved, turnsTotal: 4, turnsLeft: 4 - resolved,
+      });
+    }
+
+    // The fourth: the net is on the tile, the boat is where it was, not used up, free and with full moves.
+    const foodBefore = current.cities[game.rome.id].foodStored;
+    const shown = buildPlayerView(current, 'p1').cities.find((city) => city.id === game.rome.id)?.own;
+    const done = endTurnForAll(current);
+    expect(done.state.map.tiles[site]).toEqual({ ...current.map.tiles[site], improvement: 'fishingNet' });
+    expect(done.state.units[boat.unitId]).toEqual({
+      id: boat.unitId, type: 'fishingBoat', owner: 'p1', tile: site, movesLeft: UNITS.fishingBoat.moves, job: null,
+    });
+    expect(done.events.filter((addressed) => addressed.event.type === 'improvementBuilt')).toEqual([
+      { to: ['p1'], event: { type: 'improvementBuilt', playerId: 'p1', unitId: boat.unitId, improvement: 'fishingNet', tile: site, cityName: game.rome.name } },
+    ]);
+    expect(refusal(done.state, 'p1', { type: 'moveUnit', unitId: boat.unitId, path: [at(map, 5, 4)] })).toBeNull();
+    expect(refusal(done.state, 'p1', start(boat.unitId, 'fishingNet'))).toBe('alreadyImproved');
+
+    // The turn that finished the net gave the city what its panel had shown: the yields without the net.
+    expect(shown?.foodPerTurn).toBe(bare.foodSurplus);
+    expect(done.state.cities[game.rome.id].foodStored).toBe(foodBefore + bare.foodSurplus);
+    // From the turn after, the fished tile gives 4 food and no production, and the citizen gathers from it.
+    expect(tileYields(done.state.map.tiles[site])).toEqual({ food: 4, production: 0 });
+    const fished = cityEconomy(done.state, done.state.cities[game.rome.id]);
+    expect(fished).toEqual({ worked: [site], food: 2 + 4, production: 1, foodSurplus: 4 });
+    // (The store is emptied by hand first, so that the four turns of grassland before do not make the city grow here.)
+    const emptied = arrange(done.state, (draft) => {
+      draft.cities[game.rome.id].foodStored = 0;
+    });
+    expect(endTurnForAll(emptied).state.cities[game.rome.id]).toMatchObject({ foodStored: 4, population: 1 });
+    // Units never matter to citizens, on water as on land: with another player's boat on the fished tile the city gathers the same.
+    const visited = arrange(done.state, (draft) => {
+      draft.units[boat.unitId].tile = at(map, 5, 4);
+      placeUnit(draft, 'p2', 'scoutBoat', site);
+    });
+    expect(cityEconomy(visited, visited.cities[game.rome.id])).toEqual(fished);
+    // Everybody who sees the tile sees the net; the owner's panel marks the tile as gathered from.
+    const view = buildPlayerView(done.state, 'p1');
+    expect(view.tiles[site]).toMatchObject({ improvement: 'fishingNet', visible: true, owner: 'p1' });
+    expect(view.cities.find((city) => city.id === game.rome.id)?.own?.worked).toEqual([site]);
+  });
+
+  it('a net is refused on ocean (badImprovementTile), outside the borders (notYourLand), on a netted tile (alreadyImproved)', () => {
+    const game = harbourGame();
+    const map = game.state.map;
+    const net = (x: number, y: number, prepare: (draft: GameState) => void = () => undefined): RuleErrorCode | null => {
+      const boat = withUnitAt(arrange(game.state, prepare), 'fishingBoat', x, y);
+      const answer = refusal(boat.state, 'p1', start(boat.unitId, 'fishingNet'));
+      // The owner's view says the same on the boat's one button, before any press.
+      expect(buildPlayerView(boat.state, 'p1').units.find((unit) => unit.id === boat.unitId)?.own?.jobOptions).toEqual([
+        { improvement: 'fishingNet', turns: IMPROVEMENTS.fishingNet.turns, error: answer },
+      ]);
+      return answer;
+    };
+
+    // Ocean inside the borders: the water is Rome's, but a net needs coast.
+    expect(map.tiles[at(map, 3, 5)]).toMatchObject({ terrain: 'ocean', cityId: game.rome.id });
+    expect(net(3, 5)).toBe('badImprovementTile');
+    // Coast outside the borders: nobody's, and another player's. (The boat may be there: borders do not stop boats.)
+    expect(map.tiles[at(map, 6, 4)]).toMatchObject({ terrain: 'coast', cityId: null });
+    expect(net(6, 4)).toBe('notYourLand');
+    expect(map.tiles[at(map, 9, 4)]).toMatchObject({ terrain: 'coast', cityId: game.thebes.id });
+    expect(net(9, 4)).toBe('notYourLand');
+    // Whose water comes before what water: ocean outside the borders is 'notYourLand'.
+    expect(map.tiles[at(map, 7, 5)]).toMatchObject({ terrain: 'ocean', cityId: null });
+    expect(net(7, 5)).toBe('notYourLand');
+    // A tile that carries a net already.
+    expect(net(4, 4, (draft) => improve(draft, at(map, 4, 4), 'fishingNet'))).toBe('alreadyImproved');
+    // And where it is built: every coast tile of Rome's.
+    for (const x of [2, 3, 4, 5]) expect(net(x, 4), `(${x}, 4)`).toBeNull();
+    // Thebes's boat on Thebes's coast, for good measure: the rule is about the boat's owner.
+    let theirBoat = '';
+    const theirs = arrange(game.state, (draft) => {
+      theirBoat = placeUnit(draft, 'p2', 'fishingBoat', at(map, 9, 4)).id;
+    });
+    expect(refusal(theirs, 'p2', start(theirBoat, 'fishingNet'))).toBeNull();
+    // A net on ground that does not suit it is something the health check names (arrange would not let it through).
+    const netOnOcean = tamper(game.state, (draft) => improve(draft, at(map, 3, 5), 'fishingNet'));
+    expect(improvementFits('fishingNet', netOnOcean.map.tiles[at(map, 3, 5)])).toBe(false);
+    expect(checkInvariants(netOnOcean)).toHaveLength(1);
+    expect(checkInvariants(netOnOcean)[0]).toContain(`Tile ${at(map, 3, 5)} `);
+  });
+
+  it('a Worker asked for a net and a Fishing Boat asked for a farm or a mine are refused cannotImprove; a Scout Boat for anything', () => {
+    const game = harbourGame();
+    const worker = withUnitAt(game.state, 'worker', 2, 3);
+    const fishing = withUnitAt(worker.state, 'fishingBoat', 4, 4);
+    const scouting = withUnitAt(fishing.state, 'scoutBoat', 3, 4);
+    const state = scouting.state;
+
+    expect(refusal(state, 'p1', start(worker.unitId, 'fishingNet'))).toBe('cannotImprove');
+    expect(refusal(state, 'p1', start(fishing.unitId, 'farm'))).toBe('cannotImprove');
+    expect(refusal(state, 'p1', start(fishing.unitId, 'mine'))).toBe('cannotImprove');
+    for (const improvement of IMPROVEMENT_IDS) {
+      expect(refusal(state, 'p1', start(scouting.unitId, improvement)), improvement).toBe('cannotImprove');
+    }
+    // Each can do its own work on the very tile it stands on: it is the unit that is wrong, not the place.
+    expect(refusal(state, 'p1', start(worker.unitId, 'farm'))).toBeNull();
+    expect(refusal(state, 'p1', start(fishing.unitId, 'fishingNet'))).toBeNull();
+    // The Scout Boat lies on coast of Rome's where a net fits.
+    expect(improvementFits('fishingNet', state.map.tiles[scouting.tile])).toBe(true);
+
+    // "Not yours to build" is said before "busy" and before anything about the tile.
+    const busyBoat = withJob(state, fishing.unitId, { improvement: 'fishingNet', turnsWorked: 1 });
+    expect(refusal(busyBoat, 'p1', start(fishing.unitId, 'farm'))).toBe('cannotImprove');
+    const busyWorker = withJob(state, worker.unitId, { improvement: 'farm', turnsWorked: 1 });
+    expect(refusal(busyWorker, 'p1', start(worker.unitId, 'fishingNet'))).toBe('cannotImprove');
+    expect(refusal(busyWorker, 'p1', start(worker.unitId, 'mine'))).toBe('unitBusy');
+    const abroad = withUnitAt(game.state, 'fishingBoat', 9, 4);
+    expect(refusal(abroad.state, 'p1', start(abroad.unitId, 'farm'))).toBe('cannotImprove');
+    // startJobError says the same without an action.
+    expect(startJobError(state, state.units[worker.unitId], 'fishingNet')).toBe('cannotImprove');
+    expect(startJobError(state, state.units[fishing.unitId], 'mine')).toBe('cannotImprove');
+    expect(startJobError(state, state.units[scouting.unitId], 'fishingNet')).toBe('cannotImprove');
+    // Nothing was started by any of the refusals.
+    for (const unit of Object.values(state.units)) expect(unit.job).toBeNull();
+  });
+
+  it('jobOptions: two for a Worker, one for a Fishing Boat, none for the others, in IMPROVEMENT_IDS order', () => {
+    const game = harbourGame();
+    const map = game.state.map;
+    // One unit of every type of p1, each on ground it can stand on.
+    const state = arrange(game.state, (draft) => {
+      placeUnit(draft, 'p1', 'scout', at(map, 2, 2));
+      placeUnit(draft, 'p1', 'settler', at(map, 2, 3));
+      placeUnit(draft, 'p1', 'worker', at(map, 4, 3));
+      placeUnit(draft, 'p1', 'fishingBoat', at(map, 4, 4));
+      placeUnit(draft, 'p1', 'scoutBoat', at(map, 3, 4));
+    });
+    const view = buildPlayerView(state, 'p1');
+    const expected: Record<UnitTypeId, ImprovementId[]> = {
+      warrior: [], scout: [], settler: [], worker: ['farm', 'mine'], fishingBoat: ['fishingNet'], scoutBoat: [],
+    };
+    for (const type of UNIT_TYPE_IDS) {
+      const unit = unitOf(state, 'p1', type);
+      const options = jobOptions(state, unit);
+      expect(options.map((option) => option.improvement), type).toEqual(expected[type]);
+      // The unit table's list, in the order of IMPROVEMENT_IDS, with the table's turns.
+      expect(options.map((option) => option.improvement), type).toEqual(IMPROVEMENT_IDS.filter((id) => UNITS[type].improvements.includes(id)));
+      for (const option of options) {
+        expect(option.turns, `${type}: ${option.improvement}`).toBe(IMPROVEMENTS[option.improvement].turns);
+        expect(option.error, `${type}: ${option.improvement}`).toBe(startJobError(state, unit, option.improvement));
+        expect(Object.keys(option).sort()).toEqual(['error', 'improvement', 'turns']);
+      }
+      // The owner's view carries exactly these.
+      expect(view.units.find((seen) => seen.id === unit.id)?.own?.jobOptions, type).toEqual(options);
+    }
+    // What stands where: the Worker on open grassland may farm, the boat on Rome's coast may fish.
+    expect(jobOptions(state, unitOf(state, 'p1', 'worker'))).toEqual([
+      { improvement: 'farm', turns: 4, error: null },
+      { improvement: 'mine', turns: 5, error: 'badImprovementTile' },
+    ]);
+    expect(jobOptions(state, unitOf(state, 'p1', 'fishingBoat'))).toEqual([{ improvement: 'fishingNet', turns: 4, error: null }]);
+    // Nobody is shown a button that can never be pressed: p2 sees p1's boat and learns nothing of what it could do.
+    for (const unit of buildPlayerView(state, 'p2').units) if (unit.owner === 'p1') expect(unit.own).toBeNull();
+  });
+
+  /**
+   * A capital drawn like a real one, on a shore: Rome at (3,3). Its land:
+   * seven open grassland tiles, one plains tile, two forests, one hill
+   * (at (4,2), next to the city), four coast tiles and three of ocean.
+   */
+  const SHORE_CAPITAL: readonly string[] = [
+    '~ ~ ~ ~ ~ ~ ~ ~ ~',
+    ' ~ g g f g g g ~ ~',
+    '~ g p g h g p g ~',
+    ' ~ g g g g f g ~ ~',
+    '~ , , , , , , , ~',
+    ' ~ ~ ~ ~ ~ ~ ~ ~ ~',
+    '~ ~ ~ ~ ~ ~ ~ ~ ~',
+  ];
+
+  /** The economy of the one city of a state at this size and under this focus, with these improvements on its land. */
+  function economyWith(base: GameState, population: number, focus: CityFocusId, built: readonly [TileIndex, ImprovementId][]) {
+    const state = arrange(base, (draft) => {
+      const city = Object.values(draft.cities)[0];
+      city.population = population;
+      city.focus = focus;
+      for (const [tile, improvement] of built) improve(draft, tile, improvement);
+    });
+    const city = Object.values(state.cities)[0];
+    const economy = cityEconomy(state, city);
+    // The owner's panel and the map's gold tokens say the same.
+    expect(buildPlayerView(state, 'p1').cities[0].own).toMatchObject({
+      worked: economy.worked, foodPerTurn: economy.foodSurplus, productionPerTurn: economy.production, focus,
+    });
+    return economy;
+  }
+
+  it('citizens gather a fished coast tile: in a city drawn like a real capital the net is taken by the first citizen, with a farm and a mine beside it too; the mine is still taken first when a farm feeds it', () => {
+    const begun = newGame(SHORE_CAPITAL, [[3, 3]]);
+    const base = act(begun, 'p1', { type: 'foundCity', unitId: unitOf(begun, 'p1', 'settler').id });
+    const map = base.map;
+    const rome = cityOn(base, at(map, 3, 3));
+    const NET = at(map, 4, 4);
+    const FARM = at(map, 2, 3);
+    const MINE = at(map, 4, 2);
+    const land = map.tiles.filter((tile) => tile.cityId === rome.id);
+    expect(land).toHaveLength(19);
+    expect(land.filter((tile) => tile.terrain === 'coast')).toHaveLength(4);
+    expect(map.tiles[FARM]).toMatchObject({ terrain: 'grassland', feature: null, cityId: rome.id });
+    expect(map.tiles[MINE]).toMatchObject({ feature: 'hills', cityId: rome.id });
+    const net: [TileIndex, ImprovementId] = [NET, 'fishingNet'];
+    const farm: [TileIndex, ImprovementId] = [FARM, 'farm'];
+    const mine: [TileIndex, ImprovementId] = [MINE, 'mine'];
+
+    // Bare land: the first citizen gathers from open grassland (2 + 1), not from bare coast (2 + 0).
+    const bare = economyWith(base, 1, 'grow', []);
+    expect(map.tiles[bare.worked[0]]).toMatchObject({ terrain: 'grassland', feature: null });
+    // One net: a fished tile gives 4, more than any bare tile. The FIRST citizen takes it.
+    expect(economyWith(base, 1, 'grow', [net])).toEqual({ worked: [NET], food: 6, production: 1, foodSurplus: 4 });
+    // With a farm and a mine beside it too. The mined hill gives most (5) but no food, so one
+    // citizen cannot stay on it (2 - 2 = 0); the citizen is moved to the tile with the most food: the net.
+    expect(economyWith(base, 1, 'grow', [net, farm, mine])).toEqual({ worked: [NET], food: 6, production: 1, foodSurplus: 4 });
+    // The second citizen: the mine first (5), then the net (4 food) ahead of the farm (3 + 1). The net feeds the mine.
+    expect(economyWith(base, 2, 'grow', [net, farm, mine])).toEqual({ worked: [MINE, NET], food: 6, production: 6, foodSurplus: 2 });
+    // The third: the farm.
+    expect(economyWith(base, 3, 'grow', [net, farm, mine])).toEqual({ worked: [FARM, MINE, NET].sort((a, b) => a - b), food: 9, production: 7, foodSurplus: 3 });
+    // The net pushes nobody out: every later citizen has the mine, the net and the farm among its tiles.
+    for (let population = 3; population <= 8; population++) {
+      const worked = economyWith(base, population, 'grow', [net, farm, mine]).worked;
+      for (const tile of [MINE, NET, FARM]) expect(worked, `population ${population}`).toContain(tile);
+    }
+
+    // The mine is still taken first when a farm feeds it, with no net anywhere: round 2's rule is unchanged.
+    expect(economyWith(base, 2, 'grow', [farm, mine])).toEqual({ worked: [FARM, MINE].sort((a, b) => a - b), food: 5, production: 7, foodSurplus: 1 });
+    // And still not by a single citizen, whom the farm then feeds instead.
+    expect(economyWith(base, 1, 'grow', [farm, mine]).worked).toEqual([FARM]);
+  });
+
+  it('a mine needs a feeder: in a capital drawn with a mined hill, six farmed plains tiles and no grassland, the mine is gathered from at no city size from 1 to 6 under Grow; with ONE net beside them it is gathered from, from the second citizen on; under Build it is at every size', () => {
+    // Rome at (3,3) on plains. Around it: six open plains tiles, one hill
+    // (4,4) and one coast tile (3,5); everything else is mountains, which
+    // nobody gathers from. No grassland anywhere: the cities of 4.6 whose
+    // promised mine stood unused for a whole game.
+    const DRY_HILLS: readonly string[] = [
+      'M M M M M M M',
+      ' M M M M M M M',
+      'M M M p p M M',
+      ' M M p p p M M',
+      'M M p p H M M',
+      ' M M M , M M M',
+      'M M M M M M M',
+    ];
+    const begun = newGame(DRY_HILLS, [[3, 3]]);
+    const base = act(begun, 'p1', { type: 'foundCity', unitId: unitOf(begun, 'p1', 'settler').id });
+    const map = base.map;
+    const rome = cityOn(base, at(map, 3, 3));
+    const MINE = at(map, 4, 4);
+    const NET = at(map, 3, 5);
+    const plains = map.tiles
+      .map((tile, index) => ({ tile, index }))
+      .filter(({ tile, index }) => tile.cityId === rome.id && index !== rome.tile && tile.terrain === 'plains' && tile.feature === null)
+      .map(({ index }) => index);
+    expect(plains).toHaveLength(6);
+    expect(map.tiles.some((tile) => tile.cityId === rome.id && tile.terrain === 'grassland' && tile.feature === null)).toBe(false);
+    expect(map.tiles[MINE]).toMatchObject({ terrain: 'plains', feature: 'hills', cityId: rome.id });
+    expect(map.tiles[NET]).toMatchObject({ terrain: 'coast', cityId: rome.id });
+
+    const worked: [TileIndex, ImprovementId][] = [[MINE, 'mine'], ...plains.map((tile): [TileIndex, ImprovementId] => [tile, 'farm'])];
+    // What the numbers are: a farmed plains tile gives 2 food, exactly what its own citizen eats.
+    expect(tileYields({ terrain: 'plains', feature: null, improvement: 'farm' })).toEqual({ food: 2, production: 2 });
+    expect(tileYields({ terrain: 'plains', feature: 'hills', improvement: 'mine' })).toEqual({ food: 0, production: 5 });
+
+    for (let population = 1; population <= 6; population++) {
+      const what = `population ${population}`;
+      // Under Grow, a Worker's work alone: the mine is the best tile and nobody stands on it. With it the
+      // city would stand still (the centre's 2 and 2 for every other citizen, all eaten), so its citizen is moved.
+      const farmed = economyWith(base, population, 'grow', worked);
+      expect(farmed.worked, what).not.toContain(MINE);
+      expect(farmed.foodSurplus, what).toBe(2);
+      // Under Build it is gathered from at every size, and the city stands still, as the sentence above says.
+      const building = economyWith(base, population, 'build', worked);
+      expect(building.worked, what).toContain(MINE);
+      expect(building.foodSurplus, what).toBe(0);
+      expect(building.production, what).toBeGreaterThan(farmed.production);
+
+      // With ONE net beside them: from the second citizen on the mine is gathered from (2 + 0 + 4 - 4 = +2).
+      const fed = economyWith(base, population, 'grow', [...worked, [NET, 'fishingNet']]);
+      if (population === 1) {
+        expect(fed.worked, what).toEqual([NET]);
+      } else {
+        expect(fed.worked, what).toContain(MINE);
+        expect(fed.worked, what).toContain(NET);
+        expect(fed.foodSurplus, what).toBe(2);
+        expect(fed.production, what).toBe(farmed.production + 5 - 2 - 2 + 0); // the mine and the net instead of two farmed plains tiles
+      }
+      expect(economyWith(base, population, 'build', [...worked, [NET, 'fishingNet']]).worked, what).toContain(MINE);
+    }
   });
 });

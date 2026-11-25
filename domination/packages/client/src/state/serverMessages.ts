@@ -428,11 +428,13 @@ export function foldedNewsText(count: number, asking: number): string {
  * A short sentence for a toast, or null for events that need none
  * (for example 'unitMoved'): "Rome grew to 2.", "Warrior completed in Rome.",
  * "Turn 8 has begun.", "You founded Ostia.", "Your Worker finished a Farm
- * near Rome.".
+ * near Rome.". The names come from the tables, so the boats and the net of
+ * round 3 need no sentence of their own: "Fishing Boat completed in Rome.",
+ * "Your Fishing Boat finished a Fishing Net near Rome.".
  *
  * A unit that was the last entry of its city's build queue gets a second
  * sentence, "Warrior completed in Rome. Rome has nothing left to build.":
- * from now on that city's production is lost every turn, and this toast is
+ * from now on that city's production is lost, turn after turn, and this toast is
  * the first place that says so.
  *
  * One kind of move does get a sentence: the player's own unit stopping

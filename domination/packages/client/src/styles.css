@@ -976,7 +976,13 @@ select.field:disabled {
   margin-top: 3px;
 }
 
-/* "Stopping loses the work done so far." on the left, "Stop work" at the right end (also when it stands alone, greyed out). */
+/*
+ * "Stopping loses 3 turns of work." on the left, "Stop work" at the right
+ * end (also when it stands alone, greyed out). When the button asks ("Tap
+ * again to stop") it is wider: it keeps its right edge and its top and
+ * grows to the left, into the room of the small print, which is short then
+ * ("3 turns will be lost."), so the second press lands on the button.
+ */
 .job-stop-row {
   display: flex;
   align-items: center;
@@ -992,6 +998,11 @@ select.field:disabled {
 .job-stop-row .button {
   flex: none;
   margin-left: auto;
+}
+
+/* "Tap again to stop": the button is asking (the look of .queue-clear.armed). */
+.job-stop.armed {
+  color: var(--accent);
 }
 
 .bar {
@@ -1082,6 +1093,82 @@ select.field:disabled {
 .build-button.added .build-detail {
   color: var(--good);
   font-weight: 700;
+}
+
+/* ---- City panel: what the citizens put first ("Grow first" / "Build first") ---- */
+
+/* Two buttons side by side under the panel's head, each half the panel's width. */
+.focus-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+/* The name, and under it one small line that says what this way puts first. The words never change, so neither does the height. */
+.focus-button {
+  display: grid;
+  align-content: start;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+/* "Grow first", "Build first": one line at every size. */
+.focus-name {
+  white-space: nowrap;
+}
+
+/*
+ * The small line. It has this class and no other, above all not
+ * .panel-hint: the city panel hides its hints on phones and in low windows
+ * (see the two @media blocks below), and these lines must be read there.
+ */
+.focus-about {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--paper-dim);
+  text-wrap: balance;
+}
+
+/*
+ * The city's choice: sunk, with a LIGHT edge and light words. Not gold:
+ * everywhere else in the panels gold words are a warning or a question
+ * ("Nothing to build", "Tap again to stop"), and a chosen button in gold
+ * would read as one more thing that asks for the player. A test reads the
+ * colours from here and holds the words to 4.5 to 1 on the sunk face
+ * (test/shellStyles.test.ts).
+ */
+.focus-button[aria-pressed='true'] {
+  background: var(--chrome-sunk);
+  color: var(--paper);
+  border-color: var(--paper);
+  box-shadow:
+    inset 0 3px 0 rgb(0 0 0 / 0.45),
+    3px 3px 0 var(--edge-dark);
+}
+
+/* A press on the chosen one does nothing, and it shows nothing: the button stays sunk (an ordinary button moves into its shadow). */
+.focus-button[aria-pressed='true']:active:not(:disabled) {
+  transform: none;
+  box-shadow:
+    inset 0 3px 0 rgb(0 0 0 / 0.45),
+    3px 3px 0 var(--edge-dark);
+}
+
+.focus-button[aria-pressed='true'] .focus-about {
+  color: var(--paper);
+}
+
+.focus-button:disabled .focus-about {
+  color: inherit;
+}
+
+/* While no order can be given both are grey; the chosen one keeps its sunk face and gets a grey edge, so it is still told from the other. */
+.focus-button[aria-pressed='true']:disabled {
+  background: var(--chrome-sunk);
+  color: #a9a7c0;
+  border-color: #a9a7c0;
 }
 
 /* ---- City panel: the build queue ---- */
@@ -1521,6 +1608,11 @@ select.field:disabled {
   .panel-head {
     padding-top: 6px;
     padding-bottom: 4px;
+  }
+
+  /* And "Grow first" / "Build first" stand closer under it. */
+  .focus-row {
+    margin-top: 6px;
   }
 
   /* The card leaves the map room to bring the tile out from under it; it scrolls inside itself. */

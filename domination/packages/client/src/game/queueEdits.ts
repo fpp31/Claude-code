@@ -9,6 +9,16 @@
 import { RULES } from '@domination/shared';
 import type { BuildItem } from '@domination/shared';
 
+/**
+ * `queue` as it is: the same items in the same order, as fresh objects. For
+ * the controller's note of the queue that a "Grow first" / "Build first"
+ * press leaves standing: the adds that wait behind such a press are sent on
+ * top of this list.
+ */
+export function queueUnchanged(queue: readonly BuildItem[]): BuildItem[] {
+  return queue.map(copyOf);
+}
+
 /** `queue` with `item` at the end; null if it already holds RULES.maxQueueLength entries. */
 export function queueWithAdded(queue: readonly BuildItem[], item: BuildItem): BuildItem[] | null {
   if (queue.length >= RULES.maxQueueLength) return null;

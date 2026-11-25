@@ -1,11 +1,26 @@
-import { IMPROVEMENTS, RULES, RULE_ERROR_MESSAGES, SERVER_ERROR_MESSAGE } from '@domination/shared';
-import type { ServerMessage } from '@domination/shared';
+import { IMPROVEMENTS, RULES, RULE_ERROR_MESSAGES, SERVER_ERROR_MESSAGE, UNITS, UNIT_TYPE_IDS } from '@domination/shared';
+import type { GameEvent, ServerMessage } from '@domination/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MAX_BAD_MESSAGES } from '../src/config';
 import { CANARY, createFakeRules, fakeUnitId } from './fakeRules';
 import { cleanUp, failingStorage, gameWith, lobbyWith, newDiskControl, startTestServer } from './harness';
 import type { TestClient, TestServer } from './harness';
-import { endTurn, ownCity, ownUnit, queueItems, queueOf, raiseWorker, realRulesOnMeadow, setQueue, turnOf } from './realWorld';
+import {
+  at,
+  endTurn,
+  ownCity,
+  ownUnit,
+  ownWater,
+  queueItems,
+  queueOf,
+  raiseBoat,
+  raiseWorker,
+  realRulesOnMeadow,
+  realRulesOnShore,
+  setFocus,
+  setQueue,
+  turnOf,
+} from './realWorld';
 
 /**
  * Actions in a running game: who may act, what the actor and the others are
@@ -13,8 +28,9 @@ import { endTurn, ownCity, ownUnit, queueItems, queueOf, raiseWorker, realRulesO
  * with the fake rules: in the fake game a move changes only the mover's own
  * view, and ending the turn changes everybody's.
  *
- * The second group, at the end of the file, plays build queues and a
- * Worker's job with the real rules.
+ * The second group plays build queues and a Worker's job with the real
+ * rules; the third, at the end of the file, boats, a fishing net and the
+ * "Grow first / Build first" choice of a city (round 3).
  */
 
 afterEach(cleanUp);
@@ -604,9 +620,17 @@ describe('build queues and jobs through the server (WP3, real rules)', () => {
     const longest = queueOf(...Array.from({ length: RULES.maxQueueLength }, () => 'scout' as const));
     await ada.actOk(1, setQueue(rome, longest));
     expect(queueItems(ownCity(ada.view))).toEqual(longest);
-    expect(ownCity(ada.view).own.buildOptions.map((option) => option.addError)).toEqual(
-      ownCity(ada.view).own.buildOptions.map(() => 'queueFull'),
-    );
+    // Nothing can be added now, and each entry of the menu says why. Rome
+    // owns no water on this meadow, and for the two boats that is the
+    // reason: it lasts, a full queue does not.
+    expect(ownCity(ada.view).own.buildOptions.map((option) => [option.item.unitType, option.addError])).toEqual([
+      ['warrior', 'queueFull'],
+      ['scout', 'queueFull'],
+      ['settler', 'queueFull'],
+      ['worker', 'queueFull'],
+      ['fishingBoat', 'noWaterForBoat'],
+      ['scoutBoat', 'noWaterForBoat'],
+    ]);
 
     // ...and only the fifth bad message closes the socket.
     ada.sendRaw(notAMessage);
@@ -685,5 +709,366 @@ describe('build queues and jobs through the server (WP3, real rules)', () => {
     expect(server.save(code).game?.map.tiles[field].improvement).toBeNull();
     await ben.expectNothingPending();
     expect(onlyPongsSince(ben, benFrames)).toBe(true);
+  });
+});
+
+/**
+ * Boats, a fishing net and "Grow first / Build first", with the real rules,
+ * on the meadow by the sea (LONG_SHORE in realWorld.ts): Ada (p1) starts on
+ * the shore, where her capital owns seven coast tiles and four plains; Ben
+ * (p2) starts inland at the far end, where his owns grassland and no water.
+ * Neither ever sees anything of the other.
+ */
+describe('boats, nets and "Grow first / Build first" through the server (round 3, real rules)', () => {
+  function shoreServer(): Promise<TestServer> {
+    // Whole turns are played in a moment, far faster than the rate limit allows a person to click.
+    return startTestServer({ rules: realRulesOnShore([[3, 7], [20, 3]]), noRateLimit: true });
+  }
+
+  /** A second tab of the same player: another socket with the same token, attached to the same seat. */
+  async function secondTab(server: TestServer, code: string, first: TestClient): Promise<TestClient> {
+    const tab = await server.connect(first.token);
+    tab.send({ type: 'joinGame', code, name: null });
+    await tab.nextOfType('gameSync');
+    expect(tab.view).toEqual(first.view);
+    return tab;
+  }
+
+  /** The frames a socket received from frame `from` on, without the pongs that only answer a test's own pings. */
+  function framesSince(client: TestClient, from: number): string[] {
+    return client.frames.slice(from).filter((frame) => frame !== '{"type":"pong"}');
+  }
+
+  /** Every event a socket has been sent so far, in order. */
+  function eventsSentTo(client: TestClient): GameEvent[] {
+    return client.frames
+      .map((frame) => JSON.parse(frame) as ServerMessage)
+      .flatMap((message) => (message.type === 'gameUpdate' || message.type === 'gameSync' ? message.events : []));
+  }
+
+  it('setCityFocus through real sockets: the actor gets a gameUpdate with the new focus and worked tiles, then actionOk; the other seat gets nothing', async () => {
+    // (The storage counts its saves, so that the test can tell "saved the same again" from "not saved".)
+    const disk = newDiskControl();
+    const server = await startTestServer({
+      rules: realRulesOnShore([[3, 7], [20, 3]]),
+      noRateLimit: true,
+      wrapStorage: (real) => failingStorage(real, disk),
+    });
+    const { code, clients } = await gameWith(server, ['Ada', 'Ben']);
+    const [ada, ben] = clients;
+    await ada.actOk(1, { type: 'foundCity', unitId: ownUnit(ada.view, 'settler').id });
+    const rome = ownCity(ada.view).id;
+    await ada.actOk(1, setQueue(rome, queueOf('warrior')));
+    const adaTab = await secondTab(server, code, ada);
+    await ben.expectNothingPending();
+    const benFrames = ben.frames.length;
+
+    // A new city grows first: its one citizen gathers from grassland (2 food, 1 production).
+    const growing = ownCity(ada.view).own;
+    expect(growing.focus).toBe('grow');
+    expect(growing.worked).toEqual([at(2, 5)]);
+    expect([growing.foodPerTurn, growing.productionPerTurn]).toEqual([2, 2]);
+    const viewBefore = ada.view;
+    const savedBefore = server.save(code).game;
+    if (savedBefore === null) throw new Error('the game was not saved');
+    expect(savedBefore.cities[rome].focus).toBe('grow');
+
+    // The press on "Build first": first the city as it is now, then the answer.
+    const savesBefore = disk.saves;
+    const requestId = ada.sendAction(1, setFocus(rome, 'build'));
+    const update = await ada.nextOfType('gameUpdate');
+    expect(Object.keys(update.patch)).toEqual(['cities']);
+    expect(update.events).toEqual([]);
+    expect(update.patch.cities).toHaveLength(1);
+    expect(update.patch.cities?.[0].id).toBe(rome);
+    const building = update.patch.cities?.[0].own;
+    if (building === null || building === undefined) throw new Error('the update does not hold the city as its owner sees it');
+    // The citizen has gone to the plains behind the city (1 food, 2 production):
+    // one food less, one production more, and the Warrior is done sooner.
+    expect(building.focus).toBe('build');
+    expect(building.worked).toEqual([at(2, 6)]);
+    expect([building.foodPerTurn, building.productionPerTurn]).toEqual([1, 3]);
+    expect(building.buildQueue.map((row) => row.item)).toEqual(queueOf('warrior'));
+    const [sooner, later] = [building.buildQueue[0].turns, growing.buildQueue[0].turns];
+    if (sooner === null || later === null) throw new Error('the queue does not say when the Warrior will be done');
+    expect(sooner).toBeLessThan(later);
+    // Nothing the city has saved was touched, and nothing else of the view changed.
+    expect({ ...building, focus: 0, worked: 0, foodPerTurn: 0, productionPerTurn: 0, buildQueue: 0, buildOptions: 0 }).toEqual({
+      ...growing, focus: 0, worked: 0, foodPerTurn: 0, productionPerTurn: 0, buildQueue: 0, buildOptions: 0,
+    });
+    expect(ownCity(ada.view).own).toEqual(building);
+    expect({ ...ada.view, cities: [] }).toEqual({ ...viewBefore, cities: [] });
+    expect(await ada.next()).toEqual({ type: 'actionOk', requestId });
+    await ada.expectNothingPending();
+
+    // Saved, once: the city's focus, and not one thing more.
+    expect(disk.saves).toBe(savesBefore + 1);
+    const saved = server.save(code).game;
+    expect(saved).toEqual({ ...savedBefore, cities: { [rome]: { ...savedBefore.cities[rome], focus: 'build' } } });
+    // The player's other tab is shown the same city. Ben, far away, is sent nothing.
+    expect((await adaTab.nextOfType('gameUpdate')).patch).toEqual(update.patch);
+    await adaTab.expectNothingPending();
+    expect(adaTab.view).toEqual(ada.view);
+    await ben.expectNothingPending();
+
+    // The same press again, from either tab: accepted, and nothing to save or send.
+    const fileBefore = server.saveText(code);
+    expect(await ada.actOk(1, setFocus(rome, 'build'))).toEqual([]);
+    expect(await adaTab.actOk(1, setFocus(rome, 'build'))).toEqual([]);
+    await ada.expectNothingPending();
+    await adaTab.expectNothingPending();
+    expect(disk.saves).toBe(savesBefore + 1);
+    expect(server.saveText(code)).toBe(fileBefore);
+
+    // Back to "Grow first" and the view is, to the last number, the one from before the first press:
+    // pressing costs nothing. Then "Build first" once more, which is how the turn will be played.
+    expect((await adaTab.actOk(1, setFocus(rome, 'grow'))).map((message) => message.type)).toEqual(['gameUpdate']);
+    await ada.nextOfType('gameUpdate');
+    expect(ada.view).toEqual(viewBefore);
+    expect(server.save(code).game).toEqual(savedBefore);
+    await ada.actOk(1, setFocus(rome, 'build'));
+    await adaTab.nextOfType('gameUpdate');
+    expect(ownCity(adaTab.view).own).toEqual(building);
+
+    // In all that time Ben's socket carried nothing at all.
+    await ben.expectNothingPending();
+    expect(framesSince(ben, benFrames)).toEqual([]);
+
+    // The turn that resolves next uses the choice as it stands: the city
+    // gets exactly what its panel showed under "Build first".
+    await ada.actOk(1, { type: 'endTurn' });
+    await adaTab.nextOfType('gameUpdate');
+    // After End Turn the choice is closed, like every order.
+    expect(await ada.actRejected(1, setFocus(rome, 'grow'))).toBe('turnAlreadyEnded');
+    expect(await adaTab.actRejected(1, setFocus(rome, 'grow'))).toBe('turnAlreadyEnded');
+    await ben.actOk(1, { type: 'endTurn' });
+    for (const client of [ada, adaTab, ben]) await client.drain();
+    expect(turnOf(ada)).toBe(2);
+    const afterTheTurn = ownCity(ada.view).own;
+    expect(afterTheTurn.focus).toBe('build');
+    expect(afterTheTurn.productionStored).toBe(growing.productionStored + building.productionPerTurn);
+    expect(afterTheTurn.foodStored).toBe(growing.foodStored + building.foodPerTurn);
+    expect(afterTheTurn.buildQueue[0].turns).toBe(sooner - 1);
+    // A late press that still carries the old turn is stale; one with the new turn counts.
+    expect(await ada.actRejected(1, setFocus(rome, 'grow'))).toBe('staleTurn');
+    await ada.actOk(2, setFocus(rome, 'grow'));
+    expect(ownCity(ada.view).own.focus).toBe('grow');
+    expect(server.save(code).game?.cities[rome].focus).toBe('grow');
+
+    // Of the city, its citizens and its choice, Ben was never sent a word.
+    const everythingBenGot = ben.frames.join('\n');
+    const everythingAdaGot = ada.frames.join('\n');
+    for (const secret of [rome, 'Rome', '"focus"', '"worked"', 'productionPerTurn']) {
+      expect(everythingAdaGot.includes(secret), `Ada was told ${secret}`).toBe(true);
+      expect(everythingBenGot.includes(secret), `Ben was told ${secret}`).toBe(false);
+    }
+  });
+
+  it('a boat is queued, built and moved through real sockets, and a net is finished; the other seat receives nothing of the job; a boat for a city without water is answered actionRejected noWaterForBoat with a request id; a Worker told to build a net is answered cannotImprove', async () => {
+    const server = await shoreServer();
+    const { code, clients } = await gameWith(server, ['Ada', 'Ben']);
+    const [ada, ben] = clients;
+    const benFrames = ben.frames.length;
+    const net = IMPROVEMENTS.fishingNet;
+
+    // Rome, on the shore, owns seven coast tiles: every entry of its menu can be added, the two boats too.
+    await ada.actOk(1, { type: 'foundCity', unitId: ownUnit(ada.view, 'settler').id });
+    const rome = ownCity(ada.view).id;
+    const water = [at(2, 8), at(3, 8), at(4, 8), at(5, 8), at(2, 9), at(3, 9), at(4, 9)];
+    expect(ownWater(ada.view)).toEqual(water);
+    for (const tile of water) expect(ada.view?.tiles[tile]).toMatchObject({ terrain: 'coast', improvement: null, owner: 'p1' });
+    expect(ownCity(ada.view).own.buildOptions.map((option) => [option.item.unitType, option.addError])).toEqual(
+      UNIT_TYPE_IDS.map((type) => [type, null]),
+    );
+    // With a full queue (of boats) every entry says so, the boats like the rest: this city has water.
+    const fleet = queueOf(...Array.from({ length: RULES.maxQueueLength }, () => 'scoutBoat' as const));
+    await ada.actOk(1, setQueue(rome, fleet));
+    expect(queueItems(ownCity(ada.view))).toEqual(fleet);
+    expect(server.save(code).game?.cities[rome].buildQueue).toEqual(fleet);
+    expect(ownCity(ada.view).own.buildOptions.map((option) => [option.item.unitType, option.addError])).toEqual(
+      UNIT_TYPE_IDS.map((type) => [type, 'queueFull']),
+    );
+
+    // A Fishing Boat is queued (alone) and is built in the very turn its row
+    // promised. It lies on the water, on the coast tile beside the city
+    // with the higher number, with its moves and with one job it can begin.
+    const boat = await raiseBoat(ada, clients);
+    expect(boat).toEqual({
+      id: boat.id,
+      type: 'fishingBoat',
+      owner: 'p1',
+      tile: at(4, 8),
+      own: {
+        movesLeft: UNITS.fishingBoat.moves,
+        foundCityError: 'cannotFoundCity',
+        job: null,
+        jobOptions: [{ improvement: 'fishingNet', turns: net.turns, error: null }],
+      },
+    });
+    expect(eventsSentTo(ada).filter((event) => event.type === 'unitBuilt')).toEqual([
+      { type: 'unitBuilt', playerId: 'p1', cityId: rome, cityName: 'Rome', unitId: boat.id, unitType: 'fishingBoat', queueEmpty: true },
+    ]);
+    expect(server.save(code).game?.units[boat.id]).toEqual({
+      id: boat.id, type: 'fishingBoat', owner: 'p1', tile: at(4, 8), movesLeft: UNITS.fishingBoat.moves, job: null,
+    });
+
+    // It does not go ashore: not onto the meadow, not into its own city, not even as the second step of a path.
+    let turn = turnOf(ada);
+    const before = server.saveText(code);
+    expect(await ada.actRejected(turn, { type: 'moveUnit', unitId: boat.id, path: [at(4, 7)] })).toBe('impassable');
+    expect(await ada.actRejected(turn, { type: 'moveUnit', unitId: boat.id, path: [at(3, 7)] })).toBe('impassable');
+    expect(server.saveText(code)).toBe(before);
+    // It sails: two coast tiles, to the far corner of Rome's water. That uses up its moves.
+    const site = at(3, 9);
+    const sailed = await ada.actOk(turn, { type: 'moveUnit', unitId: boat.id, path: [at(4, 9), site] });
+    expect(sailed).toHaveLength(1);
+    expect(sailed[0]).toMatchObject({
+      type: 'gameUpdate',
+      events: [{ type: 'unitMoved', playerId: 'p1', unitId: boat.id, from: at(4, 8), path: [at(4, 9), site], stoppedEarly: false }],
+    });
+    const arrived = ada.view?.units.find((unit) => unit.id === boat.id);
+    expect(arrived).toMatchObject({ tile: site, own: { movesLeft: 0, job: null } });
+    expect(server.save(code).game?.units[boat.id].tile).toBe(site);
+
+    // A net is the one thing it builds. It needs no moves left to begin.
+    expect(await ada.actRejected(turn, { type: 'startJob', unitId: boat.id, improvement: 'farm' })).toBe('cannotImprove');
+    expect(await ada.actRejected(turn, { type: 'startJob', unitId: boat.id, improvement: 'mine' })).toBe('cannotImprove');
+    const begun = await ada.actOk(turn, { type: 'startJob', unitId: boat.id, improvement: 'fishingNet' });
+    expect(begun.map((message) => (message.type === 'gameUpdate' ? [Object.keys(message.patch), message.events] : message.type))).toEqual([
+      [['units'], []],
+    ]);
+    expect(server.save(code).game?.units[boat.id].job).toEqual({ improvement: 'fishingNet', turnsWorked: 0 });
+    await ben.expectNothingPending();
+
+    // The work, turn after turn: Ada is told how far it is, the tile is
+    // still bare coast, and the boat does not sail away from its work.
+    for (let worked = 0; worked < net.turns; worked++) {
+      const atWork = ada.view?.units.find((unit) => unit.id === boat.id);
+      expect(atWork?.own?.job).toEqual({ improvement: 'fishingNet', turnsWorked: worked, turnsTotal: net.turns, turnsLeft: net.turns - worked });
+      expect(atWork?.tile).toBe(site);
+      expect(ada.view?.tiles[site]?.improvement).toBeNull();
+      expect(await ada.actRejected(turnOf(ada), { type: 'moveUnit', unitId: boat.id, path: [at(4, 9)] })).toBe('unitBusy');
+      await endTurn(clients);
+    }
+
+    // Finished: the net is on the tile, in Ada's view and in the file; the
+    // boat is where it was, free, with its moves; and Ada got the news, once.
+    expect(ada.view?.tiles[site]).toMatchObject({ terrain: 'coast', improvement: 'fishingNet', owner: 'p1', visible: true });
+    expect(server.save(code).game?.map.tiles[site].improvement).toBe('fishingNet');
+    expect(server.save(code).game?.map.tiles.filter((tile) => tile.improvement !== null)).toHaveLength(1);
+    expect(ada.view?.units.find((unit) => unit.id === boat.id)).toMatchObject({
+      tile: site,
+      own: { movesLeft: UNITS.fishingBoat.moves, job: null, jobOptions: [{ improvement: 'fishingNet', error: 'alreadyImproved' }] },
+    });
+    expect(eventsSentTo(ada).filter((event) => event.type === 'improvementBuilt')).toEqual([
+      { type: 'improvementBuilt', playerId: 'p1', unitId: boat.id, improvement: 'fishingNet', tile: site, cityName: 'Rome' },
+    ]);
+    // A fished coast tile is the best tile Rome has: a citizen gathers from it.
+    expect(ownCity(ada.view).own.worked).toContain(site);
+    // No second net on the same tile; on the next coast tile the boat could begin one at once.
+    turn = turnOf(ada);
+    expect(await ada.actRejected(turn, { type: 'startJob', unitId: boat.id, improvement: 'fishingNet' })).toBe('alreadyImproved');
+    await ada.actOk(turn, { type: 'moveUnit', unitId: boat.id, path: [at(2, 9)] });
+    expect(ada.view?.units.find((unit) => unit.id === boat.id)?.own?.jobOptions).toEqual([
+      { improvement: 'fishingNet', turns: net.turns, error: null },
+    ]);
+
+    // Everything Ben was sent since the game began: Ada has ended her turn;
+    // the turn has changed; the answers to his own End Turns. No tile, no
+    // unit, no city, and no news but the turn counter.
+    await ben.expectNothingPending();
+    const toldBen = framesSince(ben, benFrames);
+    expect(toldBen.length).toBeGreaterThan(3 * net.turns);
+    for (const frame of toldBen) {
+      const message = JSON.parse(frame) as ServerMessage;
+      if (message.type === 'actionOk') continue;
+      if (message.type !== 'gameUpdate') throw new Error(`Ben was sent a ${message.type}: ${frame.slice(0, 200)}`);
+      expect(Object.keys(message.patch).filter((key) => key !== 'players' && key !== 'turn'), frame.slice(0, 200)).toEqual([]);
+      expect(message.events.filter((event) => event.type !== 'turnStarted'), frame.slice(0, 200)).toEqual([]);
+    }
+    // In words, over every frame from his first: nothing names the boat, its job or the net.
+    const everythingAdaGot = ada.frames.join('\n');
+    const everythingBenGot = ben.frames.join('\n');
+    for (const secret of [boat.id, '"fishingBoat"', '"fishingNet"', 'improvementBuilt', '"turnsWorked"', '"turnsLeft"']) {
+      // The check can fail: Ada was told every one of them.
+      expect(everythingAdaGot.includes(secret), `Ada was told ${secret}`).toBe(true);
+      expect(everythingBenGot.includes(secret), `Ben was told ${secret}`).toBe(false);
+    }
+    expect(ben.view?.tiles[site]).toBeNull();
+
+    // Ben's turn to build. Thebes, inland, owns no water; its Worker is
+    // built like any other, and the two boats of its menu say why they
+    // cannot be: for good, whatever the queue holds.
+    const worker = await raiseWorker(ben, clients);
+    const thebes = ownCity(ben.view).id;
+    expect(ownWater(ben.view)).toEqual([]);
+    const boats = ownCity(ben.view).own.buildOptions.filter((option) => UNITS[option.item.unitType].domain === 'sea');
+    expect(boats.map((option) => option.item.unitType)).toEqual(['fishingBoat', 'scoutBoat']);
+    for (const option of boats) expect(option).toMatchObject({ turns: null, wait: 'noRoom', addError: 'noWaterForBoat' });
+    const land = ownCity(ben.view).own.buildOptions.filter((option) => UNITS[option.item.unitType].domain === 'land');
+    expect(land.map((option) => [option.item.unitType, option.addError, option.wait])).toEqual([
+      ['warrior', null, null],
+      ['scout', null, null],
+      ['settler', null, null],
+      ['worker', null, null],
+    ]);
+
+    // A boat for that city, alone or between land units: refused by the
+    // rules, with the request id and the standard sentence. As often as it
+    // takes bad messages to close a socket: these are answers, not bad messages.
+    turn = turnOf(ben);
+    await ben.actOk(turn, setQueue(thebes, queueOf('warrior')));
+    // (The Worker steps out of the city first, onto Ben's own meadow, for what is asked of it further down.)
+    const meadow = worker.tile + 1;
+    await ben.actOk(turn, { type: 'moveUnit', unitId: worker.id, path: [meadow] });
+    expect(ben.view?.tiles[meadow]).toMatchObject({ terrain: 'grassland', feature: null, improvement: null, owner: 'p2' });
+    for (const client of clients) await client.drain();
+    const fileBefore = server.saveText(code);
+    const viewBefore = ben.view;
+    const adaFrames = ada.frames.length;
+    const dryQueues = [
+      queueOf('fishingBoat'),
+      queueOf('scoutBoat'),
+      queueOf('warrior', 'fishingBoat'),
+      queueOf('scoutBoat', 'worker', 'scout'),
+      queueOf('warrior', 'worker', 'settler', 'scout', 'fishingBoat'),
+    ];
+    expect(dryQueues).toHaveLength(MAX_BAD_MESSAGES);
+    for (const queue of dryQueues) {
+      const requestId = ben.sendAction(turn, setQueue(thebes, queue));
+      const { reply, before: earlier } = await ben.readReply(requestId);
+      expect(reply).toStrictEqual({
+        type: 'actionRejected',
+        requestId,
+        error: { code: 'noWaterForBoat', message: RULE_ERROR_MESSAGES.noWaterForBoat },
+      });
+      expect(earlier).toEqual([]);
+    }
+    // Ada's own boat is not Ben's to queue for her either, and Rome is no city of his.
+    expect(await ben.actRejected(turn, setQueue(rome, queueOf('fishingBoat')))).toBe('noSuchCity');
+
+    // A Worker told to build a net: that is not its trade, on a meadow where
+    // it could begin a farm at once as little as anywhere. Its panel never offers it.
+    expect(ownUnit(ben.view, 'worker').own?.jobOptions).toEqual([
+      { improvement: 'farm', turns: IMPROVEMENTS.farm.turns, error: null },
+      { improvement: 'mine', turns: IMPROVEMENTS.mine.turns, error: 'badImprovementTile' },
+    ]);
+    const requestId = ben.sendAction(turn, { type: 'startJob', unitId: worker.id, improvement: 'fishingNet' });
+    const { reply, before: earlier } = await ben.readReply(requestId);
+    expect(reply).toStrictEqual({
+      type: 'actionRejected',
+      requestId,
+      error: { code: 'cannotImprove', message: RULE_ERROR_MESSAGES.cannotImprove },
+    });
+    expect(earlier).toEqual([]);
+
+    // Nothing of all that was saved or sent on: the queue is the one
+    // Warrior it was, the socket is open, and Ada heard nothing.
+    expect(server.saveText(code)).toBe(fileBefore);
+    await ben.expectNothingPending();
+    expect(ben.view).toEqual(viewBefore);
+    expect(queueItems(ownCity(ben.view))).toEqual(queueOf('warrior'));
+    await ada.expectNothingPending();
+    expect(framesSince(ada, adaFrames)).toEqual([]);
   });
 });

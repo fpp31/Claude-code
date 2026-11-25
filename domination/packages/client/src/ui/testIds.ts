@@ -58,7 +58,7 @@ export const TEST_IDS = {
   foundCityButton: 'found-city-button',
   /** The block of a unit that can build improvements: its job buttons, or its job in progress. Hidden for other units. */
   unitJobs: 'unit-jobs',
-  /** One per improvement: `job-start-<improvementId>`, a button whose text begins "Build Farm (4 turns)". Disabled when the job cannot be started here. */
+  /** One per improvement the unit's type builds: `job-start-<improvementId>` (a Worker: `job-start-farm`, `job-start-mine`; a Fishing Boat: `job-start-fishingNet`), a button whose text begins "Build Farm (4 turns)". Disabled when the job cannot be started here. */
   jobStart: 'job-start-',
   /** The one sentence for the whole block when every job is impossible for the same reason. Hidden otherwise, and while unitJobsClosed is shown. */
   unitJobsReason: 'unit-jobs-reason',
@@ -68,14 +68,18 @@ export const TEST_IDS = {
   unitJobsClosed: 'unit-jobs-closed',
   /** "Building a Farm: 3 turns left". Hidden while the unit has no job. */
   unitJob: 'unit-job',
-  /** The "Stop work" button. Hidden while the unit has no job. */
+  /** The "Stop work" button. Hidden while the unit has no job. Has the attribute data-asking="true|false": true while it asks once before it throws work away ("Tap again to stop"). */
   jobStop: 'job-stop',
-  /** The small print beside "Stop work": "Stopping loses the work done so far." Hidden while the button is greyed out. */
+  /** The small print beside "Stop work": "Stopping loses 3 turns of work." ("Stopping now loses nothing." for a job started this turn), and while the button asks, "3 turns will be lost.". Hidden while the button is greyed out. */
   jobStopWarning: 'job-stop-warning',
 
   cityPanel: 'city-panel',
   cityName: 'city-name',
   cityPopulation: 'city-population',
+  /** The block of the city panel with the two ways of placing citizens. */
+  cityFocus: 'city-focus',
+  /** One per way: `focus-grow`, `focus-build`. Has the attribute aria-pressed="true|false": is it the city's choice? */
+  focusButton: 'focus-',
   cityFood: 'city-food',
   cityProduction: 'city-production',
   /** The line in the panel's head that says why the queue cannot be changed (hidden when there is nothing to say). It stays in sight while the panel scrolls. */
@@ -93,7 +97,7 @@ export const TEST_IDS = {
   queueDown: 'queue-down-',
   queueRemove: 'queue-remove-',
   queueClear: 'queue-clear',
-  /** One per build option: `build-<unitTypeId>`. A press adds the item to the end of the queue. */
+  /** One per build option: `build-<unitTypeId>` (the boats too: `build-fishingBoat`, `build-scoutBoat`, greyed in a city without water). A press adds the item to the end of the queue. */
   buildOption: 'build-',
 
   /**
@@ -107,7 +111,7 @@ export const TEST_IDS = {
   tileCardTitle: 'tile-card-title',
   /**
    * One per line of the card: `tile-card-line-<kind>`, with the kinds of
-   * TileInfoLineKind (remembered, city, building, unit, improvement,
+   * TileInfoLineKind (remembered, city, building, focus, unit, improvement,
    * yields, worked, canBuild, movement, owner). A tile with two units has
    * two `tile-card-line-unit`.
    */

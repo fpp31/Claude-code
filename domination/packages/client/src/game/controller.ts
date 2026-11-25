@@ -5,13 +5,21 @@
  * what is selected, inspected and hovered, and sends actions to the server.
  * It never changes game data itself: after sending an action it waits for
  * the server's view.
+ *
+ * It also holds five of the game screen's nine guards against a second
+ * press on a spot that has changed its meaning, each with a clock handed
+ * in: End Turn, the job guard, the selection guard, the map-move guard
+ * and, since round 3, "Stop work" asking once (Controller.stopJob). The
+ * other four are the build queue's and the End Turn key's
+ * (ui/pressGuard.ts, ui/queuePresses.ts, input/keys.ts).
  */
 
 import { pathTo } from '@domination/shared';
-import type { Action, BuildItem, CityId, ImprovementId, TileIndex } from '@domination/shared';
+import type { Action, BuildItem, CityFocusId, CityId, ImprovementId, TileIndex, UnitView } from '@domination/shared';
 import type { Connection } from '../net/connection';
 import type { AppState, MapSelection, Store } from '../state/store';
-import { queueWithAdded, queueWithMoved, queueWithout } from './queueEdits';
+import { createAskOnce } from '../ui/queuePresses';
+import { queueUnchanged, queueWithAdded, queueWithMoved, queueWithout } from './queueEdits';
 import {
   canActNow,
   citiesWaiting,
@@ -49,6 +57,12 @@ export const SELECTION_GUARD_MS = 500;
  */
 export const MAP_MOVE_GUARD_MS = 500;
 
+/**
+ * What a press on "Stop work" did (see Controller.stopJob): the order went
+ * out; the button now asks ("Tap again to stop"); or nothing happened.
+ */
+export type StopPress = 'sent' | 'asked' | 'ignored';
+
 export interface Controller {
   /**
    * A tap or click on a map tile.
@@ -66,7 +80,10 @@ export interface Controller {
    *         aimed at the map as it lay before the move;
    *       - otherwise: send `moveUnit` with pathTo(reach, tile); the unit
    *         stays selected and rules 2 and 3 are skipped.
-   *     (A unit at work has no reachable tiles, so rule 1 never applies to it.)
+   *     (A unit at work has no reachable tiles, so rule 1 never applies to
+   *     it. A boat's reachable tiles are water only and a land unit's land
+   *     only: a tap on land with a boat selected, or on water with a land
+   *     unit, is never an order and goes on with rules 2 and 3.)
    *  2. Otherwise look at the player's own things on the tile (military
    *     unit, civilian unit, city, in that order): if the current selection
    *     is one of them select the next one (wrapping around), else select
@@ -112,7 +129,7 @@ export interface Controller {
    * player's units is selected, canActNow(state), and the unit can reach at
    * least one tile (reach(view, unit) is not empty). The hover timer then
    * waits its full delay for every box, so that no box hops about over the
-   * tiles the unit is being sent to. A unit without moves and a Worker at
+   * tiles the unit is being sent to. A unit without moves and a unit at
    * work light no tile and can be sent nowhere: with one of them selected
    * the answer is false, and the boxes come as quickly as with nothing
    * selected.
@@ -131,8 +148,9 @@ export interface Controller {
    * selection goes to ANOTHER unit or city (also from nothing to
    * something), it notes the time, and for SELECTION_GUARD_MS after that
    * moment the order buttons of the panels do nothing: Found City, the job
-   * buttons, "Stop work" and every queue button, the add buttons too. A
-   * press that is ignored for this reason gives no order and no message.
+   * buttons, "Stop work" (both its presses), every queue button, the add
+   * buttons too, and "Grow first" / "Build first". A press that is ignored
+   * for this reason gives no order and no message.
    * Map taps, End Turn and the F key are not held back: none of them is a
    * button that came up under the pointer.
    *
@@ -156,16 +174,23 @@ export interface Controller {
    * keeps the item instead of dropping the press. When the answer has come
    * and the view shows the list that was sent, everything that was kept
    * goes out in one message, on top of that list (and a press during THAT
-   * round trip waits in the same way). What waits is dropped when the
-   * answer was a refusal (the view does not show the list that was sent),
-   * when the selection has moved away from that city, when the connection
-   * is lost and when the turn is ended. The limit of the queue counts what
-   * is on its way and what waits. A press on a ROW button during that time
-   * is ignored as before: the rows on the screen are one answer behind, so
-   * it would hit another entry than the one it was aimed at. End Turn
-   * pressed during that time waits as well (see toggleEndTurn), and what
-   * waits here is sent in the very moment the answer is taken in, so End
-   * Turn can never overtake it.
+   * round trip waits in the same way). An add button pressed while the
+   * answer to a "Grow first" / "Build first" press of the same city is on
+   * its way waits in the same way (see setCityFocus). What waits is
+   * dropped when the answer was a refusal (the view does not show the list
+   * that was sent), when the selection has moved away from that city, when
+   * the connection is lost and when the turn is ended. The limit of the
+   * queue counts what is on its way and what waits. A press on a ROW
+   * button during that time is ignored as before: the rows on the screen
+   * are one answer behind, so it would hit another entry than the one it
+   * was aimed at. End Turn pressed during that time waits as well (see
+   * toggleEndTurn), and what waits here is sent in the very moment the
+   * answer is taken in, so End Turn can never overtake it.
+   *
+   * The item of an add button may be a boat. The controller does not look
+   * at the option's addError: the city panel greys the button of a boat
+   * that a city without water can never build, and the server refuses such
+   * a queue ('noWaterForBoat').
    *
    * Each returns true if a message went out (addToQueue also when it kept
    * the item to send it after the answer), false if not: the city panel's
@@ -192,8 +217,74 @@ export interface Controller {
    */
   startJob(improvement: ImprovementId): void;
 
-  /** Unit panel, "Stop work": send `stopJob` for the selected unit, if it has a job. Guarded like startJob. */
-  stopJob(): void;
+  /**
+   * City panel, "Grow first" / "Build first": send `setCityFocus` for the
+   * selected own city. Nothing is sent, and false is returned, when the
+   * city already has this focus (two buttons, each meaning one thing: a
+   * double-click cannot undo itself), when canActNow(state) is false (busy,
+   * offline, turn ended), or within SELECTION_GUARD_MS of the city being
+   * selected (see foundCity). A press that is not sent is NOT kept for
+   * later: the button does not sink, which shows at once, and the player
+   * presses again. That is the rule for every order but the two that are
+   * kept (an add button, End Turn).
+   *
+   * ADDS WAIT BEHIND IT. When the message went out, add buttons pressed
+   * before its answer is in are kept exactly as behind a queue edit (see
+   * addToQueue): the controller notes the city and its queue as the view
+   * shows it, as if that list had been sent. addToQueue then keeps the
+   * presses, and they go out in ONE `setBuildQueue` when the answer is in:
+   * the view's queue still equals the noted one, because a focus changes
+   * no queue. (Dropped, such a press gave no sign: the button did not even
+   * say "Added to the queue".) They are dropped by the rules of addToQueue:
+   * the player turned to another city or closed the panel, the connection
+   * was lost, the turn was ended, or the queue on the screen is no longer
+   * the noted one. If the focus press itself was refused and the queue is
+   * still the same, the kept adds are sent all the same: they are orders
+   * of their own, and the server answers them.
+   *
+   * Returns true if the message went out.
+   */
+  setCityFocus(focus: CityFocusId): boolean;
+
+  /**
+   * Unit panel, "Stop work": stop the selected unit's job. The button ASKS
+   * ONCE before it throws work away. The first that applies:
+   *  - no selected own unit with a job; orders closed (no connection, turn
+   *    ended: the button is grey); within JOB_GUARD_MS of the job
+   *    appearing or going (see startJob) or within SELECTION_GUARD_MS of
+   *    the selection (see foundCity): 'ignored'. Nothing is asked in that
+   *    time either: a double tap on the unit can neither stop the work nor
+   *    start the question;
+   *  - the job has no turn worked yet (turnsWorked 0): `stopJob` is sent at
+   *    once, nothing would be lost. 'sent', or 'ignored' if the message
+   *    could not go out (an answer is on its way);
+   *  - otherwise the press is put to a button that asks once (createAskOnce
+   *    in ui/queuePresses.ts, the function of "Empty the queue") with the
+   *    subject `<unit id>:<improvement>:<turnsWorked>`:
+   *      'ask'    -> 'asked': the button now waits for its second press,
+   *                  for ASKS_FOR_MS (4 s). Nothing is sent;
+   *      'ignore' -> 'ignored': it asked less than 0.6 s ago; this is the
+   *                  second click of a double-click;
+   *      'go'     -> `stopJob` is sent and the question is taken back
+   *                  ('sent'); if the message could not go out, the
+   *                  question stands and the next press sends ('ignored').
+   * The question is about one job at one count of turns: after a turn has
+   * been worked it is another question, and the button asks again with the
+   * new number. It is also taken back whenever the selection changes
+   * (another unit, a city, nothing) and whenever orders close.
+   */
+  stopJob(): StopPress;
+
+  /**
+   * Is "Stop work" of the selected unit waiting for its second press right
+   * now? The unit panel asks whenever it prints the button
+   * (unitPanelButtons in ui/panelButtons.ts takes the answer). False
+   * without a selected own unit at work and while orders are closed. The
+   * question ends by time alone (ASKS_FOR_MS after it was asked) with no
+   * change of the store: the page keeps a timer that prints the panel
+   * again then.
+   */
+  askingToStop(): boolean;
 
   /**
    * End Turn button / Enter key: send `endTurn`, or `cancelEndTurn` if the
@@ -260,7 +351,7 @@ export interface Controller {
 export interface ControllerOptions {
   /** How to find the tiles a unit can reach. Default: reachableFor (game/selectors.ts). */
   reach?: ReachFunction;
-  /** The clock for the End Turn guard, the job guard, the selection guard and the map-move guard, in milliseconds. Default: Date.now. */
+  /** The clock for the End Turn guard, the job guard, the selection guard, the map-move guard and the question of "Stop work", in milliseconds. Default: Date.now. */
   now?: () => number;
 }
 
@@ -270,8 +361,10 @@ export interface ControllerOptions {
  * is set or while the connection is not 'online': the request is dropped
  * with no queueing (the player simply taps again). Two exceptions: a
  * press on an add button of the build queue waits for the answer to an
- * edit of the same queue (see Controller.addToQueue), and one press on End
- * Turn waits until the answers are in (see Controller.toggleEndTurn).
+ * edit of the same queue, or to a "Grow first" / "Build first" press of
+ * the same city (see Controller.addToQueue and Controller.setCityFocus),
+ * and one press on End Turn waits until the answers are in (see
+ * Controller.toggleEndTurn).
  *
  * `busy` is set ONLY if connection.send returned true, and stays set until
  * the answer arrives (see serverMessages.ts). If send returned false (the
@@ -314,10 +407,17 @@ export function createController(store: Store, connection: Connection, options: 
     return now() - selectionChangedAt < SELECTION_GUARD_MS;
   }
 
+  // ---- "Stop work" asks once -------------------------------------------------
+  // The question of the selected unit's "Stop work" button (see stopJob). It
+  // lives here and not in the store, like the other guards with a clock.
+  const askToStop = createAskOnce(now);
+
   // ---- Adds that wait -------------------------------------------------------
   // The queue edit whose answer is on its way (the city, and the list that
   // was sent), and the items of the add buttons pressed since, oldest first
-  // (see addToQueue).
+  // (see addToQueue). After a "Grow first" / "Build first" press it is the
+  // city's queue as the view showed it: that press changes no queue (see
+  // setCityFocus).
   let sentQueue: { cityId: CityId; queue: BuildItem[] } | null = null;
   let waitingAdds: BuildItem[] = [];
 
@@ -394,6 +494,10 @@ export function createController(store: Store, connection: Connection, options: 
 
     const selection = selectionKey(state.selection);
     if (selection !== null && selection !== watchedSelection) selectionChangedAt = now();
+    // The question of "Stop work" is over when the selection changes at all
+    // (to nothing too: the panel closed) and when orders close. (`facts` is
+    // read without myPlayer, so this watcher cannot throw.)
+    if (selection !== watchedSelection || state.connection !== 'online' || facts.ended === true) askToStop.reset();
     watchedSelection = selection;
 
     if (!state.busy) inFlight = null;
@@ -558,11 +662,45 @@ export function createController(store: Store, connection: Connection, options: 
       sendAction({ type: 'startJob', unitId: unit.id, improvement });
     },
 
+    setCityFocus(focus) {
+      const state = store.get();
+      if (!canActNow(state) || panelJustOpened()) return false;
+      const city = selectedCity(state);
+      if (city === null || city.own === null || city.own.focus === focus) return false;
+      if (!sendAction({ type: 'setCityFocus', cityId: city.id, focus })) return false;
+      // An add button pressed before the answer is in waits behind this
+      // press as behind a queue edit: the "list that was sent" is the queue
+      // as it stands, which this press does not change.
+      sentQueue = { cityId: city.id, queue: queueUnchanged(city.own.buildQueue.map((entry) => entry.item)) };
+      waitingAdds = [];
+      return true;
+    },
+
     stopJob() {
-      const unit = selectedUnit(store.get());
-      if (unit === null || unit.own === null || unit.own.job === null) return;
-      if (now() - jobChangedAt < JOB_GUARD_MS || panelJustOpened()) return;
-      sendAction({ type: 'stopJob', unitId: unit.id });
+      const state = store.get();
+      const unit = selectedUnit(state);
+      if (unit === null || unit.own === null || unit.own.job === null) return 'ignored';
+      if (ordersClosed(state) !== null) return 'ignored'; // the button is grey: nothing is stopped and nothing is asked
+      // The two guards come first: a press inside them is not the question either.
+      if (now() - jobChangedAt < JOB_GUARD_MS || panelJustOpened()) return 'ignored';
+      const stop: Action = { type: 'stopJob', unitId: unit.id };
+      // Nothing worked yet, nothing to lose: no question.
+      if (unit.own.job.turnsWorked <= 0) return sendAction(stop) ? 'sent' : 'ignored';
+      const press = askToStop.press(stopSubject(unit));
+      if (press === 'ask') return 'asked';
+      if (press === 'ignore') return 'ignored';
+      // The answer. If the message cannot go out now (an answer is on its
+      // way), the question stands: the next press sends.
+      if (!sendAction(stop)) return 'ignored';
+      askToStop.reset();
+      return 'sent';
+    },
+
+    askingToStop() {
+      const state = store.get();
+      const unit = selectedUnit(state);
+      if (unit === null || unit.own === null || unit.own.job === null || ordersClosed(state) !== null) return false;
+      return askToStop.asking(stopSubject(unit));
     },
 
     toggleEndTurn() {
@@ -632,6 +770,17 @@ function jobFacts(state: AppState): { unitId: string | null; hasJob: boolean } {
   const unit = selectedUnit(state);
   if (unit === null) return { unitId: null, hasJob: false };
   return { unitId: unit.id, hasJob: unit.own !== null && unit.own.job !== null };
+}
+
+/**
+ * What the question of "Stop work" is about, as one string: the unit, what
+ * it builds and how many turns it has worked ('u1_m4wq7e:farm:3'). A turn
+ * later it is another subject, so the button asks again with the new
+ * number; '' for a unit without a job, which is never asked about.
+ */
+function stopSubject(unit: UnitView): string {
+  const job = unit.own?.job ?? null;
+  return job === null ? '' : `${unit.id}:${job.improvement}:${job.turnsWorked}`;
 }
 
 /** What is selected, as one string ('unit:u1_k7m2qd', 'city:c1_r6wz2e'); null for nothing. For the selection guard. */

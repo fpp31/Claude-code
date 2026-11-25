@@ -6,6 +6,7 @@ import {
   IMPROVEMENTS,
   PROTOCOL_VERSION,
   STATE_SCHEMA,
+  UNITS,
   WS_PATH,
   applyAction,
   buildPlayerView,
@@ -29,7 +30,28 @@ import {
   phaseOneSaveText,
   putPhaseOneSave,
 } from './phaseOneSave';
-import { endTurn, ownCity, ownUnit, queueItems, queueOf, raiseWorker, realRulesOnMeadow, setQueue, turnOf } from './realWorld';
+import {
+  endTurn,
+  ownCity,
+  ownUnit,
+  ownWater,
+  queueItems,
+  queueOf,
+  raiseWorker,
+  realRulesOnMeadow,
+  setFocus,
+  setQueue,
+  turnOf,
+} from './realWorld';
+import {
+  ROUND_TWO_CODE,
+  ROUND_TWO_TOKENS,
+  putRoundTwoSave,
+  roundTwoCities,
+  roundTwoCityFacts,
+  roundTwoSave,
+  roundTwoSaveText,
+} from './roundTwoSave';
 
 /**
  * The saved file is the truth: a server that stops, or is killed, and starts
@@ -599,6 +621,234 @@ describe('persistence and restart: older saves, queues and jobs (WP3, real rules
         expect(done.map((event) => event.queueEmpty), city.name).toEqual(done.map((_, position) => position === queue.length - 1));
       }
     }
+  });
+
+  it('the round 2 room file loads: the server prints its line about layout 3, the four seats come back with their tokens, a city of seat 2 or seat 4 is set to Build (seats 1 and 3 had ended the turn when the save was made: an order for Rome, Niani or Timbuktu is answered turnAlreadyEnded, and the test sees that too), a turn is played across a restart, and the file on disk is layout 3 afterwards', async () => {
+    const dataDir = temporaryFolder();
+    const path = putRoundTwoSave(dataDir);
+    const text = roundTwoSaveText();
+    const old = roundTwoSave();
+    const said = roundTwoCityFacts();
+    const seats = ROUND_TWO_TOKENS.map((_, index) => playerIdForSeat(index + 1));
+    // An older layout than today's (which is 3 as this is written; the test reads the number, as the phase 1 test does).
+    expect(old.game.schema).toBe(2);
+    expect(old.game.schema).toBeLessThan(STATE_SCHEMA);
+
+    // The server starts on the folder: one game, brought up to date, and healthy. It says so in one line.
+    const first = await startTestServer({ dataDir, noRateLimit: true });
+    expect(first.logs).toContain('Saved games loaded: 1.');
+    expect(first.logs.filter((line) => line.includes('WARNING'))).toEqual([]);
+    expect(first.logs.filter((line) => line.includes(`${ROUND_TWO_CODE}.json`))).toEqual([
+      `Saved games: ${ROUND_TWO_CODE}.json was made by an older version of the game (layout 2) and has been brought up to ` +
+        `layout ${STATE_SCHEMA}. The file itself is rewritten with the next change to the game.`,
+    ]);
+    // Loading did not write: the file is still the one round 2 wrote.
+    expect(readFileSync(path, 'utf8')).toBe(text);
+
+    // What the rules make of the converted game, to compare the views with.
+    const converted = migrateGameState(old.game);
+    if (converted === null) throw new Error('the round 2 save was not converted');
+
+    // The four players come back with the tokens they had.
+    const players: TestClient[] = [];
+    for (const [index, token] of ROUND_TWO_TOKENS.entries()) {
+      const me = seats[index];
+      const client = await first.connect(token);
+      client.send({ type: 'joinGame', code: ROUND_TWO_CODE, name: null });
+      const { view } = await client.nextOfType('gameSync');
+      players.push(client);
+
+      // The turn the game was saved in, in the middle of it.
+      expect(view.you).toBe(me);
+      expect(view.turn).toBe(41);
+      expect(view.players.map((player) => player.endedTurn)).toEqual([true, false, true, false]);
+      expect(view).toEqual(buildPlayerView(converted, me));
+
+      // Every own city grows first, as every city did before there was a
+      // choice. It has the queue and the stores it had, and its citizens
+      // gather from the very tiles, for the very numbers, that the round 2
+      // engine wrote down when the game was saved: the game goes on as it
+      // was being played.
+      const ownCities = roundTwoCities().filter((city) => city.owner === me);
+      expect(ownCities.length, me).toBeGreaterThan(0);
+      for (const before of ownCities) {
+        const own = view.cities.find((candidate) => candidate.id === before.id)?.own;
+        if (own === null || own === undefined) throw new Error(`${me} is not shown ${before.name} as its owner`);
+        const then = said[before.id];
+        expect(then.name).toBe(before.name);
+        expect(own.focus, before.name).toBe('grow');
+        expect(own.buildQueue.map((row) => row.item), before.name).toEqual(before.buildQueue);
+        expect([own.foodStored, own.productionStored], before.name).toEqual([before.foodStored, before.productionStored]);
+        expect(own.worked, before.name).toEqual(then.worked);
+        expect([own.foodPerTurn, own.productionPerTurn], before.name).toEqual([then.foodSurplus, then.production]);
+        expect(own.held, before.name).toBe(then.held);
+        expect(own.buildQueue.map((row) => row.turns), before.name).toEqual(then.queueTurns);
+        // The four units round 2 could build are forecast as they were; the two boats are new in the menu.
+        const landUnits = own.buildOptions.filter((option) => UNITS[option.item.unitType].domain === 'land');
+        expect(landUnits.map((option) => `${option.item.unitType}:${option.turns}`), before.name).toEqual(then.optionTurns);
+        expect(own.buildOptions.map((option) => option.item.unitType).slice(landUnits.length), before.name).toEqual(['fishingBoat', 'scoutBoat']);
+      }
+      // Nobody has a boat yet, and no tile they know carries a net.
+      expect(view.units.every((unit) => UNITS[unit.type].domain === 'land'), me).toBe(true);
+      expect(view.tiles.every((tile) => tile === null || tile.improvement !== 'fishingNet'), me).toBe(true);
+    }
+    for (const player of players) await player.drain();
+    // Coming back is not a change: still nothing was written.
+    expect(readFileSync(path, 'utf8')).toBe(text);
+    const [ada, ben, cleo, dan] = players;
+
+    // Seats 1 and 3 had ended the turn when the save was made. An order for
+    // one of their cities (Rome; Niani and Timbuktu) is answered like any
+    // order after End Turn, the new one too, and nothing is written.
+    const closed: [player: TestClient, cities: string[]][] = [[ada, ['Rome']], [cleo, ['Niani', 'Timbuktu']]];
+    for (const [player, names] of closed) {
+      const cities = player.view?.cities.filter((city) => city.own !== null) ?? [];
+      expect(cities.map((city) => city.name).sort()).toEqual(names);
+      for (const city of cities) {
+        expect(await player.actRejected(41, setFocus(city.id, 'build')), city.name).toBe('turnAlreadyEnded');
+        expect(await player.actRejected(41, setQueue(city.id, queueOf('fishingBoat'))), city.name).toBe('turnAlreadyEnded');
+      }
+    }
+    expect(readFileSync(path, 'utf8')).toBe(text);
+
+    // Seat 2 had not. Ben sets Thebes to "Build first": his citizens move
+    // to tiles with more production and less food, and nobody else is told.
+    const thebes = ownCity(ben.view);
+    expect(thebes.name).toBe('Thebes');
+    const growing = thebes.own;
+    expect((await ben.actOk(41, setFocus(thebes.id, 'build'))).map((message) => message.type)).toEqual(['gameUpdate']);
+    const building = ownCity(ben.view).own;
+    expect(building.focus).toBe('build');
+    expect(building.worked).not.toEqual(growing.worked);
+    expect(building.productionPerTurn).toBeGreaterThan(growing.productionPerTurn);
+    expect(building.foodPerTurn).toBeLessThan(growing.foodPerTurn);
+    for (const other of [ada, cleo, dan]) await other.expectNothingPending();
+
+    // That was the first change to the game, so the file was rewritten: it
+    // has the new layout, every city has its choice (one "build", the
+    // others "grow"), and nothing is left of the old file, nor a copy of it.
+    const written = readFileSync(path, 'utf8');
+    expect(written).toContain(`"schema":${STATE_SCHEMA}`);
+    expect(written).not.toMatch(/"schema":2\b/);
+    expect(text).toMatch(/"schema":2\b/);
+    expect(text).not.toContain('"focus"');
+    expect(written.match(/"focus":"build"/g)).toHaveLength(1);
+    expect(written.match(/"focus":"grow"/g)).toHaveLength(roundTwoCities().length - 1);
+    expect(readdirSync(join(dataDir, 'rooms'))).toEqual([`${ROUND_TWO_CODE}.json`]);
+    // The lines a person edits by hand (the seats above all) are as round 2 wrote them.
+    const upToTheGame = (save: string): string => save.slice(0, save.indexOf('  "game"'));
+    expect(upToTheGame(written)).toBe(upToTheGame(text));
+    // The game in it is exactly what the rules make of the converted game when p2 presses the button.
+    let expected = converted;
+    const play = (seat: string, action: Parameters<typeof applyAction>[3]): void => {
+      const result = applyAction(expected, seat, expected.turn, action);
+      if (!result.ok) throw new Error(`the rules refused ${action.type} for ${seat}: ${result.error.code}`);
+      expected = result.state;
+    };
+    play('p2', setFocus(thebes.id, 'build'));
+    expect(first.save(ROUND_TWO_CODE).game).toEqual(expected);
+
+    // A running game can build boats where a city owns water. Thebes does
+    // (three coast tiles): a Fishing Boat goes to the front of its queue.
+    expect(ownWater(ben.view).length).toBeGreaterThan(0);
+    const boatFirst = [...queueOf('fishingBoat'), ...queueItems(thebes)];
+    await ben.actOk(41, setQueue(thebes.id, boatFirst));
+    play('p2', setQueue(thebes.id, boatFirst));
+    const promised = ownCity(ben.view).own.buildQueue[0].turns;
+    if (promised === null) throw new Error('the queue does not say when the Fishing Boat will be done');
+    expect(promised).toBeGreaterThan(1);
+    // Changan, of seat 4, owns no water: its boats are greyed for good, and a queue with one is refused.
+    const changan = dan.view?.cities.find((city) => city.name === 'Changan');
+    if (changan === undefined || changan.own === null) throw new Error('Dan is not shown Changan as its owner');
+    expect(ownWater(dan.view).every((tile) => converted.map.tiles[tile].cityId !== changan.id)).toBe(true);
+    expect(changan.own.buildOptions.filter((option) => option.addError === 'noWaterForBoat').map((option) => option.item.unitType)).toEqual([
+      'fishingBoat',
+      'scoutBoat',
+    ]);
+    expect(await dan.actRejected(41, setQueue(changan.id, queueOf('fishingBoat')))).toBe('noWaterForBoat');
+
+    // The two who had not ended the turn do, and the turn resolves.
+    await ben.actOk(41, { type: 'endTurn' });
+    await dan.actOk(41, { type: 'endTurn' });
+    play('p2', { type: 'endTurn' });
+    play('p4', { type: 'endTurn' });
+    for (const player of players) await player.drain();
+    for (const [index, player] of players.entries()) {
+      expect(player.view?.turn).toBe(42);
+      expect(player.view?.players.map((seat) => seat.endedTurn)).toEqual([false, false, false, false]);
+      expect(player.view).toEqual(buildPlayerView(expected, seats[index]));
+    }
+    expect(first.save(ROUND_TWO_CODE).game).toEqual(expected);
+    expect(ownCity(ben.view).own.buildQueue[0]).toMatchObject({ item: { kind: 'unit', unitType: 'fishingBoat' }, turns: promised - 1 });
+
+    // A restart in the middle of it: all four views are deep-equal to what they were.
+    const viewsBefore = players.map((player) => player.view);
+    const fileBefore = readFileSync(path, 'utf8');
+    await first.close();
+    const second = await startTestServer({ dataDir, noRateLimit: true });
+    expect(second.logs).toContain('Saved games loaded: 1.');
+    // An ordinary save of today now: nothing to convert, nothing to warn about.
+    expect(second.logs.filter((line) => line.includes('WARNING') || line.includes(`${ROUND_TWO_CODE}.json`))).toEqual([]);
+    expect(readFileSync(path, 'utf8')).toBe(fileBefore);
+    const back: TestClient[] = [];
+    for (const [index, token] of ROUND_TWO_TOKENS.entries()) {
+      const client = await second.connect(token);
+      client.send({ type: 'joinGame', code: ROUND_TWO_CODE, name: null });
+      expect((await client.nextOfType('gameSync')).view).toEqual(viewsBefore[index]);
+      back.push(client);
+    }
+    for (const player of back) await player.drain();
+    const benBack = back[1];
+    expect(ownCity(benBack.view).own.focus).toBe('build');
+
+    // The game goes on, turn after turn, and the Fishing Boat is done in
+    // the very turn its row promised before the restart: not before...
+    for (let turnsLeft = promised - 1; turnsLeft > 0; turnsLeft--) {
+      expect(benBack.view?.units.some((unit) => unit.type === 'fishingBoat')).toBe(false);
+      expect(ownCity(benBack.view).own.buildQueue[0].turns).toBe(turnsLeft);
+      await endTurn(back);
+    }
+    // ...and not after. It lies on a coast tile of Thebes, the city is
+    // still set to "Build first", and the queue it had in round 2 follows.
+    const boat = ownUnit(benBack.view, 'fishingBoat');
+    expect(ownWater(benBack.view)).toContain(boat.tile);
+    expect(second.save(ROUND_TWO_CODE).game?.map.tiles[boat.tile]).toMatchObject({ terrain: 'coast', cityId: thebes.id });
+    expect(ownCity(benBack.view).own.focus).toBe('build');
+    expect(queueItems(ownCity(benBack.view))).toEqual(queueItems(thebes));
+    expect(eventsSentTo(benBack).filter((event) => event.type === 'unitBuilt' && event.unitType === 'fishingBoat')).toEqual([
+      { type: 'unitBuilt', playerId: 'p2', cityId: thebes.id, cityName: 'Thebes', unitId: boat.id, unitType: 'fishingBoat', queueEmpty: false },
+    ]);
+
+    // The boat begins a net where it lies, and four turns later the tile carries it.
+    const net = IMPROVEMENTS.fishingNet;
+    expect(boat.own?.jobOptions).toEqual([{ improvement: 'fishingNet', turns: net.turns, error: null }]);
+    await benBack.actOk(turnOf(benBack), { type: 'startJob', unitId: boat.id, improvement: 'fishingNet' });
+    for (const other of back.filter((player) => player !== benBack)) await other.expectNothingPending();
+    for (let worked = 0; worked < net.turns; worked++) {
+      expect(benBack.view?.tiles[boat.tile]?.improvement).toBeNull();
+      await endTurn(back);
+    }
+    expect(benBack.view?.tiles[boat.tile]?.improvement).toBe('fishingNet');
+    expect(eventsSentTo(benBack).filter((event) => event.type === 'improvementBuilt' && event.improvement === 'fishingNet')).toEqual([
+      { type: 'improvementBuilt', playerId: 'p2', unitId: boat.id, improvement: 'fishingNet', tile: boat.tile, cityName: 'Thebes' },
+    ]);
+
+    // The file on disk is a save of today's layout with a boat and a net in
+    // it, and a server that starts on it has nothing to say about it.
+    const last = readFileSync(path, 'utf8');
+    expect(last).toContain(`"schema":${STATE_SCHEMA}`);
+    expect(last).not.toMatch(/"schema":2\b/);
+    const saved = second.save(ROUND_TWO_CODE).game;
+    expect(saved?.schema).toBe(STATE_SCHEMA);
+    expect(saved?.turn).toBe(41 + promised + net.turns);
+    expect(saved?.units[boat.id]).toMatchObject({ type: 'fishingBoat', owner: 'p2', tile: boat.tile, job: null });
+    expect(saved?.map.tiles[boat.tile].improvement).toBe('fishingNet');
+    expect(Object.values(saved?.cities ?? {}).map((city) => city.focus).sort()).toEqual(['build', 'grow', 'grow', 'grow', 'grow', 'grow']);
+    await second.close();
+    const third = await startTestServer({ dataDir });
+    expect(third.logs).toContain('Saved games loaded: 1.');
+    expect(third.logs.filter((line) => line.includes('WARNING') || line.includes(`${ROUND_TWO_CODE}.json`))).toEqual([]);
+    expect(readFileSync(path, 'utf8')).toBe(last);
   });
 
   it('a job in progress and a finished farm survive a server restart', async () => {

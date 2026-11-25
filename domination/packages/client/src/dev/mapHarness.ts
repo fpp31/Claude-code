@@ -18,7 +18,7 @@
  * not include it.
  */
 
-import { neighbors } from '@domination/shared';
+import { UNITS, neighbors, tileMoveCost } from '@domination/shared';
 import type { PlayerView, TileIndex } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import '../styles.css';
@@ -62,9 +62,14 @@ function select(tile: TileIndex): void {
   const unit = view.units.find((candidate) => candidate.tile === tile && candidate.owner === view.you);
   const city = view.cities.find((candidate) => candidate.tile === tile && candidate.owner === view.you);
   if (unit !== undefined) {
-    // Not the real movement rules: simply the explored tiles next to the unit. A unit at work goes nowhere.
+    // Not the real movement rules: simply the explored tiles next to the unit that a unit of its kind can
+    // enter at all (land for a land unit, water for a boat). A unit at work goes nowhere.
     const atWork = unit.own !== null && unit.own.job !== null;
-    const reachable = atWork ? [] : neighbors(tile, view).filter((neighbor) => view.tiles[neighbor] !== null);
+    const domain = UNITS[unit.type].domain;
+    const reachable = atWork ? [] : neighbors(tile, view).filter((neighbor) => {
+      const seen = view.tiles[neighbor];
+      return seen !== null && tileMoveCost(seen, domain) !== null;
+    });
     setOverlay({ selectedTile: tile, selectedUnitId: unit.id, reachable, path: [], workedTiles: [] });
   } else if (city !== undefined) {
     setOverlay({ selectedTile: tile, selectedUnitId: null, reachable: [], path: [], workedTiles: city.own?.worked ?? [] });

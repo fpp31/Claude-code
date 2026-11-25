@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CITY_FOCUS_IDS,
   CIVS,
+  DEFAULT_CITY_FOCUS,
   RULES,
   TERRAIN,
   UNITS,
@@ -11,16 +13,23 @@ import {
   cityCenterYields,
   cityEconomy,
   cloneJson,
+  createGame,
+  diffViews,
   distance,
   findSpawnTile,
+  foodToGrow,
   foundCityError,
   improvementFits,
+  neighbors,
   nextInt,
   pick,
+  resolveTurn,
   seedRng,
+  tileIsWater,
+  tileMoveCost,
   tileYields,
 } from '../src/index';
-import type { BuildItem, City, GameState, PlayerId, TileIndex } from '../src/index';
+import type { Action, BuildItem, City, CityEconomy, CityFocusId, GameState, PlayerId, RuleErrorCode, TileIndex, UnitTypeId } from '../src/index';
 import {
   EAST,
   MEADOW,
@@ -39,10 +48,14 @@ import {
   playUntilBuilt,
   queueOf,
   refusal,
+  send,
+  setupFor,
   stepFrom,
+  tamper,
   unitOf,
   unitsOf,
 } from './rulesKit';
+import { LONG_TEST } from './rulesRandomPlay';
 
 /**
  * Tests for cities: founding them, where their citizens work, what they
@@ -52,7 +65,11 @@ import {
  * before there was a queue.
  */
 
-/** Two players on the meadow: p1 at (3,5), p2 at (12,5). */
+/** The unit types by where they move, each in the order of the build menu. A city without water builds the first four only. */
+const LAND_UNITS: readonly UnitTypeId[] = UNIT_TYPE_IDS.filter((type) => UNITS[type].domain === 'land');
+const BOATS: readonly UnitTypeId[] = UNIT_TYPE_IDS.filter((type) => UNITS[type].domain === 'sea');
+
+/** Two players on the meadow: p1 at (3,5), p2 at (12,5). Their capitals stand inland and own no water. */
 function meadowGame(): GameState {
   return newGame(MEADOW, [[3, 5], [12, 5]]);
 }
@@ -140,6 +157,7 @@ describe('applyAction: foundCity (WP2)', () => {
       foodStored: 0,
       buildQueue: [],
       productionStored: 0,
+      focus: 'grow',
     });
     expect(city.id.startsWith('c1_')).toBe(true);
     expect(step.state.cities[city.id]).toBe(city);
@@ -480,11 +498,17 @@ describe('city economy and production (WP2)', () => {
       expect(refusal(start, 'p2', action), JSON.stringify(item)).toBe('noSuchCity');
     }
 
-    // Every unit type of the table can be chosen.
-    for (const unitType of UNIT_TYPE_IDS) {
+    // Every land unit of the table can be chosen. (Rome stands inland: a boat is refused, and nothing is stored.)
+    for (const unitType of LAND_UNITS) {
       const chosen = act(start, 'p1', { type: 'setBuildQueue', cityId: rome.id, queue: queueOf(unitType) });
       expect(chosen.cities[rome.id].buildQueue).toEqual([{ kind: 'unit', unitType }]);
     }
+    for (const unitType of BOATS) {
+      expect(refusal(start, 'p1', { type: 'setBuildQueue', cityId: rome.id, queue: queueOf(unitType) }), unitType).toBe('noWaterForBoat');
+      // "Whose city" is answered first here too.
+      expect(refusal(start, 'p2', { type: 'setBuildQueue', cityId: rome.id, queue: queueOf(unitType) }), unitType).toBe('noSuchCity');
+    }
+    expect(LAND_UNITS.length + BOATS.length).toBe(UNIT_TYPE_IDS.length);
 
     // Switching keeps what was stored, and changes nothing else about the city.
     const halfBuilt = arrange(start, (draft) => {
@@ -516,6 +540,11 @@ describe('city economy and production (WP2)', () => {
       for (const option of options) {
         const unitType = option.item.unitType;
         expect(option.cost).toBe(UNITS[unitType].cost);
+        if (UNITS[unitType].domain === 'sea') {
+          // Rome owns no water: a boat has its price, and never a number of turns.
+          expect([option.turns, option.wait, option.addError], unitType).toEqual([null, 'noRoom', 'noWaterForBoat']);
+          continue;
+        }
         expect(option.wait).toBeNull();
         expect(option.addError).toBeNull();
         // Count the turn resolutions by playing: queue the item and end the
@@ -547,7 +576,8 @@ describe('city economy and production (WP2)', () => {
       expect(plan.options).toHaveLength(UNIT_TYPE_IDS.length);
       for (const option of plan.options) {
         expect(option.turns, option.item.unitType).toBeNull();
-        expect(option.wait, option.item.unitType).toBe('noProduction');
+        // The reason that will never pass comes before the one that might: the peak has no water for a boat.
+        expect(option.wait, option.item.unitType).toBe(UNITS[option.item.unitType].domain === 'sea' ? 'noRoom' : 'noProduction');
       }
     } finally {
       TERRAIN.desert.yields.production = desertBefore;
@@ -1238,7 +1268,7 @@ describe('citizens: food before production while the city would not grow', () =>
     expect(cityEconomy(state, city).foodSurplus).toBe(2); // and the rule is back
   });
 
-  it('cityEconomy reads nothing of the city but its id, tile and population', () => {
+  it('cityEconomy reads nothing of the city but its id, tile, population and focus', () => {
     const { state, city } = mineTown(3);
     const usual = cityEconomy(state, city);
     const other: City = {
@@ -1250,12 +1280,16 @@ describe('citizens: food before production while the city would not grow', () =>
       foodStored: 500,
       buildQueue: queueOf('settler', 'worker', 'scout'),
       productionStored: 900,
+      focus: city.focus,
     };
     expect(cityEconomy(state, other)).toEqual(usual);
-    // The three it does read each change the answer.
+    // The four it does read each change the answer.
     expect(cityEconomy(state, { ...city, population: 2 })).not.toEqual(usual);
     expect(cityEconomy(state, { ...city, id: 'c1_nowhere' }).worked).toEqual([]);
     expect(cityEconomy(state, { ...city, tile: at(state.map, 3, 2) }).worked).toContain(city.tile);
+    expect(city.focus).toBe('grow');
+    expect(cityEconomy(state, { ...city, focus: 'build' })).not.toEqual(usual);
+    expect(cityEconomy(state, { ...city, focus: 'build' }).worked).toContain(at(state.map, 3, 4)); // the mine, which Grow gave up
     // Pure: the same answer again, as a new object, and the state is not touched.
     const frozen = deepFreeze(cloneJson(state));
     expect(cityEconomy(frozen, frozen.cities[city.id])).toEqual(usual);
@@ -1358,5 +1392,687 @@ describe('citizens: food before production while the city would not grow', () =>
     expect(fed).toBeGreaterThan(20);
     expect(swapped).toBeGreaterThan(20);
     expect(short).toBeGreaterThan(20);
+  });
+});
+
+/**
+ * Rule F2 read a second time and plainly, with sorting where cityEconomy
+ * searches: what a city's citizens gather under a way of placing them.
+ * Anything that is not exactly 'build' is placed as Grow, with the three
+ * steps cities have always taken.
+ */
+function economyByTheBook(state: GameState, city: City, focus: unknown): CityEconomy {
+  interface Candidate {
+    tile: TileIndex;
+    food: number;
+    production: number;
+  }
+  const centre = cityCenterYields(state.map.tiles[city.tile]);
+  const candidates: Candidate[] = [];
+  state.map.tiles.forEach((tile, index) => {
+    if (tile.cityId !== city.id || index === city.tile || tile.feature === 'mountains') return;
+    candidates.push({ tile: index, ...tileYields(tile) });
+  });
+  const eaten = RULES.foodPerCitizen * city.population;
+  const foodOf = (tiles: Candidate[]): number => centre.food + tiles.reduce((sum, candidate) => sum + candidate.food, 0);
+
+  let chosen: Candidate[];
+  if (focus === 'build') {
+    // The most production first; then the most food; then the lower tile. Nothing else.
+    chosen = [...candidates].sort((a, b) => b.production - a.production || b.food - a.food || a.tile - b.tile).slice(0, city.population);
+  } else {
+    // 1. The best tiles by food + production, then food, then the lower tile.
+    candidates.sort((a, b) => b.food + b.production - (a.food + a.production) || b.food - a.food || a.tile - b.tile);
+    const firstChoice = candidates.slice(0, city.population);
+    chosen = [...firstChoice];
+    const spare = candidates.slice(city.population);
+    // 2. While the city would not grow: the chosen tile with the least food for the spare tile with the most.
+    while (foodOf(chosen) - eaten < RULES.minFoodSurplus && chosen.length > 0 && spare.length > 0) {
+      chosen.sort((a, b) => a.food - b.food || a.food + a.production - (b.food + b.production) || b.tile - a.tile);
+      spare.sort((a, b) => b.food - a.food || b.food + b.production - (a.food + a.production) || a.tile - b.tile);
+      if (spare[0].food <= chosen[0].food) break;
+      const given = chosen[0];
+      chosen[0] = spare[0];
+      spare[0] = given;
+    }
+    // 3. No placement lets the city grow: the first choice stands.
+    if (foodOf(chosen) - eaten < RULES.minFoodSurplus && foodOf(chosen) - eaten <= 0) chosen = firstChoice;
+  }
+  return {
+    worked: chosen.map((candidate) => candidate.tile).sort((a, b) => a - b),
+    food: foodOf(chosen),
+    production: centre.production + chosen.reduce((sum, candidate) => sum + candidate.production, 0),
+    foodSurplus: foodOf(chosen) - eaten,
+  };
+}
+
+describe('Grow first or Build first: the focus of a city (round 3)', () => {
+  /** p1's capital on the meadow, and p2's Scout next to it with the city in full sight. */
+  function watchedRome(): { state: GameState; rome: City } {
+    const founded = arrange(withCapital(meadowGame()), (draft) => {
+      placeUnit(draft, 'p2', 'scout', at(draft.map, 5, 5));
+    });
+    return { state: founded, rome: cityOn(founded, at(founded.map, 3, 5)) };
+  }
+
+  function focusAction(cityId: string, focus: unknown): Action {
+    return { type: 'setCityFocus', cityId, focus } as Action;
+  }
+
+  /** The owner's view of the first city of a one-city game (or of p1's first city). */
+  function ownDetail(state: GameState, playerId: PlayerId = 'p1') {
+    const own = buildPlayerView(state, playerId).cities.find((city) => city.own !== null)?.own;
+    if (own === null || own === undefined) throw new Error(`${playerId} has no city in the view`);
+    return own;
+  }
+
+  it('a new city starts on grow', () => {
+    expect(DEFAULT_CITY_FOCUS).toBe('grow');
+    // No city before the first is founded; every city that is founded starts on the default.
+    const start = meadowGame();
+    expect(Object.keys(start.cities)).toEqual([]);
+    let state = withCapital(withCapital(start), 'p2');
+    state = foundCityAt(state, 'p1', at(state.map, 3, 1));
+    expect(Object.values(state.cities)).toHaveLength(3);
+    for (const city of Object.values(state.cities)) expect(city.focus, city.name).toBe(DEFAULT_CITY_FOCUS);
+    // A city founded by a player whose first city is on Build still starts on Grow: the choice is the city's.
+    const rome = cityOn(state, at(state.map, 3, 5));
+    const building = act(state, 'p1', focusAction(rome.id, 'build'));
+    const third = foundCityAt(building, 'p1', at(state.map, 7, 5));
+    expect(cityOn(third, at(state.map, 7, 5)).focus).toBe('grow');
+    expect(third.cities[rome.id].focus).toBe('build');
+    // The owner is told, and nobody else is told anything.
+    const told = buildPlayerView(third, 'p1').cities.filter((city) => city.own !== null);
+    expect(told).toHaveLength(3);
+    for (const city of told) expect(city.own?.focus, city.name).toBe(city.id === rome.id ? 'build' : 'grow');
+    for (const city of buildPlayerView(third, 'p2').cities) if (city.owner === 'p1') expect(city.own).toBeNull();
+  });
+
+  it('setCityFocus: noSuchCity for a missing or foreign city; badAction for a focus that is no key of the table ("constructor" too); a no-op for the focus the city has; nothing but focus changes; refused after End Turn', () => {
+    const { state, rome } = watchedRome();
+    const before = arrange(state, (draft) => {
+      Object.assign(draft.cities[rome.id], { foodStored: 3, productionStored: 7, population: 2 });
+      draft.cities[rome.id].buildQueue = queueOf('warrior', 'settler');
+    });
+    const answer = (situation: GameState, playerId: PlayerId, cityId: string, focus: unknown): RuleErrorCode | null =>
+      refusal(situation, playerId, focusAction(cityId, focus));
+
+    // A city that is not the player's and a city that does not exist get one and the same answer,
+    // whatever the focus is: ids cannot be probed.
+    for (const focus of ['build', 'grow', 'fast', 'constructor', '']) {
+      expect(answer(before, 'p2', rome.id, focus), `p2, '${focus}'`).toBe('noSuchCity');
+      for (const cityId of ['c1_nowhere', 'c2_nowhere', 'constructor', '__proto__', 'toString', '']) {
+        expect(answer(before, 'p1', cityId, focus), `${cityId}, '${focus}'`).toBe('noSuchCity');
+      }
+    }
+    // A unit id is not a city id.
+    expect(answer(before, 'p1', unitOf(before, 'p1', 'warrior').id, 'build')).toBe('noSuchCity');
+
+    // One's own city and a focus that is no key of the table: a malformed action. The two values are a closed list.
+    for (const focus of ['fast', '', 'Build', 'GROW', 'grow ', 'constructor', '__proto__', 'toString', 'hasOwnProperty', 'name']) {
+      expect(answer(before, 'p1', rome.id, focus), `'${focus}'`).toBe('badAction');
+    }
+    // So is a focus that is no string at all, or none, or a city id that is no string (the shape check of applyAction).
+    for (const action of [
+      { type: 'setCityFocus', cityId: rome.id },
+      { type: 'setCityFocus', cityId: rome.id, focus: 5 },
+      { type: 'setCityFocus', cityId: rome.id, focus: null },
+      { type: 'setCityFocus', cityId: rome.id, focus: ['build'] },
+      { type: 'setCityFocus', cityId: rome.id, focus: { id: 'build' } },
+      { type: 'setCityFocus', focus: 'build' },
+      { type: 'setCityFocus', cityId: 7, focus: 'build' },
+    ]) {
+      expect(refusal(before, 'p1', action as unknown as Action), JSON.stringify(action)).toBe('badAction');
+    }
+    expect(before.cities[rome.id].focus).toBe('grow');
+
+    // The real choice: nothing of the city changes but the focus, nothing else of the game changes, and nothing is news.
+    const step = actWithEvents(before, 'p1', focusAction(rome.id, 'build'));
+    expect(step.changed).toBe(true);
+    expect(step.events).toEqual([]);
+    expect(step.state.cities[rome.id]).toEqual({ ...before.cities[rome.id], focus: 'build' });
+    expect(step.state.cities[rome.id]).toMatchObject({ foodStored: 3, productionStored: 7, population: 2, buildQueue: queueOf('warrior', 'settler') });
+    expect({ ...step.state, cities: null }).toEqual({ ...before, cities: null });
+    expect(Object.keys(step.state.cities[rome.id]).sort()).toEqual(
+      ['buildQueue', 'focus', 'foodStored', 'id', 'name', 'owner', 'population', 'productionStored', 'tile'],
+    );
+    // Whatever else the action carried is not stored.
+    const padded = act(before, 'p1', { type: 'setCityFocus', cityId: rome.id, focus: 'build', note: 'y'.repeat(40), population: 9 } as unknown as Action);
+    expect(padded).toEqual(step.state);
+
+    // The focus the city has already: accepted, and the very same state object comes back.
+    for (const [situation, focus] of [[before, 'grow'], [step.state, 'build']] as [GameState, CityFocusId][]) {
+      const again = send(situation, 'p1', focusAction(rome.id, focus));
+      expect(again.ok).toBe(true);
+      if (!again.ok) continue;
+      expect(again.changed).toBe(false);
+      expect(again.state).toBe(situation);
+      expect(again.events).toEqual([]);
+    }
+    // And back again is the state it came from.
+    expect(act(step.state, 'p1', focusAction(rome.id, 'grow'))).toEqual(before);
+
+    // Like every order it needs the turn it was given in and a turn that is not ended.
+    expect(refusal(before, 'p1', focusAction(rome.id, 'build'))).toBeNull();
+    const ended = act(before, 'p1', { type: 'endTurn' });
+    expect(ended.turn).toBe(before.turn); // p2 is still playing
+    expect(answer(ended, 'p1', rome.id, 'build')).toBe('turnAlreadyEnded');
+    expect(answer(ended, 'p1', 'c1_nowhere', 'fast')).toBe('turnAlreadyEnded');
+    expect(answer(act(ended, 'p1', { type: 'cancelEndTurn' }), 'p1', rome.id, 'build')).toBeNull();
+    for (const turn of [before.turn - 1, before.turn + 1]) {
+      const stale = send(before, 'p1', focusAction(rome.id, 'build'), turn);
+      expect(stale.ok ? null : stale.error.code).toBe('staleTurn');
+    }
+    // Somebody who is not in the game, and the order of the general checks: a stranger first, then the shape, then the turn.
+    expect(answer(before, 'p9', rome.id, 'build')).toBe('badAction');
+    const malformedAndStale = send(before, 'p1', { type: 'setCityFocus', cityId: rome.id } as unknown as Action, before.turn + 1);
+    expect(malformedAndStale.ok ? null : malformedAndStale.error.code).toBe('badAction');
+
+    // The other player, whose Scout stands next to the city, is sent nothing: their view is the same to the last character.
+    const theirs = buildPlayerView(before, 'p2');
+    expect(theirs.cities.find((city) => city.id === rome.id)).toMatchObject({ visible: true, own: null });
+    expect(JSON.stringify(buildPlayerView(step.state, 'p2'))).toBe(JSON.stringify(theirs));
+    expect(diffViews(theirs, buildPlayerView(step.state, 'p2'))).toBeNull();
+    // The owner's view changed in its cities and nowhere else.
+    expect(Object.keys(diffViews(buildPlayerView(before, 'p1'), buildPlayerView(step.state, 'p1')) ?? {})).toEqual(['cities']);
+  });
+
+  /**
+   * A city at (3,3) on grassland with one tile of every kind that matters
+   * to Build, and mountains everywhere else:
+   *   (2,3) hills on plains, MINED (0 food, 5 production)
+   *   (4,2) and (4,3) open plains (1, 2)        (3,2) hills on grassland (0, 2)
+   *   (3,4) open grassland (2, 1)   (4,4) forest (1, 1)   (5,3) desert (0, 1)
+   *   (2,5) coast with a NET (4, 0)   (3,5) coast (2, 0)   (4,5) ocean (1, 0)
+   */
+  const EVERY_KIND: readonly string[] = [
+    'm m m m m m m',
+    ' m m m m m m m',
+    'm m m h p m m',
+    ' m m H g p d m',
+    'm m m g f m m',
+    ' m m , , ~ m m',
+    'm m m m m m m',
+  ];
+
+  it('build takes the tiles with the most production: ties by food, then by the lower tile; no tile is given up for food; with more citizens than tiles with production the net is first among the rest', () => {
+    const bare = cityAtCentre(EVERY_KIND);
+    const map = bare.state.map;
+    const MINE = at(map, 2, 3);
+    const NET = at(map, 2, 5);
+    const withImprovements = arrange(bare.state, (draft) => {
+      improve(draft, MINE, 'mine');
+      improve(draft, NET, 'fishingNet');
+    });
+    // In the order Build takes them: production 5; 2, 2 (the lower plains tile first), 2 (hills: no food, so behind the plains
+    // although its tile number is the lowest of the three); 1, 1, 1 by food; then the tiles without production, by food: the net first.
+    const order: [TileIndex, number, number][] = [
+      [MINE, 0, 5],
+      [at(map, 4, 2), 1, 2],
+      [at(map, 4, 3), 1, 2],
+      [at(map, 3, 2), 0, 2],
+      [at(map, 3, 4), 2, 1],
+      [at(map, 4, 4), 1, 1],
+      [at(map, 5, 3), 0, 1],
+      [NET, 4, 0],
+      [at(map, 3, 5), 2, 0],
+      [at(map, 4, 5), 1, 0],
+    ];
+    for (const [tile, food, production] of order) {
+      expect(withImprovements.map.tiles[tile].cityId, `tile ${tile}`).toBe(bare.city.id);
+      expect(tileYields(withImprovements.map.tiles[tile]), `tile ${tile}`).toEqual({ food, production });
+    }
+    expect(at(map, 3, 2)).toBeLessThan(at(map, 4, 2));
+
+    for (let population = 1; population <= order.length + 2; population++) {
+      const state = arrange(withImprovements, (draft) => {
+        Object.assign(draft.cities[bare.city.id], { population, focus: 'build' });
+      });
+      const taken = order.slice(0, population);
+      const food = 2 + taken.reduce((sum, [, tileFood]) => sum + tileFood, 0);
+      const economy = cityEconomy(state, state.cities[bare.city.id]);
+      // Exactly the first tiles of the order. Citizens left over when the tiles run out gather nothing.
+      expect(economy, `population ${population}`).toEqual({
+        worked: taken.map(([tile]) => tile).sort((a, b) => a - b),
+        food,
+        production: 1 + taken.reduce((sum, [, , tileProduction]) => sum + tileProduction, 0),
+        foodSurplus: food - 2 * population,
+      });
+      expect(economy, `population ${population}`).toEqual(economyByTheBook(state, state.cities[bare.city.id], 'build'));
+      // The owner's panel prints these numbers.
+      expect(ownDetail(state)).toMatchObject({ focus: 'build', worked: economy.worked, foodPerTurn: economy.foodSurplus, productionPerTurn: economy.production });
+      // No tile is given up for food: up to seven citizens stand on the seven tiles with production
+      // and eat more than they gather, while the net, with the most food of all, is left alone.
+      if (population <= 7) {
+        expect(economy.worked, `population ${population}`).not.toContain(NET);
+        expect(economy.foodSurplus, `population ${population}`).toBeLessThanOrEqual(0);
+      } else {
+        // More citizens than tiles with production: the net is first among the rest.
+        expect(economy.worked, `population ${population}`).toContain(NET);
+      }
+      // Grow, in the same city, never makes more production; here it makes less at every size with a choice.
+      const grow = cityEconomy(state, { ...state.cities[bare.city.id], focus: 'grow' });
+      expect(grow.production, `population ${population}`).toBeLessThanOrEqual(economy.production);
+      if (population < order.length) expect(grow.worked, `population ${population}`).not.toEqual(economy.worked);
+    }
+    // RULES.minFoodSurplus is Grow's aim and is read under Grow only: with the aim set to 3 for a
+    // moment, three citizens on Build stand where they stood, and three on Grow do not.
+    const three = arrange(withImprovements, (draft) => {
+      Object.assign(draft.cities[bare.city.id], { population: 3, focus: 'build' });
+    });
+    const buildUsual = cityEconomy(three, three.cities[bare.city.id]);
+    const growUsual = cityEconomy(three, { ...three.cities[bare.city.id], focus: 'grow' });
+    const aimBefore = RULES.minFoodSurplus;
+    try {
+      RULES.minFoodSurplus = 3;
+      expect(cityEconomy(three, three.cities[bare.city.id])).toEqual(buildUsual);
+      expect(cityEconomy(three, { ...three.cities[bare.city.id], focus: 'grow' })).not.toEqual(growUsual);
+    } finally {
+      RULES.minFoodSurplus = aimBefore;
+    }
+    expect(RULES.minFoodSurplus).toBe(1);
+
+    // One citizen, for the eye: Build stands on the mine and the city stands still; Grow fishes.
+    const one = arrange(withImprovements, (draft) => {
+      draft.cities[bare.city.id].focus = 'build';
+    });
+    expect(cityEconomy(one, one.cities[bare.city.id])).toEqual({ worked: [MINE], food: 2, production: 6, foodSurplus: 0 });
+    expect(cityEconomy(withImprovements, withImprovements.cities[bare.city.id])).toEqual({ worked: [NET], food: 6, production: 1, foodSurplus: 4 });
+  });
+
+  /** The city of the worked example: a hill to be mined (3,2), plains (4,2), grassland (4,3) and coast to be fished (3,4). */
+  const EXAMPLE: readonly string[] = [
+    'm m m m m m m',
+    ' m m m m m m m',
+    'm m m H p m m',
+    ' m m m g g m m',
+    'm m m , m m m',
+    ' m m m m m m m',
+    'm m m m m m m',
+  ];
+
+  /** The example city with two citizens, its mine and its net, on this focus. */
+  function exampleCity(focus: CityFocusId): { state: GameState; city: City; tiles: Record<'mine' | 'plains' | 'grass' | 'net', TileIndex> } {
+    const bare = cityAtCentre(EXAMPLE, 2);
+    const map = bare.state.map;
+    const tiles = { mine: at(map, 3, 2), plains: at(map, 4, 2), grass: at(map, 4, 3), net: at(map, 3, 4) };
+    const state = arrange(bare.state, (draft) => {
+      improve(draft, tiles.mine, 'mine');
+      improve(draft, tiles.net, 'fishingNet');
+      draft.cities[bare.city.id].focus = focus;
+    });
+    return { state, city: state.cities[bare.city.id], tiles };
+  }
+
+  it('the worked example of 3D: Grow gives food 6 and production 6, Build food 3 and production 8', () => {
+    const grow = exampleCity('grow');
+    const { mine, plains, grass, net } = grow.tiles;
+    // The candidates are the four of the example, on a centre of 2 food and 1 production.
+    expect(tileYields(grow.state.map.tiles[mine])).toEqual({ food: 0, production: 5 });
+    expect(tileYields(grow.state.map.tiles[plains])).toEqual({ food: 1, production: 2 });
+    expect(tileYields(grow.state.map.tiles[grass])).toEqual({ food: 2, production: 1 });
+    expect(tileYields(grow.state.map.tiles[net])).toEqual({ food: 4, production: 0 });
+    expect(cityCenterYields(grow.state.map.tiles[grow.city.tile])).toEqual({ food: 2, production: 1 });
+    expect(grow.state.map.tiles.filter((tile) => tile.cityId === grow.city.id && tile.feature !== 'mountains')).toHaveLength(5);
+
+    // Grow: the mined hill and the fished tile (5 and 4). Food 2 + 0 + 4 = 6, eaten 4, surplus +2: no swap.
+    expect(cityEconomy(grow.state, grow.city)).toEqual({ worked: [mine, net].sort((a, b) => a - b), food: 6, production: 6, foodSurplus: 2 });
+    // Build: the mined hill and the plains. Food 2 + 0 + 1 = 3, surplus -1. Production 1 + 5 + 2 = 8.
+    const build = exampleCity('build');
+    expect(cityEconomy(build.state, build.city)).toEqual({ worked: [mine, plains].sort((a, b) => a - b), food: 3, production: 8, foodSurplus: -1 });
+    // The view of each says exactly that.
+    expect(ownDetail(grow.state)).toMatchObject({ focus: 'grow', worked: [mine, net].sort((a, b) => a - b), foodPerTurn: 2, productionPerTurn: 6 });
+    expect(ownDetail(build.state)).toMatchObject({ focus: 'build', worked: [mine, plains].sort((a, b) => a - b), foodPerTurn: -1, productionPerTurn: 8 });
+  });
+
+  it('a capital of two on build takes the hill and the plains and does not grow; on grow it grows; a city on build with a negative surplus loses its store and no citizen', () => {
+    // Open grassland around the city, one hill (3,2) and one plains tile (4,2).
+    const CAPITAL_OF_TWO: readonly string[] = [
+      'm m m m m m m',
+      ' m m m m m m m',
+      'm m m h p m m',
+      ' m m g g g m m',
+      'm m m g g m m',
+      ' m m m m m m m',
+      'm m m m m m m',
+    ];
+    const bare = cityAtCentre(CAPITAL_OF_TWO, 2);
+    const map = bare.state.map;
+    const HILL = at(map, 3, 2);
+    const PLAINS = at(map, 4, 2);
+    const cityId = bare.city.id;
+    const stocked = arrange(bare.state, (draft) => {
+      draft.cities[cityId].foodStored = 3;
+      draft.cities[cityId].buildQueue = queueOf('warrior', 'warrior', 'warrior', 'warrior', 'warrior', 'warrior', 'warrior', 'warrior');
+    });
+
+    // On Build: the two tiles with production 2 (the plains first: it has food), 3 food for 4 eaten.
+    const building = act(stocked, 'p1', focusAction(cityId, 'build'));
+    expect(cityEconomy(building, building.cities[cityId])).toEqual({ worked: [HILL, PLAINS].sort((a, b) => a - b), food: 3, production: 5, foodSurplus: -1 });
+    // The store runs down by one a turn, stops at nothing and stays there; the city keeps both citizens and never grows.
+    let current = building;
+    const stores: number[] = [];
+    for (let turn = 1; turn <= 20; turn++) {
+      const step = endTurnForAll(current);
+      current = step.state;
+      stores.push(current.cities[cityId].foodStored);
+      expect(current.cities[cityId].population, `turn ${turn}`).toBe(2);
+      expect(step.events.some((addressed) => addressed.event.type === 'cityGrew'), `turn ${turn}`).toBe(false);
+      // The citizens stay where Build put them, hungry or not.
+      expect(cityEconomy(current, current.cities[cityId]).worked, `turn ${turn}`).toEqual([HILL, PLAINS].sort((a, b) => a - b));
+    }
+    expect(stores.slice(0, 5)).toEqual([2, 1, 0, 0, 0]);
+    expect(stores.every((store) => store >= 0)).toBe(true);
+    expect(stores[stores.length - 1]).toBe(0);
+    // Meanwhile it built: 5 a turn, where Grow makes 3.
+    expect(unitsOf(current, 'p1', 'warrior').length).toBe(1 + Math.floor((20 * 5) / UNITS.warrior.cost));
+
+    // On Grow the same city gathers from two grassland tiles, +2 a turn, and has a third citizen in time.
+    const growing = cityEconomy(stocked, stocked.cities[cityId]);
+    expect(growing).toMatchObject({ food: 6, production: 3, foodSurplus: 2 });
+    expect(growing.worked.every((tile) => stocked.map.tiles[tile].terrain === 'grassland' && stocked.map.tiles[tile].feature === null)).toBe(true);
+    let grown = stocked;
+    const needed = Math.ceil((foodToGrow(2) - 3) / 2);
+    for (let turn = 1; turn <= needed; turn++) {
+      expect(grown.cities[cityId].population, `turn ${turn}`).toBe(2);
+      grown = endTurnForAll(grown).state;
+    }
+    expect(grown.cities[cityId].population).toBe(3);
+
+    // Pressing "Grow first" again on the city that stood still: it grows from the next turn on.
+    const back = act(current, 'p1', focusAction(cityId, 'grow'));
+    expect(cityEconomy(back, back.cities[cityId]).foodSurplus).toBe(2);
+    expect(endTurnForAll(back).state.cities[cityId].foodStored).toBe(2);
+  });
+
+  it('grow is today\'s placement: a second plain reading of the rule runs with focus grow and with a focus that is missing or nonsense, and agrees on every one of three hundred random lands; so does its reading of build', () => {
+    const dice = seedRng('random lands, round 3', 'citizens');
+    const kinds = ['g', 'g', 'p', 'p', 'd', 'f', 'h', 'H', 'D', ',', ',', '~', 'm'];
+    const lost: unknown[] = [undefined, 'fast', '', 'Build', 'GROW', null, 'constructor', 7];
+    let differs = 0;
+    let hungryOnBuild = 0;
+    let nets = 0;
+
+    for (let land = 0; land < 300; land++) {
+      // A city at (3,3) of a 7 x 7 map; every other tile is of a random kind.
+      const rows: string[] = [];
+      for (let y = 0; y < 7; y++) {
+        const row: string[] = [];
+        for (let x = 0; x < 7; x++) row.push(x === 3 && y === 3 ? 'g' : pick(dice, kinds));
+        rows.push((y % 2 === 1 ? ' ' : '') + row.join(' '));
+      }
+      const population = 1 + nextInt(dice, 9);
+      const bare = cityAtCentre(rows, population);
+      // About every third tile of the city that can take an improvement has one: a farm, a mine or a net.
+      const state = arrange(bare.state, (draft) => {
+        draft.map.tiles.forEach((tile, index) => {
+          if (tile.cityId === null || index === bare.city.tile || nextInt(dice, 3) !== 0) return;
+          if (improvementFits('farm', tile)) improve(draft, index, 'farm');
+          else if (improvementFits('mine', tile)) improve(draft, index, 'mine');
+          else if (improvementFits('fishingNet', tile)) improve(draft, index, 'fishingNet');
+        });
+      });
+      const city = state.cities[bare.city.id];
+      const what = `land ${land}: ${rows.join(' / ')}, population ${population}`;
+      nets += state.map.tiles.filter((tile) => tile.cityId === city.id && tile.improvement === 'fishingNet').length;
+
+      // Grow: the engine and the plain reading agree...
+      const byTheBook = economyByTheBook(state, city, 'grow');
+      expect(city.focus).toBe('grow');
+      expect(cityEconomy(state, city), what).toEqual(byTheBook);
+      // ...and a city whose field was lost by hand is placed exactly so.
+      const wrong = pick(dice, lost);
+      const damaged = { ...city, focus: wrong } as unknown as City;
+      if (wrong === undefined) delete (damaged as { focus?: unknown }).focus;
+      expect(cityEconomy(state, damaged), `${what}, focus ${String(wrong)}`).toEqual(byTheBook);
+      // Every tenth land: the view of such a city says 'grow' and prints Grow's numbers.
+      if (land % 10 === 0) {
+        const lostState = tamper(state, (draft) => {
+          const fields = draft.cities[city.id] as unknown as { focus?: unknown };
+          if (wrong === undefined) delete fields.focus;
+          else fields.focus = wrong;
+        });
+        expect(ownDetail(lostState), `${what}, focus ${String(wrong)}`).toMatchObject({
+          focus: 'grow', worked: byTheBook.worked, foodPerTurn: byTheBook.foodSurplus, productionPerTurn: byTheBook.production,
+        });
+      }
+
+      // Build: the same for the other reading. It never makes less production than Grow, on any land.
+      const built = cityEconomy(state, { ...city, focus: 'build' });
+      expect(built, what).toEqual(economyByTheBook(state, city, 'build'));
+      expect(built.production, what).toBeGreaterThanOrEqual(byTheBook.production);
+      expect(built.worked.length, what).toBe(byTheBook.worked.length);
+      if (JSON.stringify(built.worked) !== JSON.stringify(byTheBook.worked)) differs += 1;
+      if (built.foodSurplus <= 0 && byTheBook.foodSurplus >= RULES.minFoodSurplus) hungryOnBuild += 1;
+    }
+    // The lands were of every kind: the two ways mostly take other tiles, Build often stands still where Grow grows, and nets were among the tiles.
+    expect(differs).toBeGreaterThan(150);
+    expect(hungryOnBuild).toBeGreaterThan(50);
+    expect(nets).toBeGreaterThan(100);
+  });
+
+  it('the turn uses the choice made before End Turn: a city switched to build this turn gets build\'s production when the turn resolves; the view after the action carries the new worked tiles and numbers', () => {
+    const { state: bare, city, tiles } = exampleCity('grow');
+    const onGrow = arrange(bare, (draft) => {
+      draft.cities[city.id].buildQueue = queueOf('worker', 'warrior');
+    });
+    const growTiles = [tiles.mine, tiles.net].sort((a, b) => a - b);
+    const buildTiles = [tiles.mine, tiles.plains].sort((a, b) => a - b);
+
+    // Before the press: Grow's tiles and numbers; a Worker (20) at 6 a turn is ready in 4 turns.
+    const before = ownDetail(onGrow);
+    expect(before).toMatchObject({ focus: 'grow', worked: growTiles, foodPerTurn: 2, productionPerTurn: 6, foodStored: 0, productionStored: 0 });
+    expect(before.buildQueue[0]).toMatchObject({ turns: 4, wait: null });
+
+    // The press. Nothing is paid and nothing is lost; the view that answers it is Build's, forecast and all: 8 a turn, 3 turns.
+    const pressed = act(onGrow, 'p1', focusAction(city.id, 'build'));
+    const after = ownDetail(pressed);
+    expect(after).toMatchObject({ focus: 'build', worked: buildTiles, foodPerTurn: -1, productionPerTurn: 8, foodStored: 0, productionStored: 0 });
+    expect(after.buildQueue[0]).toMatchObject({ turns: 3, wait: null });
+    expect(after.buildQueue.map((row) => row.item)).toEqual(before.buildQueue.map((row) => row.item));
+    expect(after.foodToGrow).toBe(before.foodToGrow);
+    // Every number of the menu is forecast with the new way too.
+    expect(after.buildOptions).not.toEqual(before.buildOptions);
+    expect(after.buildOptions).toEqual(buildPlan(pressed, pressed.cities[city.id]).options);
+
+    // The turn that resolves next reads the focus as it stands: Build's 8 production, and its hunger (the store stays at 0).
+    const resolved = endTurnForAll(pressed).state;
+    expect(resolved.cities[city.id]).toMatchObject({ productionStored: 8, foodStored: 0, population: 2, focus: 'build' });
+    // Left on Grow, the same turn gives 6 and 2.
+    expect(endTurnForAll(onGrow).state.cities[city.id]).toMatchObject({ productionStored: 6, foodStored: 2, focus: 'grow' });
+
+    // Back and forth before End Turn costs nothing, and only the last press counts.
+    const backAgain = act(pressed, 'p1', focusAction(city.id, 'grow'));
+    expect(backAgain).toEqual(onGrow);
+    expect(endTurnForAll(backAgain).state.cities[city.id]).toMatchObject({ productionStored: 6, foodStored: 2 });
+    let wavering = onGrow;
+    for (const focus of ['build', 'grow', 'build', 'grow', 'build'] as const) wavering = act(wavering, 'p1', focusAction(city.id, focus));
+    expect(wavering).toEqual(pressed);
+    expect(endTurnForAll(wavering).state.cities[city.id]).toMatchObject({ productionStored: 8, foodStored: 0 });
+
+    // And the forecast was right: three End Turns on Build, four on Grow.
+    expect(playUntilBuilt(pressed, city.id, 1).completions).toEqual([{ unitType: 'worker', after: 3 }]);
+    expect(playUntilBuilt(onGrow, city.id, 1).completions).toEqual([{ unitType: 'worker', after: 4 }]);
+  });
+
+  it('a Settler in a city of one on build says needsPopulation, and held says so once it is paid for', () => {
+    // One citizen, a hill and grassland, no plains: Build stands on the hill (0 food), and the city makes what it eats.
+    const HILL_TOWN: readonly string[] = [
+      'm m m m m m m',
+      ' m m m m m m m',
+      'm m m h g m m',
+      ' m m g g g m m',
+      'm m m m m m m',
+      ' m m m m m m m',
+      'm m m m m m m',
+    ];
+    const bare = cityAtCentre(HILL_TOWN);
+    const cityId = bare.city.id;
+    const queued = arrange(bare.state, (draft) => {
+      draft.cities[cityId].buildQueue = queueOf('settler', 'warrior');
+    });
+
+    // On Grow the city grows, and the Settler has a number.
+    const growPlan = buildPlan(queued, queued.cities[cityId]);
+    expect(growPlan.economy.foodSurplus).toBe(2);
+    expect(growPlan.queue[0].wait).toBeNull();
+    expect(growPlan.queue[0].turns).toBeGreaterThan(0);
+
+    // On Build: 3 production a turn, no surplus. The forecast saves up, finds one citizen for good, and says so; nothing is held yet.
+    const building = act(queued, 'p1', focusAction(cityId, 'build'));
+    const plan = buildPlan(building, building.cities[cityId]);
+    expect(plan.economy).toMatchObject({ worked: [at(building.map, 3, 2)], production: 3, foodSurplus: 0 });
+    expect(plan.queue.map((row) => [row.turns, row.wait])).toEqual([[null, 'needsPopulation'], [null, 'earlier']]);
+    expect(plan.held).toBeNull();
+    // An option that takes a citizen says the same; one that takes none waits for the queue in front of it.
+    expect(plan.options.find((option) => option.item.unitType === 'settler')).toMatchObject({ turns: null, wait: 'earlier' });
+    const emptyQueue = arrange(building, (draft) => {
+      draft.cities[cityId].buildQueue = [];
+    });
+    const menu = buildPlan(emptyQueue, emptyQueue.cities[cityId]).options;
+    expect(menu.find((option) => option.item.unitType === 'settler')).toMatchObject({ turns: null, wait: 'needsPopulation', addError: null });
+    expect(menu.find((option) => option.item.unitType === 'warrior')).toMatchObject({ turns: 6, wait: null });
+    // The owner's view says all of it.
+    expect(ownDetail(building)).toMatchObject({ focus: 'build', held: null, foodPerTurn: 0, buildQueue: plan.queue });
+
+    // Ten turns later the Settler is paid for (10 x 3 = 30), and now it is held.
+    let current = building;
+    for (let turn = 1; turn <= 10; turn++) {
+      expect(buildPlan(current, current.cities[cityId]).held, `before turn ${turn}`).toBeNull();
+      current = endTurnForAll(current).state;
+    }
+    expect(current.cities[cityId]).toMatchObject({ productionStored: UNITS.settler.cost, population: 1, foodStored: 0 });
+    expect(buildPlan(current, current.cities[cityId]).held).toBe('needsPopulation');
+    expect(ownDetail(current).held).toBe('needsPopulation');
+    // For good: fifty turns on, there is no Settler and still one citizen.
+    for (let turn = 0; turn < RULES.forecastTurns; turn++) current = endTurnForAll(current).state;
+    expect(unitsOf(current, 'p1', 'settler')).toEqual([]);
+    expect(current.cities[cityId].population).toBe(1);
+    expect(current.cities[cityId].buildQueue).toEqual(queueOf('settler', 'warrior'));
+
+    // "Grow first" again: the wait has an end, and the Settler comes when the row says.
+    const growing = act(current, 'p1', focusAction(cityId, 'grow'));
+    const promised = buildPlan(growing, growing.cities[cityId]).queue[0];
+    expect(promised.wait).toBeNull();
+    expect(buildPlan(growing, growing.cities[cityId]).held).toBe('needsPopulation'); // as the city is NOW it still cannot let it go
+    expect(playUntilBuilt(growing, cityId, 1).completions).toEqual([{ unitType: 'settler', after: promised.turns }]);
+  });
+
+  it('the forecast follows the choice: for 100 generated capitals and both ways, every row\'s "in N turns" of buildPlan is the turn resolveTurn completes the entry in, when nothing outside the city changes, for queues of land units that find room and at most one boat of each class; and again after random flips of the focus', LONG_TEST, () => {
+    const dice = seedRng('forecast and focus', 'rulesCity');
+    const HORIZON = 30;
+
+    /** Tiles of the city a new land unit could stand on with nobody there: joined to the city by its own land, and empty. */
+    const emptyLand = (state: GameState, city: City): number => {
+      const reached = new Set<TileIndex>([city.tile]);
+      const waiting = [city.tile];
+      while (waiting.length > 0) {
+        for (const next of neighbors(waiting.pop() as TileIndex, state.map)) {
+          const tile = state.map.tiles[next];
+          if (reached.has(next) || tile.cityId !== city.id || tileMoveCost(tile, 'land') === null) continue;
+          reached.add(next);
+          waiting.push(next);
+        }
+      }
+      reached.delete(city.tile);
+      return [...reached].filter((tile) => !Object.values(state.units).some((unit) => unit.tile === tile)).length;
+    };
+    const emptyWater = (state: GameState, city: City): number =>
+      state.map.tiles.filter((tile, index) => tile.cityId === city.id && tileIsWater(tile) && !Object.values(state.units).some((unit) => unit.tile === index)).length;
+
+    /** Two to five different unit types in a random order: so at most one boat of each class, and at most four land units. */
+    const randomQueue = (): UnitTypeId[] => {
+      const pool = [...UNIT_TYPE_IDS];
+      const queue: UnitTypeId[] = [];
+      const length = 2 + nextInt(dice, 4);
+      while (queue.length < length) queue.push(pool.splice(nextInt(dice, pool.length), 1)[0]);
+      return queue;
+    };
+
+    let capitals = 0;
+    let rowsOnTime = 0;
+    let laterRowsOnTime = 0;
+    let rowsWaiting = 0;
+    let boatsOnTime = 0;
+    let checkedOnBuild = 0;
+    let flips = 0;
+
+    /**
+     * Forecasts every city's queue, plays HORIZON turns in which nobody does
+     * anything, and holds every row against what happened.
+     */
+    const forecastAndPlay = (begin: GameState, what: string): GameState => {
+      const promised = new Map<string, { unitType: UnitTypeId; turns: number | null }[]>();
+      for (const city of Object.values(begin.cities)) {
+        // Room for everything the queue holds, so that no unit completed earlier can be in a later one's way.
+        const land = city.buildQueue.filter((entry) => UNITS[entry.unitType].domain === 'land').length;
+        const boats = city.buildQueue.length - land;
+        if (emptyLand(begin, city) < land || emptyWater(begin, city) < boats) continue;
+        promised.set(city.id, buildPlan(begin, city).queue.map((row) => ({ unitType: row.item.unitType, turns: row.turns })));
+        if (city.focus === 'build') checkedOnBuild += 1;
+      }
+      const built = new Map<string, { unitType: UnitTypeId; after: number }[]>();
+      let state = begin;
+      for (let played = 1; played <= HORIZON; played++) {
+        const resolved = resolveTurn(state);
+        state = resolved.state;
+        for (const { event } of resolved.events) {
+          if (event.type !== 'unitBuilt') continue;
+          built.set(event.cityId, [...(built.get(event.cityId) ?? []), { unitType: event.unitType, after: played }]);
+        }
+      }
+      for (const [cityId, rows] of promised) {
+        const happened = built.get(cityId) ?? [];
+        const inTime = rows.filter((row) => row.turns !== null && row.turns <= HORIZON);
+        const where = `${what}, ${begin.cities[cityId].name} on ${begin.cities[cityId].focus}, queue ${rows.map((row) => row.unitType).join()}`;
+        // Exactly the rows with a number within the horizon were completed, each in its turn, in the order of the queue.
+        expect(happened, where).toEqual(inTime.map((row) => ({ unitType: row.unitType, after: row.turns })));
+        rowsOnTime += inTime.length;
+        laterRowsOnTime += Math.max(0, inTime.length - 1);
+        rowsWaiting += rows.length - inTime.length;
+        boatsOnTime += inTime.filter((row) => UNITS[row.unitType].domain === 'sea').length;
+      }
+      return state;
+    };
+
+    for (let game = 0; game < 25; game++) {
+      let founded = createGame(setupFor(4, `forecast-focus-${game}`));
+      for (const player of founded.players) founded = withCapital(founded, player.id);
+      const queues = new Map(Object.values(founded.cities).map((city): [string, UnitTypeId[]] => [city.id, randomQueue()]));
+      capitals += queues.size;
+
+      // Both ways, from the first turn: every capital of the game on Grow, and every capital on Build.
+      let last = founded;
+      for (const focus of CITY_FOCUS_IDS) {
+        let state = founded;
+        for (const city of Object.values(founded.cities)) {
+          state = act(state, city.owner, { type: 'setBuildQueue', cityId: city.id, queue: queueOf(...(queues.get(city.id) ?? [])) });
+          state = act(state, city.owner, focusAction(city.id, focus));
+        }
+        last = forecastAndPlay(state, `game ${game}, all on ${focus}`);
+      }
+
+      // Then, in the game that was played on Build: fresh queues, and about half of the cities
+      // are pressed over to the other way. From that turn on the new forecast holds.
+      let state = last;
+      for (const city of Object.values(last.cities)) {
+        state = act(state, city.owner, { type: 'setBuildQueue', cityId: city.id, queue: queueOf(...randomQueue()) });
+        if (nextInt(dice, 2) === 0) {
+          state = act(state, city.owner, focusAction(city.id, 'grow'));
+          flips += 1;
+        }
+      }
+      forecastAndPlay(state, `game ${game}, after the flips`);
+    }
+
+    expect(capitals).toBe(100);
+    // Hundreds of rows came when their number said, later rows and boats among them, under both ways and after flips.
+    expect(rowsOnTime).toBeGreaterThan(400);
+    expect(laterRowsOnTime).toBeGreaterThan(200);
+    expect(boatsOnTime).toBeGreaterThan(60);
+    expect(checkedOnBuild).toBeGreaterThan(100);
+    expect(flips).toBeGreaterThan(30);
+    // And rows without a number stayed away: a Settler on Build in a city that does not grow, and what stands behind it.
+    expect(rowsWaiting).toBeGreaterThan(30);
   });
 });

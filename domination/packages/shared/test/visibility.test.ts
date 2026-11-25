@@ -18,6 +18,7 @@ import {
   siteInView,
   siteOfTile,
   startJobError,
+  tileIsWater,
   updateKnowledge,
 } from '../src/index';
 import type { AddressedEvent, GameState, ImprovementId, TileIndex } from '../src/index';
@@ -43,7 +44,7 @@ import {
   workerOn,
 } from './rulesKit';
 import { LONG_TEST, WILDS, WILDS_STARTS, playRandomGame } from './rulesRandomPlay';
-import { borderScene, meadowGame, scoutSteps } from './visibilityScenes';
+import { borderScene, meadowGame, scoutSteps, shoreScene } from './visibilityScenes';
 
 /**
  * Tests for fog of war and the per-player view
@@ -418,6 +419,7 @@ describe('buildPlayerView (WP2)', () => {
         productionPerTurn: economy.production,
         worked: economy.worked,
         buildOptions: idlePlan.options,
+        focus: 'grow',
       },
     });
     expect(idlePlan.economy).toEqual(economy);
@@ -445,6 +447,7 @@ describe('buildPlayerView (WP2)', () => {
       productionPerTurn: busyEconomy.production,
       worked: busyEconomy.worked,
       buildOptions: busyPlan.options,
+      focus: 'grow',
     });
     expect(detail?.worked).toHaveLength(3);
     expect(detail?.buildQueue.map((row) => [row.item, row.cost, row.wait])).toEqual([
@@ -766,18 +769,20 @@ describe('improvements and jobs in the view', () => {
       movesLeft: UNITS.worker.moves,
       foundCityError: 'cannotFoundCity',
       job: null,
-      jobOptions: IMPROVEMENT_IDS.map((improvement) => ({
+      jobOptions: UNITS.worker.improvements.map((improvement) => ({
         improvement,
         turns: IMPROVEMENTS[improvement].turns,
         error: startJobError(placed.state, worker, improvement),
       })),
     });
     expect(own?.jobOptions.map((option) => [option.improvement, option.error])).toEqual([['farm', null], ['mine', 'badImprovementTile']]);
+    // One entry per improvement the unit's TYPE builds, in the order of IMPROVEMENT_IDS: a Worker has no entry for a net.
+    expect(own?.jobOptions.map((option) => option.improvement)).toEqual(IMPROVEMENT_IDS.filter((id) => UNITS.worker.improvements.includes(id)));
 
     // Units that cannot build improvements carry no job and an empty list.
     for (const unit of view.units) {
       if (unit.own === null || unit.id === placed.workerId) continue;
-      expect(UNITS[unit.type].canImprove).toBe(false);
+      expect(UNITS[unit.type].improvements).toEqual([]);
       expect(unit.own.job, unit.type).toBeNull();
       expect(unit.own.jobOptions, unit.type).toEqual([]);
     }
@@ -790,7 +795,7 @@ describe('improvements and jobs in the view', () => {
       movesLeft: UNITS.worker.moves,
       foundCityError: 'cannotFoundCity',
       job: { improvement: 'farm', turnsWorked: 0, turnsTotal: IMPROVEMENTS.farm.turns, turnsLeft: IMPROVEMENTS.farm.turns },
-      jobOptions: IMPROVEMENT_IDS.map((improvement) => ({ improvement, turns: IMPROVEMENTS[improvement].turns, error: 'unitBusy' })),
+      jobOptions: UNITS.worker.improvements.map((improvement) => ({ improvement, turns: IMPROVEMENTS[improvement].turns, error: 'unitBusy' })),
     });
   });
 
@@ -866,7 +871,7 @@ describe('improvements and jobs in the view', () => {
         options += 1;
       }
     }
-    expect(options).toBe(spots.length * IMPROVEMENT_IDS.length);
+    expect(options).toBe(spots.length * UNITS.worker.improvements.length);
     // The spots cover a job that can be started and every reason why not (a
     // Worker always "can improve", so that one reason never shows in an option).
     expect([...seenCodes].sort()).toEqual(['alreadyImproved', 'badImprovementTile', 'cityOnTile', 'notYourLand', 'null', 'unitBusy']);
@@ -906,11 +911,14 @@ describe('improvements and jobs in the view', () => {
     let improvedSites = 0;
     let citySites = 0;
     let neverSeen = 0;
+    let waterSites = 0;
+    let nettedSites = 0;
 
     playRandomGame({
       start: newGame(WILDS, WILDS_STARTS, 'sites'),
       seed: 'site-actions',
-      turns: 30,
+      // Forty turns: with boats among the things a city builds, the first Workers and their farms come later than they did.
+      turns: 40,
       wildShare: 10,
       onStep: (step) => {
         // After every turn, and now and then in between.
@@ -933,6 +941,8 @@ describe('improvements and jobs in the view', () => {
             expect(inView, `own tile ${index} of ${player.id}`).toEqual(truth);
             compared += 1;
             if (tile.improvement !== null) improvedSites += 1;
+            if (tile.improvement === 'fishingNet') nettedSites += 1;
+            if (tileIsWater(tile)) waterSites += 1;
             if (truth.city) citySites += 1;
           });
         }
@@ -942,6 +952,9 @@ describe('improvements and jobs in the view', () => {
     expect(improvedSites).toBeGreaterThan(50);
     expect(citySites).toBeGreaterThan(100);
     expect(neverSeen).toBeGreaterThan(1000);
+    // The players' own water was among it, with nets on some of it: the site a Fishing Boat is asked about.
+    expect(waterSites).toBeGreaterThan(100);
+    expect(nettedSites).toBeGreaterThan(10);
 
     // Not on the map at all: null, never an exception.
     const view = buildPlayerView(newGame(WILDS, WILDS_STARTS, 'sites'), 'p1');
@@ -953,6 +966,92 @@ describe('improvements and jobs in the view', () => {
     const site = siteInView(view, own);
     if (site !== null) site.ground.improvement = 'mine';
     expect(view.tiles[own]?.improvement).toBeNull();
+  });
+});
+
+describe('boats and nets in the view (round 3)', () => {
+  it('a net out of sight is shown as last seen; a boat is never remembered', () => {
+    const { state, thebes, scoutId } = shoreScene();
+    const map = state.map;
+    const seenCoast = at(map, 10, 5); // Theban coast, the one water tile of Thebes that p1's scout sees
+    const hiddenCoast = at(map, 12, 5); // Theban coast p1 has never seen
+    expect(state.map.tiles[seenCoast]).toMatchObject({ terrain: 'coast', cityId: thebes.id });
+    expect(state.map.tiles[hiddenCoast]).toMatchObject({ terrain: 'coast', cityId: thebes.id });
+    expect(computeVisible(state, 'p1')[seenCoast]).toBe(true);
+    expect(buildPlayerView(state, 'p1').tiles[hiddenCoast]).toBeNull();
+
+    // A net in sight is as public as a farm: on the map of everybody who sees the tile, with the owner of the water.
+    const netted = arrange(state, (draft) => {
+      improve(draft, seenCoast, 'fishingNet');
+      improve(draft, hiddenCoast, 'fishingNet');
+    });
+    expect(buildPlayerView(netted, 'p1').tiles[seenCoast]).toEqual({ terrain: 'coast', feature: null, improvement: 'fishingNet', owner: 'p2', visible: true });
+    // The other one is out of sight: nothing of it is in p1's view, not even the tile.
+    expect(buildPlayerView(netted, 'p1').tiles[hiddenCoast]).toBeNull();
+    expect(JSON.stringify(buildPlayerView(state, 'p1'))).not.toContain('fishingNet');
+    expect(buildPlayerView(netted, 'p2').tiles[hiddenCoast]).toMatchObject({ improvement: 'fishingNet', visible: true });
+
+    // The scout leaves while the coast is bare. Out of its sight a net is built there: p1 still sees bare coast, as last seen.
+    const away = scoutSteps(state, scoutId, WEST, 3);
+    expect(computeVisible(away, 'p1')[seenCoast]).toBe(false);
+    const builtUnseen = tamper(away, (draft) => improve(draft, seenCoast, 'fishingNet'));
+    updateKnowledge(builtUnseen);
+    expect(buildPlayerView(builtUnseen, 'p1').tiles[seenCoast]).toEqual({ terrain: 'coast', feature: null, improvement: null, owner: 'p2', visible: false });
+    expect(buildPlayerView(builtUnseen, 'p1')).toEqual(buildPlayerView(away, 'p1'));
+    // The scout comes back and sees it; it leaves again, and the net is remembered although it is torn down meanwhile.
+    const back = arrange(builtUnseen, (draft) => {
+      draft.units[scoutId].tile = at(map, 8, 4);
+      draft.units[scoutId].movesLeft = UNITS.scout.moves; // a new turn, as far as the scout goes
+    });
+    expect(buildPlayerView(back, 'p1').tiles[seenCoast]).toMatchObject({ improvement: 'fishingNet', visible: true });
+    expect(back.players[0].knowledge.remembered[seenCoast]).toEqual({ owner: 'p2', city: null, improvement: 'fishingNet' });
+    const awayAgain = scoutSteps(back, scoutId, WEST, 3);
+    const tornDown = tamper(awayAgain, (draft) => improve(draft, seenCoast, null));
+    updateKnowledge(tornDown);
+    expect(buildPlayerView(tornDown, 'p1').tiles[seenCoast]).toEqual({ terrain: 'coast', feature: null, improvement: 'fishingNet', owner: 'p2', visible: false });
+
+    // A boat, in sight: its type, its owner and its tile, and nothing else. Whether it works is not shown.
+    let boatId = '';
+    const withBoat = arrange(state, (draft) => {
+      boatId = placeUnit(draft, 'p2', 'fishingBoat', seenCoast).id;
+    });
+    const seen = buildPlayerView(withBoat, 'p1').units.find((unit) => unit.id === boatId);
+    expect(seen).toEqual({ id: boatId, type: 'fishingBoat', owner: 'p2', tile: seenCoast, own: null });
+    const atWork = act(withBoat, 'p2', { type: 'startJob', unitId: boatId, improvement: 'fishingNet' });
+    expect(buildPlayerView(atWork, 'p1')).toEqual(buildPlayerView(withBoat, 'p1'));
+    expect(buildPlayerView(atWork, 'p2').units.find((unit) => unit.id === boatId)?.own?.job).toMatchObject({ improvement: 'fishingNet', turnsLeft: 4 });
+
+    // Out of sight it is gone from the view at once: a unit is never remembered, on water as on land.
+    const scoutGone = scoutSteps(withBoat, scoutId, WEST, 3);
+    const foggedView = buildPlayerView(scoutGone, 'p1');
+    expect(foggedView.tiles[seenCoast]).toMatchObject({ visible: false });
+    expect(foggedView.units.some((unit) => unit.id === boatId)).toBe(false);
+    expect(foggedView.units.some((unit) => unit.owner === 'p2')).toBe(false);
+    expect(JSON.stringify(foggedView)).not.toContain(boatId);
+    expect(JSON.stringify(scoutGone.players[0].knowledge)).not.toContain(boatId);
+    // The other way round: the boat sails out of the scout's sight, one tile east.
+    const sailedOff = act(withBoat, 'p2', { type: 'moveUnit', unitId: boatId, path: [at(map, 11, 5)] });
+    expect(computeVisible(sailedOff, 'p1')[at(map, 11, 5)]).toBe(false);
+    expect(buildPlayerView(sailedOff, 'p1').units.some((unit) => unit.id === boatId)).toBe(false);
+    expect(buildPlayerView(sailedOff, 'p1').tiles[seenCoast]).toMatchObject({ visible: true });
+    // A hidden boat never was in the view.
+    const hiddenBoat = arrange(state, (draft) => {
+      placeUnit(draft, 'p2', 'scoutBoat', hiddenCoast);
+    });
+    expect(buildPlayerView(hiddenBoat, 'p1')).toEqual(buildPlayerView(state, 'p1'));
+
+    // A player's own boat sees like any unit, and shows what lies in its sight: a Scout Boat sees four tiles.
+    let ownBoatId = '';
+    const exploring = arrange(hiddenBoat, (draft) => {
+      ownBoatId = placeUnit(draft, 'p1', 'scoutBoat', at(map, 9, 6)).id;
+    });
+    expect(distance(at(map, 9, 6), hiddenCoast, map)).toBe(UNITS.scoutBoat.sight);
+    const ownView = buildPlayerView(exploring, 'p1');
+    expect(ownView.tiles[hiddenCoast]).toMatchObject({ terrain: 'coast', owner: 'p2', visible: true });
+    expect(ownView.units.filter((unit) => unit.owner === 'p2' && unit.type === 'scoutBoat')).toHaveLength(1);
+    expect(ownView.units.find((unit) => unit.id === ownBoatId)?.own).toEqual({
+      movesLeft: UNITS.scoutBoat.moves, foundCityError: 'cannotFoundCity', job: null, jobOptions: [],
+    });
   });
 });
 

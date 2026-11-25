@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { CIVS, IMPROVEMENTS, MAP_SIZES, UNIT_TYPE_IDS, tileCoord } from '@domination/shared';
-import type { CityView, PlayerView, UnitView } from '@domination/shared';
+import { CIVS, IMPROVEMENTS, MAP_SIZES, UNITS, UNIT_TYPE_IDS, tileCoord } from '@domination/shared';
+import type { CityView, PlayerView, UnitJobView, UnitView } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import { bannerFrame, bannerLayout, bannerScale, bannerSize, drawBanner } from '../src/render/banner';
 import { BANNER_REACH } from '../src/render/frame';
-import { HEX_POINT_ROWS, ROW_PITCH, TILE_WIDTH, isInsideHex, tileOrigin } from '../src/render/geometry';
+import { HEX_POINT_ROWS, ROW_PITCH, TILE_HEIGHT, TILE_WIDTH, isInsideHex, tileOrigin } from '../src/render/geometry';
 import { civsByPlayer, ownerColors } from '../src/render/owners';
 import { citiesInDrawingOrder, cityIsIdle, pathMarks, unitDrawings, workingSignOffset } from '../src/render/scene';
 import type { UnitDrawing } from '../src/render/scene';
@@ -16,6 +16,7 @@ import type { RasterImage } from '../src/sprites/format';
 import { blendPixel, createImage, getPixel } from '../src/sprites/image';
 import { FOG_AMOUNT, FOG_COLOR, colorWithLook, foggedColor, imageWithLook } from '../src/sprites/looks';
 import { PALETTE } from '../src/sprites/palette';
+import { ownerRamp } from '../src/sprites/rasterize';
 import { RIM_COLOR, RIM_ROWS_ADDED, imageWithRim } from '../src/sprites/rim';
 import { MARKER_SPRITES } from '../src/sprites/art/markers';
 import { NEUTRAL_OWNER, buildSpriteImages, pickVariant, spriteKey } from '../src/sprites/spriteSheet';
@@ -40,13 +41,18 @@ function viewWithUnits(at: [string, UnitView['type'], string, number, number | n
     own: movesLeft === null ? null : {
       movesLeft,
       foundCityError: 'cannotFoundCity',
-      job: atWork === undefined
-        ? null
-        : { improvement: 'farm', turnsWorked: 1, turnsTotal: IMPROVEMENTS.farm.turns, turnsLeft: IMPROVEMENTS.farm.turns - 1 },
+      job: atWork === undefined ? null : jobOf(type),
       jobOptions: [],
     },
   }));
   return { ...sampleView(), units };
+}
+
+/** A job one turn old: the first improvement the unit's type builds (a net for a Fishing Boat, a farm for everything else). */
+function jobOf(type: UnitView['type']): UnitJobView {
+  const improvement = UNITS[type].improvements[0] ?? 'farm';
+  const turns = IMPROVEMENTS[improvement].turns;
+  return { improvement, turnsWorked: 1, turnsTotal: turns, turnsLeft: turns - 1 };
 }
 
 describe('unitDrawings (WP5)', () => {
@@ -195,6 +201,104 @@ describe('unitDrawings (WP5)', () => {
         expect(signY + offset.dy + sign.height - 1).toBeLessThan(ROW_PITCH);
       }
     }
+  });
+
+  it('a boat with a job is drawn dimmed with the "at work" sign; another player\'s boat never', () => {
+    const COAST = 6 * 14 + 1; // coast west of Rome
+    const view = viewWithUnits([
+      ['atWorkWithMoves', 'fishingBoat', 'p1', COAST, 2, 'atWork'],
+      ['atWorkWithoutMoves', 'fishingBoat', 'p1', 7 * 14 + 1, 0, 'atWork'],
+      ['idleBoat', 'fishingBoat', 'p1', 8 * 14 + 6, 2],
+      ['tiredBoat', 'fishingBoat', 'p1', 8 * 14 + 7, 0],
+      ['scoutBoat', 'scoutBoat', 'p1', 8 * 14 + 8, 4],
+      ['foreignBoat', 'fishingBoat', 'p2', 8 * 14 + 10, null],
+    ]);
+    // Every one of them stands on coast of the sample map.
+    for (const unit of view.units) expect(view.tiles[unit.tile], unit.id).toMatchObject({ terrain: 'coast', feature: null });
+    expect(view.units.find((unit) => unit.id === 'atWorkWithMoves')?.own?.job?.improvement).toBe('fishingNet');
+    const drawings = unitDrawings(view, null);
+    expect(drawings.map((drawing) => [drawing.unit.id, drawing.look, drawing.working])).toEqual([
+      ['atWorkWithMoves', 'spent', true],
+      ['atWorkWithoutMoves', 'spent', true],
+      ['idleBoat', 'normal', false],
+      ['tiredBoat', 'spent', false], // dimmed for having no moves, but not at work: no sign
+      ['scoutBoat', 'normal', false],
+      ['foreignBoat', 'normal', false], // another player's job is not in the view: bright, no sign
+    ]);
+    // No boat ever gets the pale line of a unit among trees: there is no forest on water.
+    expect(drawings.every((drawing) => !drawing.rim)).toBe(true);
+    // Selecting the boat at work changes neither its look nor its sign.
+    expect(unitDrawings(view, 'atWorkWithMoves').filter((drawing) => drawing.working).map((drawing) => drawing.look)).toEqual(['spent', 'spent']);
+
+    // The sign of a boat alone on its tile: the Worker's own place, left of the mast. Behind a Scout Boat the
+    // Fishing Boat stands at the upper left and its sign is held back at the left edge of the tile.
+    const alone = drawings[0];
+    expect(workingSignOffset(alone)).toEqual({ dx: 0, dy: 0 });
+    const pair = viewWithUnits([['f', 'fishingBoat', 'p1', COAST, 2, 'atWork'], ['s', 'scoutBoat', 'p1', COAST, 4]]);
+    const behind = unitDrawings(pair, null).find((drawing) => drawing.unit.id === 'f')!;
+    expect([behind.dx, behind.dy, behind.working]).toEqual([-5, -3, true]);
+    const sign = MARKER_SPRITES.working;
+    const offset = workingSignOffset(behind);
+    expect((sign.offsetX ?? 0) + offset.dx).toBe(0);
+    for (let y = 0; y < sign.height; y++) {
+      for (let x = 0; x < sign.width; x++) {
+        expect(isInsideHex((sign.offsetX ?? 0) + offset.dx + x, (sign.offsetY ?? 0) + offset.dy + y)).toBe(true);
+      }
+    }
+  });
+
+  it('a Scout Boat and a Fishing Boat on one tile: the Scout Boat in front, both in view', () => {
+    const COAST = 6 * 14 + 1;
+    const images = new Map(buildSpriteImages().map((entry) => [entry.key, entry]));
+    const ramp = ownerRamp(CIVS.rome.primary);
+    const ownerColors = [ramp.lit, ramp.base, ramp.shaded].map((color) => parseColor(color).join());
+    /** The solid pixels of a unit as the map draws it for this drawing: place in a wide box around the tile -> colour. */
+    const solidPixels = (drawing: UnitDrawing): Map<number, string> => {
+      const sprite = images.get(spriteKey(`unit.${drawing.unit.type}`, '', 'rome', drawing.look));
+      if (sprite === undefined) throw new Error(`no picture of ${drawing.unit.type}`);
+      const pixels = new Map<number, string>();
+      for (let y = 0; y < sprite.image.height; y++) {
+        for (let x = 0; x < sprite.image.width; x++) {
+          const pixel = getPixel(sprite.image, x, y);
+          if (pixel[3] !== 255) continue;
+          pixels.set((y + sprite.offsetY + drawing.dy + TILE_HEIGHT) * 4 * TILE_WIDTH + x + sprite.offsetX + drawing.dx + TILE_WIDTH, pixel.join());
+        }
+      }
+      return pixels;
+    };
+    /** Of the unit drawn first, what the unit drawn after it leaves in view: all solid pixels, and those in the owner's colour. */
+    const leftInView = (behind: UnitDrawing, front: UnitDrawing): { share: number; ownerColored: number } => {
+      const [back, cover] = [solidPixels(behind), solidPixels(front)];
+      const seen = [...back].filter(([place]) => !cover.has(place));
+      return { share: seen.length / back.size, ownerColored: seen.filter(([, color]) => ownerColors.includes(color)).length };
+    };
+
+    for (const order of [['f', 's'], ['s', 'f']]) {
+      const view = viewWithUnits(
+        order.map((id) => [id, id === 'f' ? 'fishingBoat' : 'scoutBoat', 'p1', COAST, 2] as [string, UnitView['type'], string, number, number]),
+      );
+      // The military boat in front (drawn later), the civilian behind it at the upper left: the rule of every pair.
+      const [behind, front] = unitDrawings(view, null);
+      expect([behind.unit.id, front.unit.id]).toEqual(['f', 's']);
+      expect([behind.dx, behind.dy, front.dx, front.dy]).toEqual([-5, -3, 4, 2]);
+      // Both in view. A hull is 22 pixels wide where a figure is 10, so the two overlap a good deal: what must
+      // stay clear of the boat in front is most of the boat behind, and enough of its sail to read its owner and its kind.
+      const seen = leftInView(behind, front);
+      expect(seen.share).toBeGreaterThan(0.6);
+      expect(seen.ownerColored).toBeGreaterThanOrEqual(20);
+
+      // Selected, the Fishing Boat stands in front, and the Scout Boat behind it keeps most of its sail in view.
+      const [nowBehind, nowFront] = unitDrawings(view, 'f');
+      expect([nowBehind.unit.id, nowFront.unit.id]).toEqual(['s', 'f']);
+      expect([nowBehind.dx, nowBehind.dy, nowFront.dx, nowFront.dy]).toEqual([-5, -3, 4, 2]);
+      const seenBehind = leftInView(nowBehind, nowFront);
+      expect(seenBehind.share).toBeGreaterThan(0.6);
+      expect(seenBehind.ownerColored).toBeGreaterThanOrEqual(30);
+    }
+    // A boat never shares its tile with a boat of its own class (the rules' stacking rule), and a pair on water is
+    // never on a city tile, so these two places are the only ones a pair of boats is drawn in.
+    expect(UNITS.scoutBoat.unitClass).toBe('military');
+    expect(UNITS.fishingBoat.unitClass).toBe('civilian');
   });
 
   it('a unit among trees gets the pale line around it, whoever owns it; on open ground and on hills none does', () => {
@@ -578,7 +682,7 @@ describe('the pale line around a unit among trees', () => {
 
   it('every unit has a rimmed picture for every owner and look: the same figure, one row taller and drawn one row higher', () => {
     const images = new Map(buildSpriteImages().map((entry) => [entry.key, entry]));
-    expect(UNIT_TYPE_IDS.length).toBe(4);
+    expect(UNIT_TYPE_IDS.length).toBe(6);
     for (const unit of UNIT_TYPE_IDS.map((unitType) => `unit.${unitType}` as const)) {
       for (const owner of ['rome', 'norse', 'neutral'] as const) {
         for (const look of ['normal', 'spent'] as const) {

@@ -34,6 +34,8 @@
  * player can see, and what a city's name gives away: names are handed out in
  * list order (data/civs.ts), so a city's name tells how many cities its owner
  * had founded before it.
+ * Where a boat appears tells its owner which of the city's own waters is the
+ * larger body (the sea or a lake): a fact about ground, which never changes.
  *
  * Text sent to clients: every message with the code 'serverError' carries
  * the constant SERVER_ERROR_MESSAGE and nothing else. The text of a caught
@@ -58,9 +60,12 @@ import type { PlayerView, ViewPatch } from './viewTypes';
  * the review of round 2 (the error code 'gameNotLoaded'; a Mine gave +2
  * production; `hello` may carry a token the page made itself). 4: the second
  * repair after that review (a Mine gives +3 production: a number table
- * changed again, and version 3 had already been handed out).
+ * changed again, and version 3 had already been handed out). 5: round 3
+ * (the action setCityFocus, the error code noWaterForBoat,
+ * OwnCityDetail.focus; two units and an improvement were added to the
+ * tables and the terrain table has a cost per domain).
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /** URL path of the WebSocket endpoint. */
 export const WS_PATH = '/ws';

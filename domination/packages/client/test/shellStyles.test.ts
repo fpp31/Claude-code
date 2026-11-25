@@ -218,3 +218,79 @@ describe('greyed words can still be read (styles.css)', () => {
     }
   });
 });
+
+describe('"Grow first" / "Build first", and "Stop work" while it asks (styles.css)', () => {
+  const chosen = ".focus-button[aria-pressed='true']";
+  const greyed = `${chosen}:disabled`;
+
+  it('the words of a chosen focus button (light on the sunk face) and of a chosen, greyed one (grey on the sunk face) stand at 4.5 to 1 or more; the chosen button\'s rule names no --accent', () => {
+    // Sunk: the face of a well, with a shadow on the inside, where an ordinary button has a light upper edge.
+    expect(written(chosen, 'background')).toBe('var(--chrome-sunk)');
+    expect(written(chosen, 'box-shadow')).toContain('inset');
+    expect(written(chosen, 'box-shadow')).not.toContain('255 255 255');
+    const face = fromHex(resolved(chosen, 'background'));
+    // Light words and a light edge: the name, and the small line under it.
+    expect(contrast(fromHex(resolved(chosen, 'color')), face)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(fromHex(resolved(`${chosen} .focus-about`, 'color')), face)).toBeGreaterThanOrEqual(4.5);
+    expect(written(chosen, 'border-color')).toBe(written(chosen, 'color'));
+
+    // Greyed while no order can be given: still on the sunk face, so that it is told from the other button
+    // (which has the face of every greyed button), with grey words and a grey edge that can be read.
+    expect(resolved(greyed, 'background')).toBe(resolved(chosen, 'background'));
+    expect(resolved(greyed, 'background')).not.toBe(resolved('.button:disabled', 'background'));
+    expect(contrast(fromHex(resolved(greyed, 'color')), fromHex(resolved(greyed, 'background')))).toBeGreaterThanOrEqual(4.5);
+    expect(written(greyed, 'border-color')).toBe(written(greyed, 'color'));
+    // The small line of a greyed button takes its button's colour, chosen or not, as the add buttons' small print does.
+    expect(written('.focus-button:disabled .focus-about', 'color')).toBe('inherit');
+    // ... and that rule comes after the chosen button's light small line, which has the same weight: the later one wins.
+    expect(styles.indexOf('.focus-button:disabled .focus-about')).toBeGreaterThan(styles.indexOf(`${chosen} .focus-about`));
+
+    // Gold stays the colour of warnings and of buttons that ask ("Nothing to build", "Tap again to stop"): no
+    // rule of the two buttons names it, by its variable or by its value, inside an @media block or outside.
+    const gold = written(':root', '--accent');
+    const everyRule = [RULES, ...SHEET.blocks.map((block) => block.inside.rules)];
+    let looked = 0;
+    for (const rules of everyRule) {
+      for (const [selector, declarations] of rules) {
+        if (!selector.includes('.focus-')) continue;
+        looked += 1;
+        for (const [property, value] of declarations) {
+          expect(value, `${selector} { ${property} }`).not.toContain('--accent');
+          expect(value.toLowerCase(), `${selector} { ${property} }`).not.toContain(gold);
+        }
+      }
+    }
+    expect(looked).toBeGreaterThanOrEqual(6); // the row, the button, the name, the small line, the chosen one, the chosen one greyed
+  });
+
+  it('the small line inside a focus button is hidden in no window, and the two buttons stand side by side', () => {
+    // The city panel hides its hints (.panel-hint) on phones and in low windows. The two small lines must be
+    // read there, so they are a class of their own, and no rule anywhere takes that class or the block away.
+    expect(written('.city-panel .panel-hint', 'display', '@media (max-width: 720px)')).toBe('none');
+    expect(written('.city-panel .panel-hint', 'display', '@media (max-height: 480px)')).toBe('none');
+    for (const rules of [RULES, ...SHEET.blocks.map((block) => block.inside.rules)]) {
+      for (const [selector, declarations] of rules) {
+        if (!selector.includes('.focus-')) continue;
+        expect(declarations.get('display'), selector).not.toBe('none');
+        expect(declarations.has('visibility'), selector).toBe(false);
+        expect(declarations.has('height'), selector).toBe(false);
+        expect(declarations.has('max-height'), selector).toBe(false);
+      }
+    }
+    // Two columns of one width; a low window only moves the block closer to the head.
+    expect(written('.focus-row', 'grid-template-columns')).toBe('1fr 1fr');
+    expect([...(SHEET.blocks.find((block) => block.prelude === '@media (max-height: 480px)')?.inside.rules.get('.focus-row')?.keys() ?? [])]).toEqual(['margin-top']);
+    // Each name is one line at every size, so the block is as tall under either choice.
+    expect(written('.focus-name', 'white-space')).toBe('nowrap');
+  });
+
+  it('"Tap again to stop" has the look of the other button that asks, and the button keeps its right edge when its words get longer', () => {
+    expect(written('.job-stop.armed', 'color')).toBe('var(--accent)');
+    expect(written('.job-stop.armed', 'color')).toBe(written('.queue-clear.armed', 'color'));
+    // The row: small print on the left, the button at the right end and never squeezed, so it grows to the left only.
+    expect(written('.job-stop-row', 'display')).toBe('flex');
+    expect(written('.job-stop-row', 'align-items')).toBe('center');
+    expect(written('.job-stop-row .button', 'flex')).toBe('none');
+    expect(written('.job-stop-row .button', 'margin-left')).toBe('auto');
+  });
+});

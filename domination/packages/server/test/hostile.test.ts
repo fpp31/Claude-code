@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { PROTOCOL_VERSION, SERVER_ERROR_MESSAGE, SERVER_SILENCE_TIMEOUT_MS } from '@domination/shared';
+import { CITY_FOCUS_IDS, PROTOCOL_VERSION, RULE_ERROR_MESSAGES, SERVER_ERROR_MESSAGE, SERVER_SILENCE_TIMEOUT_MS } from '@domination/shared';
 import type { ServerMessage } from '@domination/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WebSocket } from 'ws';
@@ -7,9 +7,11 @@ import { MAX_BAD_MESSAGES, MAX_MESSAGES_PER_SECOND, MAX_SEND_BACKLOG_BYTES } fro
 import { handleConnection } from '../src/connection';
 import type { RoomFile } from '../src/roomFile';
 import { RoomManager } from '../src/roomManager';
+import type { Rules } from '../src/rules';
 import type { Storage } from '../src/storage';
 import { CANARY, createFakeRules, fakeUnitId } from './fakeRules';
 import { cleanUp, gameWith, lobbyWith, startTestServer } from './harness';
+import { ownCity, ownUnit, realRulesOnShore, setFocus } from './realWorld';
 
 /**
  * Hostile and broken clients: nothing they send may stop the server, harm a
@@ -18,6 +20,10 @@ import { cleanUp, gameWith, lobbyWith, startTestServer } from './harness';
  * Most tests use real sockets. The few that depend on the clock (150 seconds
  * of silence, "30 messages within one second") hand `handleConnection` a
  * stand-in socket instead, so they can be exact and take no time.
+ *
+ * The last test, about a city's "Grow first / Build first" choice (round 3),
+ * runs with the real rules: what it shows is who answers what, the message
+ * check or the rules.
  */
 
 afterEach(async () => {
@@ -362,5 +368,113 @@ describe('hostile input (WP3)', () => {
       expect(client.token).toMatch(/^[0-9a-f]{32}$/);
       expect(log).not.toContain(client.token);
     }
+  });
+});
+
+describe('hostile input: "Grow first / Build first" (round 3, real rules)', () => {
+  it('a hostile client: setCityFocus for a foreign city is noSuchCity; with focus "__proto__" the message is refused before the rules', async () => {
+    // The real rules on the meadow by the sea, with a count of how often they are asked.
+    const real = realRulesOnShore([[3, 7], [20, 7]]);
+    let asked = 0;
+    const rules: Rules = {
+      ...real,
+      applyAction: (state, playerId, turn, action) => {
+        asked += 1;
+        return real.applyAction(state, playerId, turn, action);
+      },
+    };
+    // (Mallory sends more in a second than the rate limit allows a person to click.)
+    const server = await startTestServer({ rules, noRateLimit: true });
+    const { code, clients } = await gameWith(server, ['Ada', 'Mallory']);
+    const [ada, mallory] = clients;
+    await ada.actOk(1, { type: 'foundCity', unitId: ownUnit(ada.view, 'settler').id });
+    await mallory.actOk(1, { type: 'foundCity', unitId: ownUnit(mallory.view, 'settler').id });
+    const rome = ownCity(ada.view).id;
+    const hers = ownCity(mallory.view).id;
+    const before = server.saveText(code);
+    const adaFrames = ada.frames.length;
+    const viewBefore = mallory.view;
+
+    // Rome is not Mallory's. Its id, ids nobody has, the id of a unit and
+    // the words every JavaScript object answers to all get one and the same
+    // answer from the rules, so an id cannot be probed: "no such city".
+    const notHers = [
+      rome,
+      rome.toUpperCase(),
+      ` ${rome}`,
+      'c1_nosuch',
+      'c2_nosuch',
+      ownUnit(ada.view, 'warrior').id,
+      ownUnit(mallory.view, 'warrior').id,
+      '',
+      '__proto__',
+      'constructor',
+    ];
+    let askedBefore = asked;
+    for (const cityId of notHers) {
+      for (const focus of CITY_FOCUS_IDS) {
+        const requestId = mallory.sendAction(1, setFocus(cityId, focus));
+        const { reply, before: earlier } = await mallory.readReply(requestId);
+        expect(reply, cityId).toStrictEqual({
+          type: 'actionRejected',
+          requestId,
+          error: { code: 'noSuchCity', message: RULE_ERROR_MESSAGES.noSuchCity },
+        });
+        expect(earlier).toEqual([]);
+      }
+    }
+    // Naming Ada in the message changes nothing: extra fields never get past the message check.
+    mallory.sendRaw(
+      JSON.stringify({
+        type: 'action',
+        requestId: 77,
+        turn: 1,
+        playerId: 'p1',
+        action: { type: 'setCityFocus', cityId: rome, focus: 'build', playerId: 'p1', owner: 'p1' },
+      }),
+    );
+    expect((await mallory.readReply(77)).reply).toMatchObject({ type: 'actionRejected', requestId: 77, error: { code: 'noSuchCity' } });
+    // Every one of these was a well-formed message: the rules were asked, and it was the rules that said no.
+    expect(asked - askedBefore).toBe(notHers.length * CITY_FOCUS_IDS.length + 1);
+
+    // A focus that is no focus is no message at all: it is refused by the
+    // message check, with a plain error and no request id, and the rules
+    // are never asked. For her OWN city, so that nothing else could refuse it.
+    askedBefore = asked;
+    const notAFocus = ['__proto__', 'constructor', 'Build first', undefined];
+    expect(notAFocus).toHaveLength(MAX_BAD_MESSAGES - 1);
+    for (const focus of notAFocus) {
+      mallory.sendRaw(JSON.stringify({ type: 'action', requestId: 500, turn: 1, action: { type: 'setCityFocus', cityId: hers, focus } }));
+      const error = await mallory.nextOfType('error');
+      expect(error.code, String(focus)).toBe('badMessage');
+      expect(error).not.toHaveProperty('requestId');
+    }
+    expect(asked).toBe(askedBefore);
+
+    // Nothing of all that was saved or sent on: both cities grow first, as
+    // they did, and Ada's socket carried nothing.
+    expect(server.saveText(code)).toBe(before);
+    expect(server.save(code).game?.cities[rome].focus).toBe('grow');
+    expect(server.save(code).game?.cities[hers].focus).toBe('grow');
+    await mallory.expectNothingPending();
+    expect(mallory.view).toBe(viewBefore);
+    await ada.expectNothingPending();
+    expect(ada.frames.slice(adaFrames).every((frame) => frame === '{"type":"pong"}')).toBe(true);
+
+    // Her own city she may set, with a focus the table has: the same
+    // socket, the same city id, and this time the rules say yes.
+    expect((await mallory.actOk(1, setFocus(hers, 'build'))).map((message) => message.type)).toEqual(['gameUpdate']);
+    expect(ownCity(mallory.view).own.focus).toBe('build');
+    expect(server.save(code).game?.cities[hers].focus).toBe('build');
+    expect(server.save(code).game?.cities[rome].focus).toBe('grow');
+    await ada.expectNothingPending();
+
+    // The fifth message that is none closes her socket, and hers alone: Ada plays on.
+    mallory.sendRaw(JSON.stringify({ type: 'action', requestId: 501, turn: 1, action: { type: 'setCityFocus', cityId: hers, focus: ['build'] } }));
+    await mallory.expectError('badMessage');
+    expect(await mallory.waitForClose()).toBe(1008);
+    await ada.nextOfType('presence');
+    await ada.actOk(1, setFocus(rome, 'build'));
+    expect(ownCity(ada.view).own.focus).toBe('build');
   });
 });

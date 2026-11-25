@@ -15,7 +15,10 @@
  *     hillsAndForest.ts   4. hills and forest
  *     passes.ts           5. a way into every valley the mountains sealed off
  *   starts.ts           6. where the players begin
- *   startRules.ts       the promises about starts, as checks
+ *   startNeeds.ts       the sea and a hill at every start (rules H6 and H7):
+ *                       which sites have the sea in reach, the one hill
+ *                       that is put, and both as checks
+ *   startRules.ts       the other promises about starts, as checks
  *   tuning.ts           every number that shapes the look of the maps
  *   grid.ts, noise.ts   tools the steps share
  *
@@ -29,7 +32,11 @@ import { generateForSize } from './attempts';
 
 /** What generateMap returns: a map and where each player starts on it. */
 export interface GeneratedMap {
-  /** The finished map. Every tile has `cityId: null` and `improvement: null`. */
+  /**
+   * The finished map. Every tile has `cityId: null` and `improvement: null`.
+   * It is the land the seed makes, but for the hills by the starts: see
+   * "The map" below.
+   */
   map: GameMap;
   /**
    * One start tile per player: starts[i] belongs to the i-th player in seat
@@ -74,13 +81,22 @@ export type MapGenerator = (seed: string, mapSize: MapSizeId, playerCount: numbe
  *  - Aim for roughly 35-45% land, mostly in one or a few large landmasses,
  *    with grassland and plains dominant, desert in patches, and forest,
  *    hills and mountains as clusters rather than noise.
+ *  - The land is the seed's but for the hills by the starts. The terrain
+ *    steps read the seed alone, so asking for more players moves no coast.
+ *    Then at most ONE tile per player, within two of that player's start,
+ *    is turned into hills (rule H7 below; forest or open land before, never
+ *    water or mountains). So the maps of one seed for two and for five
+ *    players can differ in up to seven tiles, and such a hill may stand
+ *    alone, outside every cluster. (A failed attempt, which is very rare,
+ *    makes the whole map another one.)
  *
  * Start positions
  *  Exactly `playerCount` tiles are returned, for any playerCount from 1 to
  *  RULES.maxSeats, on every map size.
  *
- *  HARD RULES. They hold for every result, however crowded the map (the
- *  rules engine, the client and the end-to-end test rely on them):
+ *  HARD RULES. They hold for every result, however crowded the map, for
+ *  1 to RULES.maxSeats players (the rules engine, the client and the
+ *  end-to-end test rely on them):
  *   H1. The starts are distinct tiles.
  *   H2. Every start is a legal city site for its ground (`tileAllowsCity`)
  *       and can be entered by land units (`tileMoveCost` is not null).
@@ -89,6 +105,29 @@ export type MapGenerator = (seed: string, mapSize: MapSizeId, playerCount: numbe
  *   H4. Every start has at least 2 neighbors that land units can enter.
  *   H5. From every start a land unit can walk to at least
  *       RULES.minStartLandmass tiles (the start itself included).
+ *   H6. The sea. Inside the land a capital founded on the start is sure to
+ *       own there are at least MAPGEN.startCoastTiles (3) coast tiles of
+ *       the sea. So every capital can build boats, a Fishing Boat has work
+ *       for three nets or more, and a boat can sail from every capital to
+ *       every other.
+ *   H7. A hill. Inside that land there is at least one tile a Mine fits
+ *       (`improvementFits('mine', ...)`: hills on grassland, plains or
+ *       desert) that can be walked to: a land unit reaches it from the
+ *       start without leaving that land. A hill across a strip of water or
+ *       behind mountains keeps no promise, because no Worker reaches it
+ *       over the city's own land.
+ *
+ *  The words of H6 and H7 (startNeeds.ts has them as functions):
+ *   - "The sea" is the largest connected body of water of the map, coast
+ *     and ocean together; of two bodies of one size, the one that holds
+ *     the lower tile. A lake's coast is not coast of the sea.
+ *   - "Sure to own": the tiles within two of the start, the start itself
+ *     not counted, that are within two of NO other start. A founder claims
+ *     what nobody owns yet, so where two starts are four tiles apart (H3
+ *     allows it on a crowded map) the tiles between them go to whoever
+ *     founds first, and no promise is built on them.
+ *   - H7 promises a tile to build on, not a mine in use: whether citizens
+ *     gather from a mine is the city's matter (rules/city.ts).
  *
  *  STANDARD RULES. They hold whenever playerCount is at most
  *  MAP_SIZES[mapSize].recommendedPlayers:
@@ -98,6 +137,9 @@ export type MapGenerator = (seed: string, mapSize: MapSizeId, playerCount: numbe
  *   S3. Fairness. The score of a start is the sum of food + production
  *       (`tileYields`) over the workable tiles within 2 tiles of it, the
  *       start included. The lowest score is at least 70% of the highest.
+ *       (Counted on the map as it is handed out, with the hills of H7. The
+ *       score knows nothing of improvements: once everybody fishes, the
+ *       players' production differs more than their scores do.)
  *
  *  On a crowded map (more players than recommended) S1-S3 become aims, in
  *  this order of importance:
@@ -118,20 +160,26 @@ export type MapGenerator = (seed: string, mapSize: MapSizeId, playerCount: numbe
  *  MAPGEN.roomyLandmassTiles tiles. The lobby shows the recommended player
  *  count for this reason.
  *
- *  How the promises are kept: check the rules after placing the starts; if
- *  they do not hold, generate again from the next attempt stream (see
- *  Determinism). Give up with a thrown Error after 100 attempts: that would
- *  be a bug in the generator. In practice the first attempt succeeds on
- *  every map size of the game (the tests run thousands of maps), so the
- *  tests reach the retry and the giving up through `generateForSize`
- *  (attempts.ts) with map sizes too small for their players.
+ *  How the promises are kept. H6 by choosing the sites: only a tile with
+ *  three coast tiles of the sea within two of it is offered as a start
+ *  (the sea cannot be put inland). H7 by putting one hill: a start that
+ *  has no tile for a Mine it can walk to gets one, on the tile that changes
+ *  its score least (forest first; the score moves by 1 at most), after the
+ *  starts are chosen, so it moves no start. Then every rule is checked on
+ *  the map as it is handed out; if one does not hold, generate again from
+ *  the next attempt stream (see Determinism). Give up with a thrown Error
+ *  after 100 attempts: that would be a bug in the generator. In practice
+ *  the first attempt succeeds on every map size of the game (a test counts
+ *  it over thousands of maps), so the tests reach the retry and the giving
+ *  up through `generateForSize` (attempts.ts) with map sizes too small for
+ *  their players.
  *
  *  Where the numbers of this section live: the distances are in RULES
- *  (data/rules.ts); the 70% of S3 and the 100 attempts are
- *  MAPGEN.fairScorePercent and MAPGEN.maxAttempts (mapgen/tuning.ts); the
- *  "within 2 tiles" of S3 is the land a city claims (RULES.cityClaimRadius)
- *  and is built into the generator (a table test says so if the two ever
- *  part ways).
+ *  (data/rules.ts); the 70% of S3, the 100 attempts and the three coast
+ *  tiles of H6 are MAPGEN.fairScorePercent, MAPGEN.maxAttempts and
+ *  MAPGEN.startCoastTiles (mapgen/tuning.ts); the "within 2 tiles" of S3,
+ *  H6 and H7 is the land a city claims (RULES.cityClaimRadius) and is built
+ *  into the generator (a table test says so if the two ever part ways).
  *
  *  The order of `starts` is shuffled with the map RNG, so seat 1 has no
  *  systematic advantage.

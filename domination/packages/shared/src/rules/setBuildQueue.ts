@@ -12,6 +12,7 @@ import type { UnitTypeId } from '../data/units';
 import { cloneJson, jsonEqual } from '../json';
 import type { BuildItem, GameState, PlayerId } from '../types';
 import { updateKnowledge } from '../view/visibility';
+import { buildItemError } from './city';
 import { accepted, noChange, rejected } from './results';
 import { cityById } from './stateQueries';
 
@@ -33,6 +34,15 @@ export function setBuildQueue(state: GameState, playerId: PlayerId, action: SetB
     const unitType = buildableUnitType(entry);
     if (unitType === null) return rejected('cannotBuild');
     queue.push({ kind: 'unit', unitType });
+  }
+  // Every entry must be something THIS city can ever build (a boat needs
+  // water in the city's land). Asked only after ALL entries were rebuilt:
+  // a queue with an entry that is no item is 'cannotBuild' wherever a boat
+  // stands in it. A stored queue that already holds such a boat (a save
+  // edited by hand) is refused too when it is sent again unchanged.
+  for (const item of queue) {
+    const refusal = buildItemError(state, city, item);
+    if (refusal !== null) return rejected(refusal);
   }
 
   if (jsonEqual(queue, city.buildQueue)) return noChange(state);

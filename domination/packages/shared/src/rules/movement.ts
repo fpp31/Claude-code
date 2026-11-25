@@ -14,7 +14,7 @@
 
 import type { RuleErrorCode } from '../actions';
 import { tileMoveCost } from '../data/terrain';
-import type { Ground } from '../data/terrain';
+import type { Ground, UnitDomain } from '../data/terrain';
 import { UNITS } from '../data/units';
 import type { UnitClass, UnitTypeId } from '../data/units';
 import { neighbors } from '../hex';
@@ -115,29 +115,37 @@ export function boardFromView(view: PlayerView): Board {
   };
 }
 
-/** Movement points needed to enter a tile of this board; null if it is unknown to the board or cannot be entered. */
-function moveCostAt(board: Board, tile: TileIndex): number | null {
+/** Movement points a unit of this domain needs to enter a tile of this board; null if the tile is unknown to the board or cannot be entered by such a unit. */
+function moveCostAt(board: Board, tile: TileIndex, domain: UnitDomain): number | null {
   const ground = board.ground(tile);
-  return ground === null ? null : tileMoveCost(ground);
+  return ground === null ? null : tileMoveCost(ground, domain);
 }
 
 /**
  * May a unit of this owner and type END A STEP on `tile`? Returns null if
- * yes, otherwise the reason:
- *  - 'impassable': the tile is unknown to the board, or tileMoveCost is null
- *    (water, mountains);
- *  - 'blocked': a unit of another player is there; or a city of another
- *    player; or one of the mover's own units of the same class (a tile holds
- *    at most one military and one civilian unit).
- * Own cities and own units of the other class do not block. Adjacency and
- * movement points are NOT checked here.
+ * yes, otherwise the first reason that applies, in this order:
+ *  1. 'impassable': the tile is unknown to the board, or it is a tile this
+ *     unit's domain cannot enter (tileMoveCost for UNITS[mover.type].domain
+ *     is null: for a land unit water and mountains, for a boat every land
+ *     tile, a city's tile included);
+ *  2. 'blocked': a city of another player stands on the tile (never reached
+ *     by a boat: a city tile is land, and the ground is judged first);
+ *  3. 'blocked': a unit of another player is there;
+ *  4. 'blocked': one of the mover's own units of the same class is there (a
+ *     tile holds at most one military and one civilian unit).
+ * Own cities and own units of the other class do not block: a Scout Boat
+ * and a Fishing Boat of one player may share a water tile, two Fishing
+ * Boats may not. A land unit and a boat never meet on a tile: no ground
+ * lets both in (a table test), so the stacking rule needs no word about
+ * domains. Who owns the tile does not matter: borders stop nobody.
+ * Adjacency and movement points are NOT checked here.
  */
 export function canEnterTile(
   board: Board,
   mover: { owner: PlayerId; type: UnitTypeId },
   tile: TileIndex,
 ): RuleErrorCode | null {
-  if (moveCostAt(board, tile) === null) return 'impassable';
+  if (moveCostAt(board, tile, UNITS[mover.type].domain) === null) return 'impassable';
 
   const cityOwner = board.cityOwnerAt(tile);
   if (cityOwner !== null && cityOwner !== mover.owner) return 'blocked';
@@ -156,8 +164,9 @@ export function canEnterTile(
  *
  * Movement rule: from a tile with m > 0 moves left the unit may step to any
  * adjacent tile for which canEnterTile is null; it arrives with
- * max(0, m - tileMoveCost(tile)) moves. Every tile on a route must itself be
- * enterable (no passing through).
+ * max(0, m - tileMoveCost(tile, the unit's domain)) moves. Every tile on a
+ * route must itself be enterable (no passing through): a boat never crosses
+ * land and a land unit never water.
  *
  * Deterministic: tiles are expanded most-moves-left first, ties by lower tile
  * index, and neighbors in direction order (hex.ts); a tile keeps the first
@@ -166,6 +175,7 @@ export function canEnterTile(
 export function reachableTiles(board: Board, unit: MovingUnit): Map<TileIndex, ReachStep> {
   const reach = new Map<TileIndex, ReachStep>();
   if (unit.movesLeft <= 0) return reach;
+  const domain = UNITS[unit.type].domain;
 
   // Tiles whose neighbors have not been looked at yet. Entering a tile always
   // costs at least 1, so a tile reached later never has more moves left than
@@ -183,7 +193,7 @@ export function reachableTiles(board: Board, unit: MovingUnit): Map<TileIndex, R
       if (next === unit.tile) continue; // the unit's own tile is never part of the answer
       if (expanded.has(next)) continue;
       if (canEnterTile(board, unit, next) !== null) continue;
-      const cost = moveCostAt(board, next);
+      const cost = moveCostAt(board, next, domain);
       if (cost === null) continue; // canEnterTile has ruled this out already; it keeps the types honest
 
       const movesLeft = Math.max(0, current.movesLeft - cost);

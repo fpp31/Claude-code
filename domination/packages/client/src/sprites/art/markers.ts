@@ -68,11 +68,16 @@ const hover: SpriteSource = {
  * with a city selected most tokens could not be seen. The top point is the
  * one place of a tile that is free of everything else: a unit's head begins
  * at y 5 (the token's last row lies on the dark line around the head, dark
- * on dark), a farm at y 7, a mine at y 9, the "at work" sign at y 6 at the
- * highest, and the name banner of a city further down lies on the LOWER
- * part of the tiles above it. It is six rows tall, not seven as it was, so
- * that it ends on that line. One thing it does cover: the feather on a
- * Scout's cap, which is the only part of a unit that reaches higher.
+ * on dark) and so does a boat's mast top, a fishing net begins at y 6, a
+ * farm at y 7, a mine at y 9, the "at work" sign at y 6 at the highest, and
+ * the name banner of a city further down lies on the LOWER part of the
+ * tiles above it. It is six rows tall, not seven as it was, so that it
+ * ends on that line. One thing it does cover: the feather on a Scout's
+ * cap, which is the only part of a unit that reaches higher.
+ *
+ * On a fished tile the token lies right over the top float of the net, a
+ * smaller disc of nearly the same colours. sprites/art/improvements.ts
+ * says how the two were looked at and what to do if they are ever mixed up.
  */
 const worked: SpriteSource = {
   width: 10,
@@ -128,9 +133,9 @@ const pathEnd: SpriteSource = {
 
 /**
  * A unit that is at work: a small white SQUARE sign with a dark hammer, left
- * of the figure. Square on purpose: the dots of the path preview are round
- * and white, and at the smallest zoom the two must not be mistaken for each
- * other.
+ * of the figure (a Worker) or left of the mast (a Fishing Boat). Square on
+ * purpose: the dots of the path preview are round and white, and at the
+ * smallest zoom the two must not be mistaken for each other.
  */
 const working: SpriteSource = {
   width: 7,

@@ -7,15 +7,27 @@
  * The land is simple smoothed noise, not the real map generator, and the
  * cities and units are placed without asking the rules. It only has to
  * LOOK like a game in full swing: every terrain and feature, six
- * civilizations with territory, farms and mines on their land, all four
- * unit types, some fog. Player 1 is the viewer: some of their Workers are
- * at work, and their first city has nothing to build, so both small signs
- * of the map can be looked at.
+ * civilizations with territory, farms and mines on their land, fishing
+ * nets on their coast, all six unit types, some fog. A boat is always put
+ * on water and a land unit on land. Player 1 is the viewer: some of their
+ * Workers and Fishing Boats are at work, and their first city has nothing
+ * to build, so both small signs of the map can be looked at.
+ *
+ * For the art of the water (round 3) it shows, wherever the made-up coast
+ * has the room: a Fishing Boat of every city with coast inside its
+ * borders; a Scout Boat on a second coast tile, in every second such city
+ * with another Fishing Boat beside it on that tile; nets that a citizen
+ * gathers from (the gold token, with the city selected) beside nets nobody
+ * gathers from; and ONE thing the rules never show: the viewer's first
+ * Fishing Boat is at work on a coast tile that already has its net, next
+ * to a plain one. (A job ends in the turn its net stands.) It is there so
+ * that the "at work" sign can be looked at over the float it covers.
+ * test/renderDevView.test.ts counts all of these on the three map sizes.
  * The same options always give the same view.
  */
 
 import {
-  CIV_IDS, IMPROVEMENTS, IMPROVEMENT_IDS, UNITS, UNIT_TYPE_IDS, cityNameFor, distance, foodToGrow, improvementFits,
+  CIV_IDS, IMPROVEMENTS, UNITS, UNIT_TYPE_IDS, cityNameFor, distance, foodToGrow, improvementFits, neighbors,
   nextFloat, nextInt, seedRng, tileCoord, tileCount, tileIndex, tilesInRange,
 } from '@domination/shared';
 import type {
@@ -139,13 +151,14 @@ export function syntheticView(options: SyntheticViewOptions): PlayerView {
     }
   });
 
-  // ---- Farms and mines on owned land; the viewer's Workers and cities -----
+  // ---- Farms, mines and nets on owned tiles; the viewer's Workers and cities
   // A stream of its own, so the land and the cities above stay exactly as
-  // they were before there were improvements.
+  // they were before there were improvements. (One number is drawn per
+  // tile whatever stands there, so the nets moved no farm and no mine.)
   const improvementRng = seedRng('wp5-big-map', `${size.width}x${size.height} improvements`);
   const cityTiles = new Set(cities.map((city) => city.tile));
   const fits = (tile: TileIndex, improvement: ImprovementId): boolean =>
-    isLand(tile) && improvementFits(improvement, { terrain: terrains[tile], feature: features[tile] });
+    improvementFits(improvement, { terrain: terrains[tile], feature: features[tile] });
   const improvements: (ImprovementId | null)[] = [];
   for (let tile = 0; tile < count; tile++) {
     const chance = nextFloat(improvementRng);
@@ -153,16 +166,47 @@ export function syntheticView(options: SyntheticViewOptions): PlayerView {
     if (owners[tile] !== null && !cityTiles.has(tile)) {
       if (fits(tile, 'mine') && chance < 0.6) improvement = 'mine';
       else if (fits(tile, 'farm') && chance < 0.35) improvement = 'farm';
+      else if (fits(tile, 'fishingNet') && chance < 0.45) improvement = 'fishingNet';
     }
     improvements.push(improvement);
   }
 
-  // Every other Worker of the viewer that stands where something can be built is building it.
+  // ---- Boats: on the water inside each city's borders, never on land ------
+  // They come after every land unit in the list, so the land units keep
+  // their ids and the Workers their jobs. A tile holds one boat of a class.
+  const fishingBoatTiles = new Set<TileIndex>();
+  const scoutBoatTiles = new Set<TileIndex>();
+  const launch = (type: UnitTypeId, tile: TileIndex, owner: PlayerId): void => {
+    (type === 'fishingBoat' ? fishingBoatTiles : scoutBoatTiles).add(tile);
+    units.push({
+      id: `u${owner.slice(1)}_${units.length}`, type, owner, tile,
+      own:
+        owner === 'p1'
+          ? { movesLeft: units.length % 3 === 0 ? 0 : UNITS[type].moves, foundCityError: 'cannotFoundCity', job: null, jobOptions: [] }
+          : null,
+    });
+  };
+  cities.forEach((city, cityIndex) => {
+    const coast = tilesInRange(city.tile, 2, size).filter((tile) => terrains[tile] === 'coast' && owners[tile] === city.owner);
+    const free = (taken: Set<TileIndex>): TileIndex[] => coast.filter((tile) => !taken.has(tile));
+    // A Fishing Boat for every city with coast. On a second coast tile, if
+    // the city has one, a Scout Boat: alone, or in every second city with
+    // another Fishing Boat on its tile (one of each class: the two share it).
+    const [first] = free(fishingBoatTiles);
+    if (first === undefined) return;
+    launch('fishingBoat', first, city.owner);
+    const [second] = free(scoutBoatTiles).filter((tile) => tile !== first);
+    if (second === undefined) return;
+    launch('scoutBoat', second, city.owner);
+    if (cityIndex % 2 === 0 && !fishingBoatTiles.has(second)) launch('fishingBoat', second, city.owner);
+  });
+
+  // Every other Worker and Fishing Boat of the viewer that stands where something can be built is building it.
   let workersSeen = 0;
   for (const unit of units) {
-    if (unit.own === null || !UNITS[unit.type].canImprove) continue;
+    if (unit.own === null || UNITS[unit.type].improvements.length === 0) continue;
     const site = unit.tile;
-    const possible = IMPROVEMENT_IDS.filter(
+    const possible = UNITS[unit.type].improvements.filter(
       (improvement) => owners[site] === unit.owner && !cityTiles.has(site) && improvements[site] === null && fits(site, improvement),
     );
     const job = possible.length > 0 && workersSeen % 2 === 0 ? possible[0] : null;
@@ -173,7 +217,8 @@ export function syntheticView(options: SyntheticViewOptions): PlayerView {
       movesLeft: UNITS[unit.type].moves,
       foundCityError: 'cannotFoundCity',
       job: job === null ? null : { improvement: job, turnsWorked: 1, turnsTotal, turnsLeft: turnsTotal - 1 },
-      jobOptions: IMPROVEMENT_IDS.map((improvement) => ({
+      // One option per improvement the unit's type builds: two for a Worker, one for a Fishing Boat.
+      jobOptions: UNITS[unit.type].improvements.map((improvement) => ({
         improvement,
         turns: IMPROVEMENTS[improvement].turns,
         error: job !== null ? 'unitBusy' : possible.includes(improvement) ? null : 'badImprovementTile',
@@ -182,13 +227,38 @@ export function syntheticView(options: SyntheticViewOptions): PlayerView {
     unit.own = own;
   }
 
+  // The one look the rules never give (see the top of this file): the
+  // viewer's first Fishing Boat that has a coast tile of the viewer's
+  // beside it is at work on a finished net, and that tile beside it is
+  // plain coast.
+  for (const unit of units) {
+    if (unit.type !== 'fishingBoat' || unit.own === null) continue;
+    const beside = neighbors(unit.tile, size).find((tile) => terrains[tile] === 'coast' && owners[tile] === unit.owner);
+    if (beside === undefined) continue;
+    improvements[unit.tile] = 'fishingNet';
+    improvements[beside] = null;
+    const turnsTotal = IMPROVEMENTS.fishingNet.turns;
+    unit.own = {
+      ...unit.own,
+      job: { improvement: 'fishingNet', turnsWorked: 1, turnsTotal, turnsLeft: turnsTotal - 1 },
+      jobOptions: [{ improvement: 'fishingNet', turns: turnsTotal, error: 'unitBusy' }],
+    };
+    break;
+  }
+
   // The viewer's cities get the facts only an owner is shown. The first one has an empty build queue.
   cities.forEach((city, index) => {
     if (city.owner !== 'p1') return;
-    const land = tilesInRange(city.tile, 2, size).filter((tile) => tile !== city.tile && owners[tile] === city.owner && isLand(tile));
-    // Improved tiles first, so that the worked-tile tokens can be seen on farms and mines.
-    const worked = [...land.filter((tile) => improvements[tile] !== null), ...land.filter((tile) => improvements[tile] === null)]
-      .slice(0, city.population);
+    const home = tilesInRange(city.tile, 2, size).filter((tile) => tile !== city.tile && owners[tile] === city.owner);
+    const land = home.filter(isLand);
+    // Every second net first, so that a net with the worked-tile token lies beside one without; then the
+    // improved land, so that the tokens can be seen on farms and mines.
+    const nets = home.filter((tile) => improvements[tile] === 'fishingNet');
+    const worked = [
+      ...nets.filter((_, place) => place % 2 === 0),
+      ...land.filter((tile) => improvements[tile] !== null),
+      ...land.filter((tile) => improvements[tile] === null),
+    ].slice(0, city.population);
     const idle = index === cities.findIndex((candidate) => candidate.owner === 'p1');
     const own: OwnCityDetail = {
       foodStored: 3,
@@ -202,6 +272,7 @@ export function syntheticView(options: SyntheticViewOptions): PlayerView {
       buildOptions: UNIT_TYPE_IDS.map((unitType, place) => ({
         item: { kind: 'unit', unitType }, cost: UNITS[unitType].cost, turns: 6 + 2 * place, wait: null, addError: null,
       })),
+      focus: 'grow',
     };
     city.own = own;
   });

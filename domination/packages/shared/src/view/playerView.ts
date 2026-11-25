@@ -47,7 +47,8 @@ import { computeVisible } from './visibility';
  *  - cities, sorted by id:
  *      * the viewer's own cities: visible: true, own = OwnCityDetail computed
  *        with buildPlan (rules/city.ts: the economy and a forecast made with
- *        the functions turn resolution uses) and foodToGrow;
+ *        the functions turn resolution uses) and foodToGrow, and the city's
+ *        `focus` ('build', or 'grow' for anything else that is stored);
  *      * other players' cities on tiles visible now: current public fields,
  *        visible: true, own = null;
  *      * cities in knowledge.remembered on tiles NOT visible now: the
@@ -57,7 +58,8 @@ import { computeVisible } from './visibility';
  * Property the tests must prove (non-interference): changing anything in the
  * state that this player cannot see (a hidden unit's position, terrain of a
  * never-seen tile, another city's food or production, another city's build
- * queue, a foreign unit's job, the improvement of a tile out of sight,
+ * queue, another city's focus, a foreign unit's job, the improvement of a
+ * tile out of sight,
  * another player's knowledge or idRng, `seed`, `rng`) leaves the returned
  * view deep-equal.
  */
@@ -200,6 +202,9 @@ function ownCityDetail(state: GameState, city: City): OwnCityDetail {
     productionPerTurn: plan.economy.production,
     worked: plan.economy.worked,
     buildOptions: plan.options,
+    // A stored focus that is not exactly 'build' is placed as Grow by
+    // cityEconomy, and the view says what was done.
+    focus: city.focus === 'build' ? 'build' : 'grow',
   };
 }
 

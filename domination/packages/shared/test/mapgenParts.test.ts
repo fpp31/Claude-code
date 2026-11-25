@@ -33,7 +33,7 @@ function countFeature(map: GameMap, feature: string): number {
 
 /** How many separate areas a land unit can walk in. */
 function walkableAreaCount(map: GameMap): number {
-  return labelRegions(gridFor(map), map.tiles.map((tile) => tileMoveCost(tile) !== null)).sizes.length;
+  return labelRegions(gridFor(map), map.tiles.map((tile) => tileMoveCost(tile, 'land') !== null)).sizes.length;
 }
 
 describe('grid: lookup tables', () => {

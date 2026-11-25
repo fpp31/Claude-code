@@ -48,19 +48,24 @@ import { cleanUp, startTestServer, temporaryFolder } from './harness';
  *  - checkInvariants: reports whatever the test tells it to.
  *
  * TESTS WITH THE REAL RULES are the sections marked "(real rules)": the
- * conflict tests, the leak tests, the build-queue and job tests at the end
- * of actions.test.ts, and some persistence tests, one of which runs main.ts
- * as a real process with the real map generator. Most of them play on a
- * hand-drawn map, so that each test can say exactly where everybody starts;
- * for that they wrap the real rules:
+ * conflict tests, the leak tests, the build-queue and job tests and the
+ * boat, net and "Grow first / Build first" tests at the end of
+ * actions.test.ts, the last test of hostile.test.ts, and some persistence
+ * tests, one of which runs main.ts as a real process with the real map
+ * generator. Most of them play on a hand-drawn map, so that each test can
+ * say exactly where everybody starts; for that they wrap the real rules:
  *     const rules = { ...realRules, createGame: (s) => createGame(s, () => ({ map, starts })) };
- * (test/realWorld.ts, which also has the helpers for queues, for ending a
- * turn and for getting a Worker built.)
+ * (test/realWorld.ts, which has the two maps: a meadow without water, and
+ * since round 3 the same meadow by the sea, where a capital on the shore
+ * owns coast. It also has the helpers for queues, for a press on "Grow
+ * first / Build first", for ending a turn and for getting a Worker or a
+ * boat built.)
  *
- * A SAVE OF AN OLDER VERSION. storage.test.ts and persistence.test.ts load a
- * real room file that phase 1 wrote (packages/shared/test/fixtures/, read
- * through test/phaseOneSave.ts and never edited): its game state has an
- * older layout, which storage brings up to date when it loads the file.
+ * A SAVE OF AN OLDER VERSION. storage.test.ts and persistence.test.ts load
+ * two real room files, one that phase 1 wrote and one that round 2 wrote
+ * (packages/shared/test/fixtures/, read through test/phaseOneSave.ts and
+ * test/roundTwoSave.ts and never edited): their game states have older
+ * layouts, which storage brings up to date when it loads the file.
  * Storage does this with the shared package's own migrateGameState and
  * checkInvariants, whatever `Rules` bundle the server runs with.
  */

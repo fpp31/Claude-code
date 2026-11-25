@@ -8,6 +8,7 @@
 import type { Action, ActionResult } from '../actions';
 import { RULES } from '../data/rules';
 import { tileMoveCost } from '../data/terrain';
+import { UNITS } from '../data/units';
 import { areAdjacent, isValidTile } from '../hex';
 import { cloneJson } from '../json';
 import type { GameState, PlayerId, TileIndex, Unit } from '../types';
@@ -90,7 +91,7 @@ function walk(draft: GameState, unit: Unit, path: TileIndex[]): TileIndex[] {
   for (const next of path) {
     if (unit.movesLeft <= 0) break;
     if (canEnterTile(board, unit, next) !== null) break;
-    const cost = tileMoveCost(draft.map.tiles[next]);
+    const cost = tileMoveCost(draft.map.tiles[next], UNITS[unit.type].domain);
     if (cost === null) break; // canEnterTile has ruled this out already; it keeps the types honest
 
     unit.tile = next;

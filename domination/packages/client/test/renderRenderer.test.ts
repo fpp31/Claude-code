@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MAP_SIZES, neighbors, tileCoord, tileCount, tileIndex } from '@domination/shared';
+import { IMPROVEMENTS, IMPROVEMENT_IDS, MAP_SIZES, neighbors, tileCoord, tileCount, tileIndex, tilesInRange } from '@domination/shared';
 import type { PlayerView, TileIndex, TileView, UnitView } from '@domination/shared';
 import { sampleView } from '@domination/shared/testing';
 import { EMPTY_OVERLAY } from '../src/render/api';
@@ -1441,7 +1441,7 @@ describe('createMapRenderer: what it draws', () => {
     const improvementDraws = view.tiles.flatMap((tile, index) =>
       tile === null
         ? []
-        : (['farm', 'mine'] as const).flatMap((improvement) =>
+        : IMPROVEMENT_IDS.flatMap((improvement) =>
             (['normal', 'fogged'] as const).flatMap((look) =>
               terrainDraws(calls, sheet.get(`improvement.${improvement}`, undefined, { on: tile.terrain, look }), view, index),
             ),
@@ -1499,6 +1499,151 @@ describe('createMapRenderer: what it draws', () => {
     expect(second.filter((call) => call.method === 'rect').length).toBe(7);
     expect(terrainDraws(second, farm, view, SITE)).toEqual([]);
     expect(terrainDraws(second, sheet.get('ground.grassland', undefined, { variant: SITE }), view, SITE).length).toBe(1);
+  });
+
+  /**
+   * The sample view with water of Rome's: the coast tile west of the city is Rome's and has a net, a coast tile
+   * of Egypt's that is out of sight has one too, as it was last seen. (The sample view itself has no owned
+   * water in sight and no net.)
+   */
+  const NET = 6 * 14 + 1;
+  const FOGGED_NET = 2 * 14 + 12;
+  function viewWithNets(): PlayerView {
+    const view = sampleView();
+    expect(view.tiles[NET]).toMatchObject({ terrain: 'coast', feature: null, improvement: null, owner: null, visible: true });
+    expect(view.tiles[FOGGED_NET]).toMatchObject({ terrain: 'coast', feature: null, improvement: null, owner: 'p2', visible: false });
+    const tiles = view.tiles.slice();
+    tiles[NET] = { ...tiles[NET]!, owner: 'p1', improvement: 'fishingNet' };
+    tiles[FOGGED_NET] = { ...tiles[FOGGED_NET]!, improvement: 'fishingNet' };
+    return { ...view, tiles };
+  }
+
+  it('a netted coast tile: bare coast, the border strip, the net; fogged where out of sight; a tile whose net is new is painted again', () => {
+    const view = viewWithNets();
+    renderer.setView(view);
+    browser.runFrames();
+    const calls = terrain.calls;
+    const one = (sprite: Sprite, tile: TileIndex, what: string): number => {
+      const found = terrainDraws(calls, sprite, view, tile);
+      expect(found.length, what).toBe(1);
+      return found[0];
+    };
+    const none = (sprite: Sprite, tile: TileIndex, what: string): void => {
+      expect(terrainDraws(calls, sprite, view, tile).length, what).toBe(0);
+    };
+    /** The place in `calls` of the border strip painted for a tile (the one picture that is copied whole, at the corner of the tile's box). */
+    const stripAt = (tile: TileIndex): number => {
+      const origin = tileOrigin(tileCoord(tile, view));
+      const found = calls.flatMap((call, index) =>
+        call.method === 'drawImage' && call.args.length === 3 && call.args[1] === LAYER_PADDING + origin.px && call.args[2] === LAYER_PADDING + origin.py ? [index] : [],
+      );
+      expect(found.length, `the border strip of tile ${tile}`).toBe(1);
+      return found[0];
+    };
+
+    // In sight: the coast without its wave dashes, the strip of Rome's border, the net on top.
+    const ground = one(sheet.get('ground.coast', undefined, { bare: true }), NET, 'bare coast under the net');
+    none(sheet.get('ground.coast', undefined, { variant: NET }), NET, 'coast with wave dashes under the net');
+    const net = one(sheet.get('improvement.fishingNet', undefined, { on: 'coast' }), NET, 'the net');
+    none(sheet.get('improvement.fishingNet', undefined, { on: 'coast', look: 'fogged' }), NET, 'a fogged net on a tile in sight');
+    const strip = stripAt(NET);
+    expect(ground).toBeLessThan(strip);
+    expect(strip).toBeLessThan(net);
+    // The plain coast beside it keeps its dashes.
+    const PLAIN = 7 * 14 + 1;
+    expect(view.tiles[PLAIN]).toMatchObject({ terrain: 'coast', improvement: null, visible: true });
+    one(sheet.get('ground.coast', undefined, { variant: PLAIN }), PLAIN, 'plain coast with its wave dashes');
+
+    // Out of sight: each of the three is its fogged twin, and nothing bright is painted there.
+    const foggedGround = one(sheet.get('ground.coast', undefined, { bare: true, look: 'fogged' }), FOGGED_NET, 'fogged bare coast under the remembered net');
+    const foggedNet = one(sheet.get('improvement.fishingNet', undefined, { on: 'coast', look: 'fogged' }), FOGGED_NET, 'the fogged net');
+    none(sheet.get('improvement.fishingNet', undefined, { on: 'coast' }), FOGGED_NET, 'a bright net on a tile out of sight');
+    none(sheet.get('ground.coast', undefined, { bare: true }), FOGGED_NET, 'bright coast on a tile out of sight');
+    const foggedStrip = stripAt(FOGGED_NET);
+    expect(foggedGround).toBeLessThan(foggedStrip);
+    expect(foggedStrip).toBeLessThan(foggedNet);
+
+    // ---- A Fishing Boat finishes a net on another coast tile: only that field of that tile is different.
+    const SITE = 2 * 14 + 7; // coast in sight with all six neighbors on the map
+    expect(view.tiles[SITE]).toMatchObject({ terrain: 'coast', feature: null, improvement: null, visible: true });
+    const before = terrain.calls.length;
+    const tiles = view.tiles.slice();
+    tiles[SITE] = { ...tiles[SITE]!, improvement: 'fishingNet' };
+    const built = { ...view, tiles };
+    renderer.setView(built);
+    browser.runFrames();
+    const patch = terrain.calls.slice(before);
+    const brightNet = sheet.get('improvement.fishingNet', undefined, { on: 'coast' });
+    expect(terrainDraws(patch, brightNet, built, SITE).length).toBe(1);
+    expect(terrainDraws(patch, sheet.get('ground.coast', undefined, { bare: true }), built, SITE).length).toBe(1);
+    expect(terrainDraws(patch, sheet.get('ground.coast', undefined, { variant: SITE }), built, SITE).length).toBe(0);
+    // Wiped and painted: the boxes of the tile and of its six neighbors, and no other.
+    const around = [SITE, ...neighbors(SITE, view)];
+    expect(around.length).toBe(7);
+    const boxes = around.map((tile) => {
+      const origin = tileOrigin(tileCoord(tile, view));
+      return [LAYER_PADDING + origin.px, LAYER_PADDING + origin.py, TILE_WIDTH, TILE_HEIGHT].join();
+    });
+    expect(patch.filter((call) => call.method === 'rect').map((call) => call.args.join()).sort()).toEqual(boxes.slice().sort());
+    expect(patch.filter((call) => call.method === 'clip').length).toBe(1);
+    // Painted into them: the explored tiles of the two rings around the tile (some of these have never been seen).
+    const explored = tilesInRange(SITE, 2, view).filter((tile) => view.tiles[tile] !== null).length;
+    expect(explored).toBeLessThan(19);
+    expect(explored).toBeGreaterThan(7);
+    expect(patch.filter((call) => call.method === 'drawImage' && call.args.length === 9 && call.args[4] === TILE_HEIGHT).length).toBe(explored);
+    // The two nets that stood before are not painted again: they are further away than a neighbor.
+    expect(terrainDraws(patch, brightNet, built, NET)).toEqual([]);
+    expect(terrainDraws(patch, sheet.get('improvement.fishingNet', undefined, { on: 'coast', look: 'fogged' }), built, FOGGED_NET)).toEqual([]);
+  });
+
+  it('the frame draws a boat with a job dimmed and its sign right after it, left of the mast; another player\'s boat bright and without a sign', () => {
+    const base = viewWithNets();
+    const BOAT_TILE = 7 * 14 + 1; // plain coast south of the net: the boat is building the next one
+    const SCOUT_BOAT_TILE = 5 * 14;
+    const FOREIGN_TILE = 8 * 14 + 6;
+    for (const tile of [BOAT_TILE, SCOUT_BOAT_TILE, FOREIGN_TILE]) expect(base.tiles[tile]).toMatchObject({ terrain: 'coast', visible: true });
+    const turns = IMPROVEMENTS.fishingNet.turns;
+    const boats: UnitView[] = [
+      {
+        id: 'u1_b0at01', type: 'fishingBoat', owner: 'p1', tile: BOAT_TILE,
+        own: {
+          movesLeft: 2, foundCityError: 'cannotFoundCity',
+          job: { improvement: 'fishingNet', turnsWorked: 1, turnsTotal: turns, turnsLeft: turns - 1 },
+          jobOptions: [{ improvement: 'fishingNet', turns, error: 'unitBusy' }],
+        },
+      },
+      { id: 'u1_b0at02', type: 'scoutBoat', owner: 'p1', tile: SCOUT_BOAT_TILE, own: { movesLeft: 4, foundCityError: 'cannotFoundCity', job: null, jobOptions: [] } },
+      { id: 'u2_b0at03', type: 'fishingBoat', owner: 'p2', tile: FOREIGN_TILE, own: null },
+    ];
+    // The sample view's own Worker is at work too: it is taken out, so that every sign in the frame is a boat's.
+    const view: PlayerView = { ...base, units: [...base.units.filter((unit) => unit.type !== 'worker'), ...boats] };
+    renderer.setView(view);
+    renderer.zoomBy(-1); // the whole sample map on screen
+    const frame = nextFrame();
+    const zoom = 2;
+    const placeOn = (tile: TileIndex, sprite: Sprite): number[] => {
+      const box = renderer.tileScreenRect(tile);
+      return [box.left - BOX.left + sprite.offsetX * zoom, box.top - BOX.top + sprite.offsetY * zoom];
+    };
+    const indexOf = (sprite: Sprite): number =>
+      frame.findIndex((call) => call.method === 'drawImage' && call.args.length === 9 && call.args[1] === sprite.sx && call.args[2] === sprite.sy);
+
+    // The boat at work: the dimmed picture and no bright one, on its tile.
+    const dimmed = sheet.get('unit.fishingBoat', 'rome', { look: 'spent' });
+    expect(drawsOf(frame, dimmed).map((draw) => draw.slice(4, 6))).toEqual([placeOn(BOAT_TILE, dimmed)]);
+    expect(drawsOf(frame, sheet.get('unit.fishingBoat', 'rome')).length).toBe(0);
+    // One sign in the whole frame: the Worker's sign, at the Worker's place, drawn right after the boat.
+    const sign = sheet.get('marker.working');
+    expect(drawsOf(frame, sign).map((draw) => draw.slice(4, 6))).toEqual([placeOn(BOAT_TILE, sign)]);
+    expect(indexOf(sign)).toBe(indexOf(dimmed) + 1);
+    // The Scout Boat has moves and no job: bright. The other player's Fishing Boat: bright, in Egypt's colours, no sign.
+    expect(drawsOf(frame, sheet.get('unit.scoutBoat', 'rome')).map((draw) => draw.slice(4, 6))).toEqual([placeOn(SCOUT_BOAT_TILE, sheet.get('unit.scoutBoat', 'rome'))]);
+    const foreign = sheet.get('unit.fishingBoat', 'egypt');
+    expect(drawsOf(frame, foreign).map((draw) => draw.slice(4, 6))).toEqual([placeOn(FOREIGN_TILE, foreign)]);
+    expect(drawsOf(frame, sheet.get('unit.fishingBoat', 'egypt', { look: 'spent' })).length).toBe(0);
+    // No boat is drawn with the pale line of a unit among trees.
+    expect(drawsOf(frame, sheet.get('unit.fishingBoat', 'rome', { look: 'spent', rim: true })).length).toBe(0);
+    expect(drawsOf(frame, sheet.get('unit.scoutBoat', 'rome', { rim: true })).length).toBe(0);
   });
 
   it('the "at work" sign is drawn for a working unit, after the unit; the "builds nothing" sign for the sample city once its queue is emptied, after the units and before the banners; neither for foreign things', () => {

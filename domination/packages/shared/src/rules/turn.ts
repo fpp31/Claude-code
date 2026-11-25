@@ -35,8 +35,10 @@ export function isTurnComplete(state: GameState): boolean {
  *  1. runCities      For each player in seat order, for each of their cities
  *                    in founding order (the order of `state.cities`):
  *       a. economy = cityEconomy(state, city), computed ONCE, before growth
- *          (citizens are placed as its doc comment says: best tiles first,
- *          then food before production while the city would not grow).
+ *          (citizens are placed by the city's focus: Grow as before, Build
+ *          by production first). The focus is read as it stands at this
+ *          moment: a player may press "Grow first" and "Build first" back
+ *          and forth before End Turn, and only the last press counts.
  *       b. and c. are runCityTurn(city, economy, spawnTile) in rules/city.ts:
  *          ONE function, which the city panel's forecast (buildPlan) calls
  *          too, so the panel can never promise what this step does not do.
@@ -53,7 +55,8 @@ export function isTurnComplete(state: GameState): boolean {
  *            - a unit with populationCost > 0 needs population -
  *              populationCost >= 1 (checked AFTER step b, so a city that just
  *              grew to 2 can release its Settler in the same turn);
- *            - it needs a tile from findSpawnTile.
+ *            - it needs a tile from findSpawnTile (a boat: one of the city's
+ *              own water tiles).
  *          If either is missing the first entry STAYS FIRST and the city
  *          waits: the stored production stays, and no later entry is looked
  *          at, even one that is paid for and that nothing blocks. (The player
@@ -68,7 +71,8 @@ export function isTurnComplete(state: GameState): boolean {
  *          completion per city per turn, however much is stored.
  *  2. runJobs        For each player in seat order, for each of their units
  *                    in creation order (the order of `state.units`) that has
- *                    a job:
+ *                    a job (a Worker or a Fishing Boat; the step itself
+ *                    knows no unit types):
  *       a. If improvementSiteError(siteOfTile(state, unit.owner, unit.tile),
  *          job.improvement) is not null, the improvement can no longer be
  *          built there: job = null, and nothing else happens. (Today's rules
@@ -78,14 +82,15 @@ export function isTurnComplete(state: GameState): boolean {
  *          IMPROVEMENTS[job.improvement].turns: the tile's `improvement`
  *          becomes job.improvement (whatever it was), job = null, event
  *          'improvementBuilt' (it names the city on whose land the tile
- *          lies). The unit stays on the tile.
+ *          lies). The unit stays on the tile and is not used up.
  *                    This step comes AFTER runCities: a city's economy for
  *                    this turn was read before any job of this turn is
  *                    finished, so an improvement first counts when the NEXT
  *                    turn resolves (the same rule as 1a for a new citizen),
  *                    and a city gets exactly what its panel showed.
- *  3. refreshUnits   Every unit: movesLeft = UNITS[type].moves. A unit at
- *                    work gets them too and cannot use them (moveUnit).
+ *  3. refreshUnits   Every unit, on land and at sea: movesLeft =
+ *                    UNITS[type].moves. A unit at work gets them too and
+ *                    cannot use them (moveUnit).
  *  4. beginNextTurn  turn += 1; every player's endedTurn = false;
  *                    event 'turnStarted' (the last event).
  *  5. updateKnowledge(state) for all players.

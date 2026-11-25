@@ -11,8 +11,12 @@
  * ground's numbers (they are not added). A forest behaves the same on
  * grassland and on plains.
  *
- * An IMPROVEMENT (a farm, a mine: data/improvements.ts) is the one thing
- * whose numbers are added instead of replacing.
+ * An IMPROVEMENT (a farm, a mine, a fishing net: data/improvements.ts) is
+ * the one thing whose numbers are added instead of replacing.
+ *
+ * Since round 3 a unit moves on land or on the sea (its DOMAIN), and the
+ * terrain table has one movement cost for each. Features stand on land
+ * only, so a feature's cost is a land unit's cost.
  */
 
 import { IMPROVEMENTS } from './improvements';
@@ -24,16 +28,30 @@ export interface Yields {
   production: number;
 }
 
+/**
+ * Where a unit moves: on land or on the sea. Every unit type has one
+ * (UNITS[type].domain) and never changes it. The terrain table has one
+ * movement cost per domain.
+ */
+export type UnitDomain = 'land' | 'sea';
+
+/** Both domains, in a fixed order. */
+export const UNIT_DOMAINS: readonly UnitDomain[] = ['land', 'sea'];
+
 export type TerrainId = 'ocean' | 'coast' | 'grassland' | 'plains' | 'desert';
 export type FeatureId = 'forest' | 'hills' | 'mountains';
 
 export interface TerrainDef {
   /** Name shown to players. */
   name: string;
-  /** Water tiles cannot be entered by land units (all units are land units in phase 1). */
+  /** Water tiles are entered by sea units only, land tiles by land units only. */
   water: boolean;
-  /** Movement points needed to enter the tile; null = land units cannot enter. */
-  moveCost: number | null;
+  /**
+   * Movement points a unit of each domain needs to enter the tile; null =
+   * units of that domain cannot enter. A feature on the tile replaces the
+   * LAND cost (FeatureDef.moveCost); no feature stands on water.
+   */
+  moveCost: Record<UnitDomain, number | null>;
   yields: Yields;
   /** May a city be founded on this ground (when no feature says otherwise)? */
   canFoundCity: boolean;
@@ -42,7 +60,12 @@ export interface TerrainDef {
 export interface FeatureDef {
   /** Name shown to players. */
   name: string;
-  /** Movement points needed to enter the tile; null = land units cannot enter. Replaces the ground's cost. */
+  /**
+   * Movement points a LAND unit needs to enter the tile; null = land units
+   * cannot enter. For LAND units it replaces the ground's cost. A sea unit
+   * never meets it: no feature stands on water (`allowedOn`, and a table
+   * test), and land lets no sea unit in whatever stands on it.
+   */
   moveCost: number | null;
   /** Replaces the ground's yields. */
   yields: Yields;
@@ -61,11 +84,11 @@ export const TERRAIN_IDS: readonly TerrainId[] = ['ocean', 'coast', 'grassland',
 export const FEATURE_IDS: readonly FeatureId[] = ['forest', 'hills', 'mountains'];
 
 export const TERRAIN: Record<TerrainId, TerrainDef> = {
-  ocean:     { name: 'Ocean',     water: true,  moveCost: null, yields: { food: 1, production: 0 }, canFoundCity: false },
-  coast:     { name: 'Coast',     water: true,  moveCost: null, yields: { food: 2, production: 0 }, canFoundCity: false },
-  grassland: { name: 'Grassland', water: false, moveCost: 1,    yields: { food: 2, production: 1 }, canFoundCity: true },
-  plains:    { name: 'Plains',    water: false, moveCost: 1,    yields: { food: 1, production: 2 }, canFoundCity: true },
-  desert:    { name: 'Desert',    water: false, moveCost: 1,    yields: { food: 0, production: 1 }, canFoundCity: true },
+  ocean:     { name: 'Ocean',     water: true,  moveCost: { land: null, sea: 1 }, yields: { food: 1, production: 0 }, canFoundCity: false },
+  coast:     { name: 'Coast',     water: true,  moveCost: { land: null, sea: 1 }, yields: { food: 2, production: 0 }, canFoundCity: false },
+  grassland: { name: 'Grassland', water: false, moveCost: { land: 1, sea: null }, yields: { food: 2, production: 1 }, canFoundCity: true },
+  plains:    { name: 'Plains',    water: false, moveCost: { land: 1, sea: null }, yields: { food: 1, production: 2 }, canFoundCity: true },
+  desert:    { name: 'Desert',    water: false, moveCost: { land: 1, sea: null }, yields: { food: 0, production: 1 }, canFoundCity: true },
 };
 
 export const FEATURES: Record<FeatureId, FeatureDef> = {
@@ -105,12 +128,13 @@ export function tileIsWater(ground: Ground): boolean {
 }
 
 /**
- * Movement points a land unit needs to enter the tile, or null if it cannot
- * enter at all (water, mountains).
+ * Movement points a unit of this domain needs to enter the tile, or null if
+ * it cannot enter at all (a land unit: water, mountains; a sea unit: land).
+ * For a land unit a feature's cost replaces the ground's.
  */
-export function tileMoveCost(ground: Ground): number | null {
-  if (ground.feature !== null) return FEATURES[ground.feature].moveCost;
-  return TERRAIN[ground.terrain].moveCost;
+export function tileMoveCost(ground: Ground, domain: UnitDomain): number | null {
+  if (domain === 'land' && ground.feature !== null) return FEATURES[ground.feature].moveCost;
+  return TERRAIN[ground.terrain].moveCost[domain];
 }
 
 /**

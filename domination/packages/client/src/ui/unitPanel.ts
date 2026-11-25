@@ -10,9 +10,10 @@ import { myPlayer, ordersClosed, selectedUnit } from '../game/selectors';
 import { unitTileText } from '../game/tileInfo';
 import type { AppState, Store } from '../state/store';
 import { setCivColors } from './civColors';
-import { h, setBar, setDisabled, setHidden, setText } from './dom';
+import { h, setAttribute, setBar, setClass, setDisabled, setHidden, setText } from './dom';
 import type { Unmount } from './dom';
 import { unitPanelButtons } from './panelButtons';
+import { ASKS_FOR_MS } from './queuePresses';
 import { TEST_IDS } from './testIds';
 import { improvementBonusText, jobProgressText, movesText, progressFraction } from './texts';
 
@@ -44,8 +45,11 @@ interface JobRow {
  *    empty, or the unit has a job): the job block (unitJobs). Its first
  *    line, while no order can be given at all, says why (unitJobsClosed:
  *    no connection, turn ended). Without a job it holds one button per
- *    improvement (`job-start-<id>`: "Build Farm (4 turns)" and what it
- *    adds) with the reason under a button that is greyed out
+ *    improvement the unit's type builds (`job-start-<id>`: "Build Farm (4
+ *    turns)" and what it adds; a Worker has two, a Fishing Boat one: the
+ *    rows are built for every improvement there is and shown for the job
+ *    options the server sends) with the reason under a button that is
+ *    greyed out
  *    (`job-reason-<id>`), or ONE sentence over the buttons when all of
  *    them are impossible for the same reason (unitJobsReason). While the
  *    first line says that no order can be given, these reasons are left
@@ -53,8 +57,9 @@ interface JobRow {
  *    phone's panel without scrolling.
  *    Click: controller.startJob(id). With a job it holds the progress
  *    ("Building a Farm: 3 turns left", unitJob), a bar, and "Stop work"
- *    (jobStop) with, while it can be pressed, the warning "Stopping loses
- *    the work done so far." (jobStopWarning).
+ *    (jobStop) with, while it can be pressed, the small print that says
+ *    what stopping loses ("Stopping loses 3 turns of work.",
+ *    jobStopWarning).
  *    Click: controller.stopJob();
  *  - one line about the tile the unit stands on (unitTile; unitTileText in
  *    game/tileInfo.ts, the words of the tile card);
@@ -71,6 +76,18 @@ interface JobRow {
  * up where the map was, on a phone where the tapped unit itself stood, and
  * the second tap of a double tap would land on one of them. Nothing is
  * greyed for that half second.
+ *
+ * "STOP WORK" ASKS ONCE before it throws turns of work away (round 3). The
+ * rule is the controller's (Controller.stopJob, with the clock and the
+ * guards); the panel prints what unitPanelButtons answers for
+ * controller.askingToStop(): after the first press the button reads "Tap
+ * again to stop" in the gold of a button that asks (the class `armed`,
+ * data-asking="true") and the small print "3 turns will be lost.". The
+ * button keeps its top and its right edge and grows to the left only, so
+ * the second press lands on it. The question ends after four seconds
+ * without anything in the store changing, so the panel keeps one timer that
+ * prints it again then. A job with no turn worked yet is stopped by one
+ * press: nothing would be lost.
  *
  * GREYING (one rule for every button that gives an order): which button
  * is greyed out, and the sentence that says why, is the answer of one plain
@@ -130,12 +147,42 @@ export function mountUnitPanel(parent: HTMLElement, store: Store, controller: Co
   const jobProgress = h('div', { className: 'panel-stat', testId: TEST_IDS.unitJob });
   const jobFill = h('div', { className: 'bar-fill production' });
   const jobBar = h('div', { className: 'bar' }, jobFill);
+
+  // ---- "Stop work" asks once ----
+  /** Runs while the button asks: it brings the button's words back when the question has run out of time. */
+  let askTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function stopAskTimer(): void {
+    if (askTimer !== null) clearTimeout(askTimer);
+    askTimer = null;
+  }
+
+  /**
+   * Prints the panel again after `wait` milliseconds. The question ends by
+   * time alone, without any change of the store, so nothing else would
+   * take "Tap again to stop" off the button.
+   */
+  function printWhenAskingEnds(wait: number): void {
+    stopAskTimer();
+    askTimer = setTimeout(() => {
+      askTimer = null;
+      update(store.get());
+      // A browser's timer may run a moment early by the controller's clock: the button then still asks. Look again shortly.
+      if (controller.askingToStop()) printWhenAskingEnds(50);
+    }, wait);
+  }
+
   const stopButton = h('button', {
-    className: 'button',
-    text: 'Stop work',
+    className: 'button job-stop',
     testId: TEST_IDS.jobStop,
-    attributes: { title: 'Stop this work (what was done so far is lost)' },
-    onClick: () => controller.stopJob(),
+    attributes: { title: 'Stop this work (the turns worked are lost)', 'data-asking': 'false' },
+    onClick: () => {
+      // A press that was sent shows when the server's view comes back, and an ignored one never. Only the
+      // question changes the panel without the store: print it now, and again when its four seconds are over.
+      if (controller.stopJob() !== 'asked') return;
+      printWhenAskingEnds(ASKS_FOR_MS);
+      update(store.get());
+    },
   });
   const stopWarning = h('p', { className: 'panel-hint', testId: TEST_IDS.jobStopWarning });
   const stopRow = h('div', { className: 'job-stop-row' }, stopWarning, stopButton);
@@ -177,7 +224,10 @@ export function mountUnitPanel(parent: HTMLElement, store: Store, controller: Co
     const unit = selectedUnit(state);
     const view = state.game?.view ?? null;
     /** What is greyed out and why: the panel only prints it. Null for a unit that is not the player's own. */
-    const buttons = unit === null || view === null ? null : unitPanelButtons(view, unit, ordersClosed(state));
+    const buttons =
+      unit === null || view === null ? null : unitPanelButtons(view, unit, ordersClosed(state), controller.askingToStop());
+    // The question is over (answered, taken back, another unit, no panel): nothing is left to wait for.
+    if (buttons?.jobs?.stop?.asking !== true) stopAskTimer();
     if (unit === null || view === null || unit.own === null || buttons === null) {
       setHidden(panel, true);
       shownUnit = null;
@@ -227,6 +277,9 @@ export function mountUnitPanel(parent: HTMLElement, store: Store, controller: Co
         setBar(jobFill, progressFraction(job.turnsWorked, job.turnsTotal));
       }
       if (block.stop !== null) {
+        setText(stopButton, block.stop.label);
+        setClass(stopButton, 'armed', block.stop.asking);
+        setAttribute(stopButton, 'data-asking', block.stop.asking ? 'true' : 'false');
         setDisabled(stopButton, block.stop.disabled);
         setText(stopWarning, block.stop.warning ?? '');
         setHidden(stopWarning, block.stop.warning === null);
@@ -249,6 +302,7 @@ export function mountUnitPanel(parent: HTMLElement, store: Store, controller: Co
 
   return () => {
     unsubscribe();
+    stopAskTimer();
     panel.remove();
   };
 }

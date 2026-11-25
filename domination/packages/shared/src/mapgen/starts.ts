@@ -4,7 +4,9 @@
  * The idea in three sentences:
  *  1. Find every SITE: a tile where a capital could legally be founded
  *     (rules H2, H4, H5 of generateMap), and give it a score for the land
- *     around it (the score of rule S3).
+ *     around it (the score of rule S3). The caller may strike sites off
+ *     the list (`allowed`): the generator keeps only those with the sea in
+ *     reach, which is how rule H6 is kept.
  *  2. Try to put all players on ONE landmass, on good sites of similar
  *     score, as far apart as that landmass allows. This is the only way a
  *     map that is not crowded gets its starts, and it keeps S1-S3.
@@ -60,6 +62,15 @@ interface Home {
  *
  * @param crowded  more players than the map size recommends: rules S1-S3
  *                 are only aims then
+ * @param allowed  allowed[tile]: may the tile be a start at all? The sites
+ *                 are filtered by it once; the score, "comfortable", the
+ *                 fairness steps, the spacing and the crowded fall-back do
+ *                 not know of it. The generator hands in the tiles that
+ *                 have the sea in reach (rule H6, sitesBySea in
+ *                 startNeeds.ts). It is an argument and not a line inside
+ *                 findSites, so that the choosing of starts can still be
+ *                 tried on small hand-drawn land that has no sea where the
+ *                 example wants its starts. null: every site is allowed
  */
 export function placeStarts(
   grid: Grid,
@@ -67,9 +78,10 @@ export function placeStarts(
   playerCount: number,
   crowded: boolean,
   rng: RngState,
+  allowed: readonly boolean[] | null = null,
 ): TileIndex[] | null {
   const areas = walkableAreas(grid, map);
-  const sites = findSites(grid, map, areas.regionOf, areas.sizes);
+  const sites = findSites(grid, map, areas.regionOf, areas.sizes).filter((site) => allowed === null || allowed[site.tile]);
 
   // The landmasses that may become the one home of all players, largest first.
   const homes: Home[] = areas.sizes
