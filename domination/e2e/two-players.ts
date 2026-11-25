@@ -152,7 +152,9 @@
  *      water tile the rule names, and found with "Show me".
  *  39. It sails: only water lights up; a Warrior sent onto the coast goes
  *      nowhere, and the tile's card says why.
- *  40. It builds a net; at work it is drawn so; a Worker is offered no net.
+ *  40. It builds a net; at work it is drawn dimmed and carries the sign of
+ *      a unit at work (two looks at the map's own pixels); a Worker is
+ *      offered no net.
  *  41. "Stop work" asks once: the whole course with a mouse, the short one
  *      for the Worker and with a finger at two phone sizes.
  *  42. The net is finished; a citizen gathers from it, a gold token marks
@@ -4378,15 +4380,28 @@ interface PartOfTile {
   bottom: number;
 }
 
-/** The middle of a tile's box: where a unit is drawn. (The corners of the box belong to the tiles around it.) */
-const MIDDLE_OF_TILE: PartOfTile = { left: 0.2, top: 0.2, right: 0.8, bottom: 0.8 };
-
 /**
  * The top point of a tile: where the gold token of a tile that citizens
  * gather from is drawn. (Not the whole box: its lower corners are the top
  * points of the two tiles below, with their tokens.)
  */
 const TOP_POINT_OF_TILE: PartOfTile = { left: 0.25, top: 0, right: 0.75, bottom: 0.4 };
+
+/**
+ * Two parts of the tile a Fishing Boat floats on, alone, for the looks at
+ * a boat at work (steps 40 and 41). The numbers are the art's own: a tile's
+ * box is 26 x 28 art pixels, and rows 6 to 21 of it belong to the tile's own
+ * hexagon from edge to edge.
+ *  - BOAT_WITHOUT_ITS_SIGN: from the mast to the bow, sail and hull, in the
+ *    rows the tile has to itself. A boat at work is drawn dimmed there, and
+ *    its sign does not reach that far.
+ *  - INSIDE_OF_THE_WORK_SIGN: the sign of a unit at work is a white square
+ *    of 7 x 7 with a dark hammer, at (1, 7) of the box. Its inside lies
+ *    clear of the white ring of a selected tile (columns 1 and 2), of the
+ *    boat and of its pennant: with no sign there, it is water.
+ */
+const BOAT_WITHOUT_ITS_SIGN: PartOfTile = { left: 9 / 26, top: 6 / 28, right: 24 / 26, bottom: 21 / 28 };
+const INSIDE_OF_THE_WORK_SIGN: PartOfTile = { left: 3 / 26, top: 8 / 28, right: 7 / 26, bottom: 13 / 28 };
 
 /**
  * The picture of a part of a tile as the map shows it right now: the
@@ -4429,6 +4444,30 @@ function differingPixels(a: number[], b: number[]): number {
     if (a[at] !== b[at] || a[at + 1] !== b[at + 1] || a[at + 2] !== b[at + 2] || a[at + 3] !== b[at + 3]) differing += 1;
   }
   return differing;
+}
+
+/** How many pixels of a picture (pictureOfTile) are pure white, the colour of the map's signs and rings. */
+function whitePixels(picture: number[]): number {
+  let white = 0;
+  for (let at = 0; at < picture.length; at += 4) {
+    if (picture[at] === 255 && picture[at + 1] === 255 && picture[at + 2] === 255 && picture[at + 3] === 255) white += 1;
+  }
+  return white;
+}
+
+/** The two parts of a boat's tile that say how the boat is drawn: the boat itself, and the place of its "at work" sign. */
+interface BoatPicture {
+  boat: number[];
+  sign: number[];
+}
+
+/**
+ * The picture of a tile a boat floats on (BOAT_WITHOUT_ITS_SIGN and
+ * INSIDE_OF_THE_WORK_SIGN). The mouse must rest off the map, so that no
+ * tile is outlined.
+ */
+async function pictureOfABoat(page: any, tile: TileIndex): Promise<BoatPicture> {
+  return { boat: await pictureOfTile(page, tile, BOAT_WITHOUT_ITS_SIGN), sign: await pictureOfTile(page, tile, INSIDE_OF_THE_WORK_SIGN) };
 }
 
 /**
@@ -5146,6 +5185,11 @@ async function checkGrowAndBuild(round: ThirdRound): Promise<void> {
     check(row.includes(queueRowText(entry, index)), `row ${index + 1} of the queue says when it is ready under the new choice (it says "${row}"; queueRowText: "${queueRowText(entry, index)}")`);
   }
   check(sameBlock(laptopBefore, await focusBlockLook(ada)), 'the block has the same height and the same place after the press as before it');
+  // (After every later press on the laptop the height is looked at again. The place may change: the head grows by the sentence of an ended turn, and a floating panel lets go of its height with a row.)
+  const blockIsAsTallAsBefore = async (after: string): Promise<void> => {
+    const now = await focusBlockLook(ada);
+    check(Math.abs(now.row.height - laptopBefore.row.height) < 0.5, `${after} the block is as tall as before the first press (${laptopBefore.row.height} pixels then, ${now.row.height} now)`);
+  };
 
   // Outside the open panel one line says it, for the owner alone: the tile information of the city.
   await showHoverBox(ada, city.tile);
@@ -5206,10 +5250,12 @@ async function checkGrowAndBuild(round: ThirdRound): Promise<void> {
   // nothing.
   await ada.click(byTestId(focusId('grow')));
   await waitForFocus(ada, 'grow');
+  await blockIsAsTallAsBefore('after a press on "Grow first"');
   const doubleMark = framesOf(ada).sent.length;
   await ada.dblclick(byTestId(focusId('build')));
   await waitForFocus(ada, 'build');
   await ada.waitForTimeout(400); // the answer to a second order would be here by now
+  await blockIsAsTallAsBefore('after a double-click on "Build first"');
   check(
     isDeepStrictEqual(ordersSince(ada, doubleMark).map((order) => order.type), ['setCityFocus']) && focusOf(await viewOf(ada)) === 'build',
     `a double-click on "Build first" leaves it chosen and sends one order (it sent ${JSON.stringify(ordersSince(ada, doubleMark))})`,
@@ -5252,11 +5298,7 @@ async function checkGrowAndBuild(round: ThirdRound): Promise<void> {
     isDeepStrictEqual(ordersSince(ada, quietMark), [{ type: 'setCityFocus', cityId: city.id, focus: 'grow' }]),
     `the same press 0.7 s later sends one order (it sent ${JSON.stringify(ordersSince(ada, quietMark))})`,
   );
-  const laptopAfter = await focusBlockLook(ada);
-  check(
-    Math.abs(laptopAfter.row.height - laptopBefore.row.height) < 0.5,
-    `after all these presses the block is as tall as before the first (${laptopBefore.row.height} pixels then, ${laptopAfter.row.height} now)`,
-  );
+  await blockIsAsTallAsBefore('after a row was taken out and "Grow first" was pressed,');
 
   // Through a link with delay: "Build first", then "Warrior" 50 ms later,
   // while the answer to the first is on its way. The add waits for that
@@ -5541,9 +5583,9 @@ async function checkTheBoatSails(round: ThirdRound, boat: UnitView): Promise<Til
  * Step 40: the Fishing Boat's one job.
  *
  * @param site  a coast tile of Rome's land without a net; the boat stands on it with a move left
- * @returns the picture of the middle of that tile while the boat is NOT at work (step 41 compares with it)
+ * @returns the picture of the boat on that tile while it is NOT at work (step 41 compares with it)
  */
-async function checkTheBoatBuildsANet(round: ThirdRound, boat: UnitView, site: TileIndex): Promise<number[]> {
+async function checkTheBoatBuildsANet(round: ThirdRound, boat: UnitView, site: TileIndex): Promise<BoatPicture> {
   const { ada, ben, city } = round;
   const net = IMPROVEMENTS.fishingNet;
   step(`40. The Fishing Boat builds a net: "Build ${net.name} (${countOf(net.turns, 'turn', 'turns')})"; at work it is drawn so and cannot be sent anywhere; a Worker is offered no net, and Ben reads nothing of the job`);
@@ -5561,7 +5603,7 @@ async function checkTheBoatBuildsANet(round: ThirdRound, boat: UnitView, site: T
   );
   check((unitOf(await viewOf(ada), boat.id).own?.movesLeft ?? 0) > 0, 'the boat has a move left, so it is not drawn dimmed yet (if not, the look at how a boat at work is drawn checks less)');
   await ada.hover(start); // the mouse rests on the panel: no tile of the map is outlined
-  const idlePicture = await pictureOfTile(ada, site, MIDDLE_OF_TILE);
+  const idlePicture = await pictureOfABoat(ada, site);
 
   await waitUntilSince(ada, selectedAt, SELECTION_PAUSE_MS);
   await ada.click(start);
@@ -5582,10 +5624,20 @@ async function checkTheBoatBuildsANet(round: ThirdRound, boat: UnitView, site: T
   check(!idleUnits(atWork).some((unit) => unit.id === boat.id), 'and it is not counted among the units that can still move');
   const endTurnWords = await textOf(ada, TEST_IDS.endTurnButton);
   for (const sentence of todoHints(atWork)) check(endTurnWords.includes(sentence), `the End Turn button says "${sentence}" (it says "${endTurnWords}")`);
-  const workPicture = await pictureOfTile(ada, site, MIDDLE_OF_TILE);
+  // On the map: dimmed, as every unit that will not move this turn, and
+  // with the sign of a unit at work. Two looks, at two parts of the tile:
+  // one may be there without the other. (Ten pixels are asked for: the
+  // inside of the sign has fifteen white ones where the map is drawn at
+  // its smallest, and a boat far more than that.)
+  const workPicture = await pictureOfABoat(ada, site);
   check(
-    differingPixels(idlePicture, workPicture) > 0,
-    `on the map the boat at work is drawn another way than the boat with a move left: dimmed, with the sign (${differingPixels(idlePicture, workPicture)} pixels of the middle of its tile differ)`,
+    differingPixels(idlePicture.boat, workPicture.boat) >= 10,
+    `on the map the boat at work is drawn dimmed, another way than the boat with a move left (${differingPixels(idlePicture.boat, workPicture.boat)} pixels of its sail and hull differ)`,
+  );
+  check(
+    whitePixels(workPicture.sign) - whitePixels(idlePicture.sign) >= 10 && whitePixels(workPicture.sign) < workPicture.sign.length / 4,
+    `and it carries the sign of a unit at work, a white square with a dark hammer, left of its mast ` +
+      `(white pixels inside the sign's place: ${whitePixels(idlePicture.sign)} with a move left, ${whitePixels(workPicture.sign)} of ${workPicture.sign.length / 4} at work)`,
   );
 
   // A Worker's panel is as it was: its two jobs, and no net.
@@ -5745,9 +5797,9 @@ async function stopWorkAsksThenStops(page: any, finger: boolean, unitId: UnitId,
  * Step 41: "Stop work" asks once before it throws work away.
  *
  * @param site         the tile the Fishing Boat works on (the job has no turn worked yet)
- * @param idlePicture  the middle of that tile as it was drawn before the job began
+ * @param idlePicture  the boat on that tile as it was drawn before the job began
  */
-async function checkStopWorkAsksOnce(round: ThirdRound, boat: UnitView, site: TileIndex, idlePicture: number[]): Promise<void> {
+async function checkStopWorkAsksOnce(round: ThirdRound, boat: UnitView, site: TileIndex, idlePicture: BoatPicture): Promise<void> {
   const { ada, phone } = round;
   step('41. "Stop work" asks once: with no turn worked one press stops; after a turn the first press only asks, in gold, and the button stays under the pointer; four seconds later it no longer asks; a second press stops');
   const stop = byTestId(TEST_IDS.jobStop);
@@ -5764,10 +5816,12 @@ async function checkStopWorkAsksOnce(round: ThirdRound, boat: UnitView, site: Ti
     isDeepStrictEqual(ordersSince(ada, atOnce).map((order) => order.type), ['stopJob']),
     'with no turn worked yet one press on "Stop work" stops the work: nothing is asked',
   );
-  const stoppedPicture = await pictureOfTile(ada, site, MIDDLE_OF_TILE);
+  // (The mouse still rests on the panel, where "Stop work" was: no tile of the map is outlined.)
+  const stoppedPicture = await pictureOfABoat(ada, site);
   check(
-    differingPixels(idlePicture, stoppedPicture) === 0,
-    `with its work stopped the boat is drawn as before the work began (${differingPixels(idlePicture, stoppedPicture)} pixels of the middle of its tile differ)`,
+    differingPixels(idlePicture.boat, stoppedPicture.boat) === 0 && differingPixels(idlePicture.sign, stoppedPicture.sign) === 0,
+    `with its work stopped the boat is drawn as before the work began, no longer dimmed and without the sign ` +
+      `(pixels that differ: ${differingPixels(idlePicture.boat, stoppedPicture.boat)} of its sail and hull, ${differingPixels(idlePicture.sign, stoppedPicture.sign)} in the sign's place)`,
   );
   await ada.waitForTimeout(GUARD_PAUSE_MS);
   await ada.click(byTestId(startNet));
@@ -5861,8 +5915,13 @@ async function checkStopWorkAsksOnce(round: ThirdRound, boat: UnitView, site: Ti
     await waitForView(phone, 'the Fishing Boat to have its job again', (now) => unitOf(now, boat.id).own?.job != null);
     // The boat has just begun again: one press that counted would stop it at
     // once. A double tap on the boat, where its own "Stop work" comes up
-    // under the finger, does not.
-    if (size === LOW_WINDOW) await doublePressOnTheWorker(phone, true, site, boat.id);
+    // under the finger, does not. (First the 0.6 s go by in which "Stop
+    // work" does nothing because the job has only just appeared: what holds
+    // the second tap back after that is the selection alone.)
+    if (size === LOW_WINDOW) {
+      await phone.waitForTimeout(GUARD_PAUSE_MS);
+      await doublePressOnTheWorker(phone, true, site, boat.id);
+    }
   }
   await benIsShownOnlyWhatIsInHisSight(round, 'after step 41');
 }
